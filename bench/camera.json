@@ -1,0 +1,9 @@
+{
+  "space": "glTF (metres, y up), as Source 2 Viewer exports de_cache.glb",
+  "position": [-3.9884449218749918, 42.57119374999999, 29.6179130859375],
+  "quaternion_xyzw": [-0.028732906760167987, -0.5140938229617431, -0.017234589429394986, 0.8570793021587276],
+  "vertical_fov_degrees": 73.73979529168804,
+  "near": 0.1016,
+  "far": 762,
+  "source": "show-me-the-nades .verify-runs/framework-bench-20261025 (the web app's orbit camera on de_cache)"
+}

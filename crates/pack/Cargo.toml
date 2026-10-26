@@ -1,0 +1,13 @@
+[package]
+name = "nades-pack"
+description = "The per-map pack: GPU-ready geometry, BC textures and lightmaps, memory-mapped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+memmap2.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true

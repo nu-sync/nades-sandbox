@@ -1,0 +1,19 @@
+[package]
+name = "nades-render"
+description = "The renderer: wgpu device bring-up, the map's passes, effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nades-pack.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal.workspace = true
+objc2-quartz-core.workspace = true

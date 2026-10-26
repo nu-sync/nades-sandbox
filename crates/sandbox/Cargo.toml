@@ -1,0 +1,27 @@
+[package]
+name = "nades-sandbox"
+description = "The native 3D sandbox: a CS2 map, its pro lineups, and the grenades they throw"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "nades-sandbox"
+path = "src/main.rs"
+
+[dependencies]
+nades-render.workspace = true
+nades-pack.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+egui = { workspace = true, features = ["default_fonts"] }
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+anyhow.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+png.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

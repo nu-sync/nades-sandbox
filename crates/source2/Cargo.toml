@@ -1,0 +1,13 @@
+[package]
+name = "nades-source2"
+description = "Readers for CS2's own files: VPK archives and VTEX textures (BC blocks and their mip chains)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+lz4_flex.workspace = true
+memmap2.workspace = true
+thiserror.workspace = true

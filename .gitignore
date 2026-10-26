@@ -1,0 +1,25 @@
+/target
+**/target
+# Valve's assets and anything derived from them stay on this machine (packs live in ~/.cache/nades/packs)
+*.pack
+*.glb
+*.vtex_c
+*.duckdb
+*.duckdb.wal
+/.runs/
+
+# Historical experiments are kept locally; the public preview is the production workspace.
+/prototypes/
+# Local credentials, Python caches and editor metadata.
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+# Extracted game archives and resources.
+*.vpk
+*.vmat_c
+*.vmdl_c
+*.vwrld_c

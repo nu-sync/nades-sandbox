@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# the swarm's native spike and the Bevy build of M1 (prototypes/) have their own workspaces
+exclude = ["prototypes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# egui 0.37 needs 1.95
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+nades-render = { path = "crates/render" }
+nades-pack = { path = "crates/pack" }
+nades-source2 = { path = "crates/source2" }
+nades-data = { path = "crates/data" }
+nades-packer = { path = "crates/packer" }
+
+# GPU and window: one wgpu for the renderer and egui (egui-wgpu 0.37 is built on wgpu 30)
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal", "dx12"] }
+winit = "0.30.13"
+egui = "0.37"
+egui-wgpu = { version = "0.37", default-features = false, features = ["winit"] }
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
+pollster = "1"
+# Metal: GPU buffers over the pack's own mapped pages (crates/render, map.rs) and the window's first drawable (lib.rs)
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "block2", "MTLAllocation", "MTLBuffer", "MTLDevice", "MTLDrawable", "MTLResource", "MTLTexture"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "objc2-metal"] }
+
+# data and assets
+duckdb = { version = "~1.20000.0", features = ["bundled"] } # the same DuckDB as nades, or its database will not open
+memmap2 = "0.9.12"
+postcard = { version = "1.1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image-webp = "0.2.4"
+lz4_flex = "0.14"
+crc32fast = "1.5"
+meshopt = "0.7"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+rayon = "1.12"
+anyhow = "1"
+png = "0.18"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+
+# a debug build that still loads a map in a sensible time
+[profile.dev.package."*"]
+opt-level = 2
