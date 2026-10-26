@@ -1,9 +1,13 @@
 //! The renderer: the GPU device, and a pack's map drawn in CS2's look ([`map`]): its materials, its baked light
 //! (irradiance, directional irradiance and sun shadows), the sky and the 3D skybox, fog, then exposure, bloom, the tone
-//! curve and the colour lookup table ([`post`]). [`view`] holds the camera. The smoke arrives in M3 (SPEC.md).
+//! curve and the colour lookup table ([`post`]). Over it, the shown throw: its flight, bursts and fire ([`throw`]) and
+//! its smoke ([`smoke`]). [`view`] holds the camera.
 
 pub mod map;
+pub mod memory;
 pub mod post;
+pub mod smoke;
+pub mod throw;
 pub mod view;
 
 pub use view::View;
@@ -94,6 +98,8 @@ impl Gpu {
 pub struct EarlyFrame {
     pub texture: wgpu::Texture,
     present: Box<dyn FnOnce()>,
+    #[cfg(target_os = "macos")]
+    drawable: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_quartz_core::CAMetalDrawable>>,
 }
 
 impl EarlyFrame {
@@ -125,7 +131,8 @@ impl EarlyFrame {
                     // the frame clears it
                     wgpu::TextureUses::UNINITIALIZED,
                 );
-                Some(Self { texture, present: Box::new(move || drawable.present()) })
+                let shown = drawable.clone();
+                Some(Self { texture, present: Box::new(move || shown.present()), drawable })
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -133,6 +140,25 @@ impl EarlyFrame {
             let _ = (device, surface, config);
             None
         }
+    }
+
+    /// Calls `seen` (on another thread) once the window server has put this frame on the display, with how long ago
+    /// that was in ms, or None when it skipped the frame; never where that cannot be known. Call before
+    /// [`EarlyFrame::present`].
+    pub fn when_on_screen(&self, seen: impl Fn(Option<f64>) + Send + 'static) {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2_metal::MTLDrawable;
+            let handler = block2::RcBlock::new(move |drawable: std::ptr::NonNull<objc2::runtime::ProtocolObject<dyn MTLDrawable>>| {
+                // SAFETY: Metal hands the handler the drawable it was added to, alive for the call
+                let at = unsafe { drawable.as_ref() }.presentedTime();
+                seen((at > 0.0).then(|| (objc2_quartz_core::CACurrentMediaTime() - at) * 1e3));
+            });
+            // SAFETY: the block is valid for the call, and Metal copies it to keep it
+            unsafe { self.drawable.addPresentedHandler(block2::RcBlock::as_ptr(&handler)) };
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = seen;
     }
 
     /// Shows the frame; call once the GPU has finished drawing it.

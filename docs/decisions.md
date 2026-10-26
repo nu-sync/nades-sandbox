@@ -292,3 +292,305 @@ swarm runs on 2026-10-25: an Apple M5 Max (18 cores, 128 GB), macOS 26.5, Chrome
   Keep game files, exports, packs, databases, local benchmark outputs and historical prototypes local.
   Earlier entries refer to the local prototype paths as historical evidence; those experiments are not
   distributed in this preview.
+
+
+## MCP v1 · One application owner, inspectable state, and isolated headless rendering
+
+- **Decision:** a separate `nades-mcp` stdio process manages one window through private child pipes and typed
+  `nades-control` commands. The winit event loop remains the sole owner of view mutations. A new process receives a
+  new instance ID; frame IDs and applied/presented revisions make tool results inspectable.
+- **Why:** CLI wrappers cannot change or inspect a running camera. An embedded-only MCP cannot restart itself after
+  app shutdown. Sockets add discovery and stale endpoint ownership that v1 does not need: manual attachment is out of
+  scope. Private pipes isolate simultaneous agents without introducing a network listener.
+- **User choices:** the first release exposes nine tools; map changes may restart; only agent-created windows are
+  controlled. MCP disconnect hands a ready window to the user, with no later reattachment. Incomplete launches and
+  offscreen workers are cleaned up. Persistent headless sessions are future work; headless screenshots are in v1.
+- **Headless contract:** a screenshot records its camera, dimensions and material-animation time. `view_render` uses
+  those same inputs without changing the live window. GPU exposure currently has no settling history, but animated
+  material masks depend on time, so matching the camera alone is insufficient for a meaningful pixel comparison.
+- **Observability:** status describes actual scene/camera/viewport and suggests next tools. Metrics distinguish CPU
+  submission wall time from GPU time; unavailable GPU measurement is null. Images are native MCP content and omitted
+  from textual logs. The spec and repeatable verifier, rather than successful compilation alone, define completion.
+- **Contract and evidence:** [MCP specification](mcp-spec.md). Real acceptance reports are local under `.runs/mcp-*`;
+  the specification lists all nine per-tool checks and the overall journeys. No asset bytes are published.
+- **Principles that changed the design:**
+  - **Boundary Discipline** and **Foundational Thinking:** shared typed commands/state live outside MCP and winit;
+    external input is validated before dispatch, and the event loop owns mutations.
+  - **Laziness Protocol:** private child pipes avoid endpoint discovery, a broker and manual-attachment state.
+  - **Make Operations Idempotent:** repeated start on the current map reuses the child; repeated stop is harmless.
+  - **Build the Lever**, **Test Behavior Not Implementation** and **Prove It Works:** the reusable verifier drives
+    the real stdio protocol, validates advertised schemas and inspects actual process exits and rendered pixels.
+  - **Fix Root Causes:** the database worker is cancelled and joined before native global teardown, rather than
+    suppressing the crash or bypassing normal shutdown.
+  - **Explain the Number:** CPU samples and native memory readings retain their measured definitions; GPU time stays
+    unavailable, and repeat-render tolerances come from pinned-input pixel comparisons.
+
+### MCP v1 rendering reproducibility · measured pixel tolerance
+
+The repeated-headless criterion is a maximum channel error of one 8-bit display level and mean channel error at most
+0.001, with identical binary, map, pose, FOV, size and material time. Literal PNG or pixel hash equality is not promised.
+In the first acceptance run, two fresh offscreen processes differed in 101 of 8,201,920 RGBA channels (84 pixels),
+maximum one level, mean 0.000012314. Five additional renders with pinned binaries and identical inputs yielded three
+with that same tiny difference and two pixel-identical results. The difference is confined to a small image region;
+its precise driver/shader cause has not been isolated, so this is a measured acceptance envelope, not a claimed fix.
+The independent live/headless gate remains mean error ≤1 level, and exact state/camera/frame provenance is checked
+separately. Inputs, binary/image SHA256s, stage marks, load averages and comparisons are in
+`.runs/mcp-1793045083732279000/repeat-sampling.json`. A different camera, timestamp, image size or substantial pixel
+drift cannot satisfy the repeat criterion.
+
+## S13 · show-me-the-nades as a library, without its CLI's crates
+
+- **Decision:** show-me-the-nades gains a library target (`src/lib.rs`: `extract`, `physics`, `places`, `tracks`, and a
+  new `voxels`), and the sandbox depends on it by path with `default-features = false`. Its CLI's own dependencies
+  (Chrome, clap, DuckDB, tokio and the rest) move behind a default `cli` feature that the `nades` binary requires
+  (`required-features`), so the binary and its default build are unchanged.
+- **Why:** the voxel log's decoder (`tracks::voxel_frames`) and the track types (`PathPoint`, `Flame`) live there, and
+  copying them would let the two drift. Without the feature split the dependency would bring 195 crates, 118 of them
+  chromiumoxide's; with it, 37 (awpy, anyhow, rstar).
+- **The emitters:** `voxel_frames` counts each frame's emitters but does not keep their cells, which the cloud spreads
+  from. `voxels::voxel_frames_with_emitters` (a new file there) reads them out of the same frames, after
+  `voxel_frames` has validated them. Folding the cells into `tracks::VoxelFrame` would be the tidier end state; the
+  brief allowed new library files only.
+- **Evidence:** show-me-the-nades' `cargo test --release` (13 library and 37 binary tests, then 15 library with
+  `voxels`'s) and `cargo clippy --release --all-targets` pass, and `cargo clippy --no-default-features --lib` builds the
+  library alone.
+
+## S14 · The working tree's views, applied as temp objects on every read
+
+- **Decision:** every read (`crates/data`) applies the statements of show-me-the-nades' `sql/views.sql` that its queries
+  need (`lineup_report`, `throw_scene`, `scene_viewers`, `team_demos`, `slice_players` and what they call) as temp views
+  and macros before it runs them. `NADES_VIEWS_SQL` names another file; without one, the definitions stored in the
+  database serve.
+- **Why:** `nades` writes the views into the file only when it opens it, so the user's file can hold older ones: on
+  2026-10-26 its `lineup_report` had no `example_throw_id`, the column the list opens throws by. The web app's API does
+  the same (`toReadOnly` in `web/server/src/views.ts`): the temp catalog is writable on a read-only connection, and names
+  resolve to it first. The sandbox then reads exactly what the web view reads.
+- **Cost:** the statements are chosen once (a closure over the names each statement uses, comments and strings masked)
+  and run per open. The list's read (open, views, `lineup_report`, teams, players, close) took 93–114 ms with DuckDB held
+  to 4 threads, beside drawing; it is off the first frame's path (S16).
+
+## S15 · The collider from awpy's mesh at run time, tested as three.js tests a ray
+
+- **Decision:** the result camera and the smoke's light use awpy's collision mesh (`~/.cache/nades/maps/<map>.mesh`, the
+  web view's collider since its D26) under a BVH built when a map opens (`crates/scene/src/collider.rs`: binned surface
+  area, built in parallel). Each triangle is tested with three.js's watertight ray/triangle test in doubles, a hit's
+  distance is |point − origin| as three-mesh-bvh reports it, and `clear_between`, `blocked` and `floor_below` compare
+  distances as `render/mapModel.ts` does. The tree only decides which triangles are tested, so it need not be
+  three-mesh-bvh's. The pack's reserved Collider section stays unused.
+- **Evidence:**
+  - Build time with the file's read, per map: mirage 5.6 ms (73,290 triangles), nuke 8.0, dust2 15.3, cache 22.0, anubis
+    25.7, ancient 33.4, inferno 39.0 (547,966). It runs after the first frame, on its own thread.
+  - A random-ray test checks the tree against every triangle, exactly (`the_tree_answers_as_testing_every_triangle_would`).
+  - Same cameras (S18): 84 of 84 result shots are the web view's.
+- **Rejected for now:** the collider in the pack (format 2 reserves the section). Building it costs less than the list's
+  read and is off every path that waits, so a pack rebuild for all seven maps buys nothing yet; M4, with every map
+  resident, can revisit it.
+
+## S16 · Stages built ahead, off the window's thread
+
+- **Decision:** a lineup's stage (its cameras, its cloud and the light the map lets reach it, its fire, its result shot)
+  is built before it is picked. After the first frame the data thread reads the list, then each listed lineup's example
+  throw (`throw_scene`, `scene_viewers`), the selected one first and then outward from it, eight to a read; a newer
+  request (a lineup just picked) goes first. Each throw's stage is built on every core (rayon) once the map's collider
+  is there. A switch takes a built stage: the window's thread writes the tube's vertices and the 128 KB cloud volume,
+  and draws.
+- **The first frame needs no database:** the last run's map, lineup, view and camera are remembered per map
+  (`~/.cache/nades/sandbox/state.json`, `NADES_SANDBOX_STATE`), so the first frame is drawn from the camera it was left
+  at, and the list, the collider and the game's effect files are read after it. A map with no remembered camera stays
+  clear until its first lineup's camera is known, rather than being drawn from another map's (Cache's bench camera puts
+  Inferno out of bounds). A map picked in the shell is loaded on a thread and shown once its first lineup is built:
+  1.55–1.72 s from the pick for Mirage, Inferno and Cache (`--bench-maps`), the map before staying up meanwhile.
+- **Evidence** (`--bench-switch`, de_cache, a 1444×1420 view, vsync off, each switching frame finished on the GPU, load
+  8–12 while another agent compiled):
+
+  | View | Switch, CPU (median, p95, max) | Frame with the new lineup (median, p95) |
+  |---|---|---|
+  | Lineup | 0.53, 0.85, 1.06 ms | 4.9, 7.9 ms |
+  | Result (the smoke drawn) | 0.50–0.52, 0.82–0.87, 0.96–1.04 ms | 5.6–7.1, 7.1–8.9 ms |
+
+  One frame in 60–120 took 37–40 ms in two of the four runs, a hitch outside the switch. A smoke's stage builds in
+  2.8–3.0 ms, 2.4–2.6 of them its light (≈34,000 rays on 18 cores); the web view takes 200–270 ms for the light alone.
+- **Start-up holds:** de_cache on screen in 172.4 ms from process start (median of 9, 158–189, load 8–11; window made
+  109.8, map loaded 115.2, presented 139.2, shown 172.4), as M2's 172; reading the list before the first frame made the
+  window appear later (≈148 ms against 110 in one run), which is why it waits. Steady frame offscreen at 2880×1800:
+  4.18 ms (M2 4.08: the composite pass). Peak footprint 2.07 GB (M2 2.0).
+
+## S17 · One composite pass, always: the scene into its own target, the smoke averaged in
+
+- **Decision:** the sky, the map, the throw's meshes and the effects draw into a scene target; a composite pass
+  (`smoke.wgsl`, a port of `render/composite.ts`'s smoke) writes it into the HDR target the post-processing reads,
+  raymarching the shown smoke through its volume against the scene's depth, in Hammer units (the camera's ray is turned
+  into the database's frame). A still picture averages 16 jittered frames by the blend constant, as the web view's
+  accumulation does; a frame that changes nothing after that is not drawn. The fire's sprites and ground draw in the
+  effects pass, which reads the depth; the flight's tube, its marks and the grenade draw in the map's pass. The fire's,
+  a flash's and an HE's point light is added to the map's diffuse light in `map.wgsl` as three.js lights a standard
+  material (its Lambert divides by π; CS2's baked light does not).
+- **Why always:** without a smoke the pass is a copy (≈0.1 ms at 2880×1800), and one path through the frame keeps the
+  start-up's pipelines and the steady frame's passes the same with and without a throw.
+- **The game's own effect files**, where show-me-the-nades' `scripts/cs2_effects.py web` wrote them
+  (`~/.cache/nades/cs2/effects/web`): the smoke's 128³ noise and the fire's flipbooks, read after the first frame; the
+  stand-ins (`noise::stand_in`, the fire's fbm) where not, as in the web view (its D27).
+
+## S18 · Checked against the web view: the same cameras, the same effects
+
+- **Same cameras** (`bench/cameras.py`, `.runs/cameras-20261026-150526/`): for the web's three most thrown lineups of
+  each grenade on all seven pool maps (84 throws), the web view's own code (`stage.ts` read in place, fed by its API on a
+  clone of the database and awpy's mesh in a three-mesh-bvh tree) and `nades-sandbox --cameras` chose the same camera
+  for every view: Lineup, Aim, Result and the orbit's first pose, eyes 0.0000 units apart and angles 0.0° (the result
+  shots: 36 opponents' views, 11 blinded players', 37 standing views, each the same player at the same tick). Choosing a
+  result shot takes 0.18 ms here (median) and 2.1 ms in the web view's code under Bun.
+  - The ports keep the web view's arithmetic: doubles, `Math.hypot` as JavaScript engines compute it, three's
+    `normalize` as a multiply by the reciprocal, JavaScript's rounding.
+- **Effects** (`bench/effects.py`, `.runs/effects-20261026-150851/`): the result shots of the web's most thrown lineup of
+  each grenade on de_cache, de_mirage and de_inferno, at the moment the view opens on, shot by the web view's own tool
+  (the verify-nades-scene skill's `effect_shots.ts`) and rendered by the sandbox (`--render --throw`). The maps differ
+  (S12), so each effect is compared as what it changes against the same shot a second before it went off. The changed
+  regions overlap by 0.56–0.94 of their union (median 0.75) and cover the same share of the frame within 0.012 for 9 of
+  the 12; the smokes' mean colours are within 3 levels on Cache and Mirage, and 8 brighter on Inferno. Where they differ
+  most: Inferno's flash changes 0.21 of the frame here against 0.13 there (its light reaches further up the walls), and
+  the fires' shares differ by 0.09–0.10 on Cache (the web's larger) and Mirage (the sandbox's).
+- **Orbit is free:** it opens where the web view's orbit move starts, the thrower's view at release (the fourth camera
+  checked above), and from the first drag circles the effect as three.js's OrbitControls do (80–5,000 units, from
+  straight down to a little past level). The web view's scripted chase and turn (`flight.ts`) are not ported.
+
+### MCP integration · preserve numerical ports when fixing lint
+
+The web's ember phase is literally `6.28` (`fire.ts`), and its sky ray raw Z is literally `Math.SQRT2 / 1.4142`
+(`render/volumes.ts`). Keep these values number for number. Targeted Clippy expectations document these intentional
+approximations; substituting mathematical constants changes the port, even if the numerical difference is small.
+The final camera/effect verification uses database clones. The MCP itself continues to reuse the application's
+existing cameras and renderer rather than introducing independent rendering math.
+
+### MCP integration · stop native database work before process teardown
+
+A protected-copy startup run exposed SIGSEGV in the background `data` thread's DuckDB keyword helper. The macOS
+crash report's binary UUID matched the pinned probe; another report showed main concurrently in `std::process::exit`
+and `__cxa_finalize_ranges`. The application discarded its worker JoinHandle, allowing native queries to outlive
+C++ singleton state. Library now owns its cancellation signal and JoinHandle, wakes busy/collider waits and joins
+the native database worker before process exit. It does not skip queries or bypass C++ teardown to hide the fault.
+Ten actual first-frame launches on a database clone and three immediate controlled shutdowns then exited zero
+(`.runs/mcp-app-shutdown-fixed/stress.json`). MCP stop checks now surface unexpected exit codes as `app_exit_failed`
+and forced cleanup as `app_stop_forced`, retaining actual stopped state and diagnostics instead of claiming clean
+shutdown. Process-boundary regressions prevent a repeat from silently passing the quality gate.
+
+## S19 · Every pool map resident, within a budget
+
+- **Decision:** the maps not shown stay on the GPU (`crates/sandbox/src/resident.rs`), each with what it holds
+  (`Map::gpu_bytes`: its textures as Metal allocated them, and its geometry).
+  - Once the first frame is on screen (presented, and the window shown) the other packed maps open in the background,
+    one at a time (the ones looked at before first), each only while it fits beside what is held. Each is drawn twice
+    offscreen as it arrives (S21), its collider built, its lineup list read and its selected lineup's stage built.
+  - Picking a kept map is a swap, in the frame that handles the pick: the GPU maps, and the lineups (`MapLineups`:
+    list, selection, stages, collider). The targets are made again for the map (its post-processing is its own),
+    0.3 ms.
+  - A map that does not fit is loaded when picked (M3's path), after the maps shown least recently have been let go
+    to make room for it.
+  - The budget: `--budget-mb`, else `NADES_SANDBOX_BUDGET_MB`, else 8 GiB but no more than half of what Metal
+    recommends a process keep (`recommendedMaxWorkingSetSize`); 4 GiB where the GPU does not say. All seven pool maps
+    hold 6.2 GB.
+  - The effects' textures (the smoke's noise, the fire's flipbooks) are made once and every map binds them.
+  - The data thread serves in three tiers: the shown map (its list, a lineup just picked and its neighbours), then the
+    kept maps (their lists and selected stages), then the rest of the shown map's stages. With two tiers the kept
+    maps' lists waited 24 s behind 300 stage reads; with three every map is warm 1.6–1.75 s after start-up.
+- **Evidence** (`python3 bench/resident.py`, `.runs/resident-20261026-163237/`: 3 runs of 2 rounds of the seven maps,
+  load ≈12.3, each frame finished on the GPU with vsync off):
+  - 42 of 42 picks showed in the next frame. That frame took 5.3 ms (median; GPU 3.7; worst 8.9), and 5.7 ms on a
+    map's first visit in a session (GPU 4.1; worst 8.0); the window's own share of a switch is 1.6 ms.
+  - 6,221.8 MB on the GPU of an 8,589.9 MB budget; footprint 6.32–6.56 GB at the end, 6.32–6.62 GB after each pick,
+    peak 6.46–6.74 GB.
+  - The maps opened in 49–97 ms each; the shown map's frames meanwhile: median 4.7–4.9 ms, p95 15–17, worst 40–56.
+  - The first frame is no slower for them: they start once the window shows (on screen 169.5 ms with them, 167.4
+    without, medians of 7 alternated pairs; −2.1 ms per pair). Started at the first frame's present instead, the window
+    showed 4.7 ms later per pair (median).
+  - Under `--budget-mb 3000`: two maps kept beside de_cache, the other five loaded when picked (≈1.5 s each), held at
+    most 3.05 GB throughout, peak footprint 4.3 GB.
+- **Rejected:** targets kept per map (≈50 MB each at 1444×1420, to save 0.3 ms); one renderer with the maps' bind groups
+  swapped in (the swap is the same work, and the map's pipelines, bundles and post-processing are already its own);
+  opening other maps before the first frame (it must not wait).
+
+## S20 · de_cache's 2 GB, accounted for
+
+- **The question:** de_cache peaked at a 2.0 GB footprint against M1's 0.72–0.75 GB, and the upload's staging, kept
+  after the upload, was the suspect.
+- **Method:** the process's footprint and its graphics share at every start-up mark (`nades_render::memory`, macOS's
+  `TASK_VM_INFO`), and two probes: `cargo run --release -p nades-render --example upload_memory -- <pack> [--vmmap]`
+  (a map's upload step by step, then frames offscreen) and `--example first_submit` (a device with no map).
+- **What holds it,** de_cache:
+  - the textures, as Metal allocates them: 982.8 MB for 855.7 MB of BC blocks (Mirage 310.3 for 280.1, Inferno 896.2
+    for 845.1);
+  - the driver, once a process: its first submission 118.5 MB of GPU memory and its first render pass (1444×1420
+    half floats) 198 MB more, with no map at all; Mirage's first frames add as much as Cache's, and ≈270 MB of it
+    outlive the map;
+  - what drawing the map's triangles holds: 170–360 MB of memory the driver owns for the process, one region a texture,
+    growing with the triangles drawn (Inferno 569 MB, Mirage 55), on the first two frames;
+  - the window: ≈150 MB between the first frame's present and the window shown (drawables, CoreAnimation).
+- **Not the staging:** the buffer over the pack's Textures section adds nothing to the footprint during or after the
+  copies, and letting it go changes nothing; the geometry's buffer over the mapping is not charged either (its pages
+  are the file's cache). With copied buffers instead, as off Metal, the peak reached 3.3 GB.
+- **Bounded:** where a backend charges the staging (off Metal), the textures go through it a chunk (≈32 MiB) at a
+  time, at most 256 MB in flight, instead of one copy of the whole section; across maps, the budget (S19). M1's
+  0.72–0.75 GB came before most of the above: format 1's smaller textures, one pass, no post-processing.
+
+## S21 · The first frame: the map warmed twice, and the window server's share
+
+- **Decision:** the loader draws two warm-up frames, from the camera the first frame is drawn from, while AppKit makes
+  the window; a map opened in the background is warmed the same way, from its remembered camera or the middle of its
+  draws, and once its lineup's stage is built the window's thread draws it once more offscreen from that lineup's view,
+  with the stage (one map a frame, submitted and not waited for).
+- **Evidence:**
+  - Offscreen, a map's first frame costs the GPU 27–58 ms, its second 10–28, its third ≈7; a new camera's first frame
+    ≈12 against 5–8. The first-use cost is the map's more than the camera's.
+  - With one warm-up frame the window's first frame waited 21 ms for the GPU; with two, 4.5–4.9 ms (7 alternated
+    pairs).
+  - A map's first visit in a session: 13.5 ms that frame (median; worst 32.4) with the loader's two warm-up frames,
+    5.7 ms (worst 8.0) with the lineup's too, against 5.3 for a later visit. What it costs: the shown map's frames
+    while the others open went from p95 ≈10 ms to 15–17 (`.runs/resident-20261026-161418/` against `-163237/`).
+  - de_cache on screen 168.8 ms from process start (median of 9, 160–180, load ≈10); de_inferno 185.1 (163–201,
+    load ≈8.4; ≈239 before): `.runs/startup-20261026-163255/`, `-163315/`. Two earlier pairs of runs: 167.4 and 177.7
+    (AppKit's window 37 ms after `resumed`), 169.5 and 194.1 (56–62 ms, under more load).
+- **The window server's share:**
+  - Metal's presented handler reports the first frame, presented into the layer before the window is visible,
+    as skipped (presented time 0): the window appears with the layer's contents.
+  - The window is shown 25–31 ms after the present (median), and making it without AppKit's opening animation
+    (`NSWindowAnimationBehaviorNone`) changed nothing: 31.4 against 31.8 ms (7 alternated pairs).
+  - AppKit makes the window 37 ms after `resumed` (38 in M3's run), and 56–62 ms when the machine is busier (57 in
+    a run before any M4 change).
+  - Ours after the map is ready is 7–9 ms.
+- `--exit-after-first-frame` waits up to 0.5 s more for the presented handler, and records `frame:on_screen` or
+  `frame:skipped`.
+
+## S22 · The macOS app: a recipe, not a packager
+
+- **Decision:** `just bundle` assembles `target/release/bundle/macos/Nades Sandbox.app`. It takes the Info.plist from
+  `crates/sandbox/macos/Info.plist` (the version from Cargo) and the release binary, and signs the bundle ad hoc for
+  this machine (`codesign --sign -`). cargo-packager and cargo-bundle would each be a new install for what twelve lines
+  do.
+- **It finds the packs and the database as the binary does:**
+  - LaunchServices sets HOME for the apps it starts, so the packs, maps, effects and state are under `~/.cache/nades`.
+  - The database and show-me-the-nades' views are where the build was made from.
+  - `open --env NADES_DB=…` points it elsewhere.
+- **Evidence:**
+  - Started by LaunchServices (`open -n -W`, as Finder does), on a database copy and a scratch state:
+    - first launch 1.39 s, of it 497 ms of pipelines (Metal's shader cache is the bundle's own), then 185 and 201 ms;
+    - a screenshot of its first frame;
+    - an all-maps session (`--bench-maps all`): six maps opened in the background, 300 lineups each read from the
+      database, every pick shown in the next frame.
+  - `codesign --verify` and `plutil -lint` pass.
+- **Not done:** an icon; notarization, which only matters off this machine.
+
+## S23 · Windows: checked from the Mac, not yet run
+
+- **Decision:** `just check-windows` (`scripts/check-windows.sh`) type-checks and lints every crate for
+  x86_64-pc-windows-msvc. DuckDB (bundled) and meshoptimizer are C++, which does not compile for MSVC here without
+  Microsoft's SDK. Stand-in compilers answer their build scripts with empty objects, which `cargo check` and Clippy
+  never link.
+- **What runs differently there, as designed:**
+  - wgpu draws through DX12, the only Windows backend the workspace enables;
+  - no buffers over the pack's pages: the geometry is copied, and the textures go through at most 256 MB of staging
+    (S20);
+  - no early frame, so the first frame waits for the surface;
+  - a 4 GiB budget unless asked for (DXGI's budget is not read yet);
+  - no memory marks, pre-`main` time or presented handler;
+  - the packer's synthetic test is for Unix only (its stand-in CLI is a shell script).
+- **Evidence:** from a fresh target directory both pass with no warnings (Clippy with `-D warnings`).
+- **Not done:** a build that links (the Windows SDK, or the GNU target with MinGW), and a run.

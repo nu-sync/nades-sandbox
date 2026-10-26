@@ -7,12 +7,15 @@ baked lighting, sky, fog and post-processing, with a fly camera and offscreen re
 
 ## Status
 
-**v0.1.0 — M2 source preview.** Tested on Apple Silicon macOS. The renderer is working; lineup browsing,
-grenade playback, practice commands, instant map switching and packaged desktop builds are upcoming milestones.
-Windows and Linux are not verified for this preview.
+**M4 (version 0.1.0).** Tested on Apple Silicon macOS. The renderer is working. Since M3 the window
+is a lineup sandbox: a map's pro lineups from the `show-me-the-nades` database, each seen from the thrower's eye,
+zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, smoke, fire, flash or HE, a time
+scrubber and the practice command to copy. Since M4 every pool map stays on the GPU within a memory budget, so
+picking another map shows it in the next frame, and `just bundle` makes a macOS app. The workspace type-checks for
+Windows (`just check-windows`) but has not been run there; Linux is not verified.
 
 The project is the native 3D companion to `show-me-the-nades`, a separate project for CS2 demo analytics and
-lineups. The viewer runs without its database. The read-only database crate is a foundation for M3.
+lineups. The map viewer runs without its database; the lineups read it (`NADES_DB`, read-only).
 
 This preview requires locally prepared CS2 assets. It contains no game files or map packs. The preparation
 pipeline currently lives in the separate, unpublished `show-me-the-nades` project, so a fresh clone alone does
@@ -27,6 +30,11 @@ Install Rust 1.95 or newer and the Xcode Command Line Tools on macOS. [just](htt
 Python 3 is needed for startup benchmarks, and [uv](https://docs.astral.sh/uv/) for the rendering comparison script.
 The first build compiles bundled DuckDB. Its version matches the database writer in `show-me-the-nades`.
 
+**Building needs a checkout of `show-me-the-nades` beside this one** (`../show-me-the-nades`). Since M3 the
+workspace takes that project's 3D track types and smoke voxel-log decoder from its library (`show-me-the-nades =
+{ path = "../show-me-the-nades", default-features = false }`), and Cargo resolves path dependencies even when
+unused. That project is not published, so a fresh clone of this repository alone does not build yet.
+
 ```sh
 cargo build --release
 cargo test --release --workspace
@@ -37,7 +45,8 @@ cargo clippy --release --workspace --all-targets
 ./target/release/nades-sandbox --map de_cache
 ```
 
-Hold the right mouse button to look. Use WASD to move, E/Q to move up/down, and Shift to move faster.
+Pick a lineup on the left; the arrow keys step through them, 1–4 pick the Lineup, Aim, Result and Orbit views, space
+plays the time, and dragging turns the orbit. WASD, E/Q and the right mouse button fly a free camera.
 
 With just installed:
 
@@ -48,13 +57,27 @@ just run de_cache
 just check                 # justfile formatting, workspace tests and Clippy
 just test-local            # ignored tests against local game files, exports and packs
 just startup               # startup, steady frames and memory
+just bundle                # the macOS app: target/release/bundle/macos/Nades Sandbox.app
+just check-windows         # type-check and lint for Windows (DX12) from a Mac
 ```
 
-Render one frame from a CS2 console camera or print the startup stages:
+The app opens the other packed maps in the background once its first frame is on screen, as long as they fit an 8 GiB budget
+(less on machines with less memory; `--budget-mb` sets it). `python3 bench/resident.py` measures map switches and
+memory with every map in one session.
+
+Render one frame from a CS2 console camera or a throw's view, or print the startup stages:
 
 ```sh
 ./target/release/nades-sandbox --render shot.png --map de_dust2 --setpos 1,2,3 --setang 0,90
+./target/release/nades-sandbox --render smoke.png --throw <throw id> --view result --time 4
 ./target/release/nades-sandbox --exit-after-first-frame
+```
+
+Check the views and the effects against show-me-the-nades' web view (both read a clone of the database):
+
+```sh
+python3 bench/cameras.py          # every view's camera for 84 throws, against the web view's own choice
+uv run bench/effects.py           # result shots of chosen throws beside the web view's
 ```
 
 `python3 bench/startup.py` records load averages and stage marks, discards the first launch, and reports the
@@ -62,16 +85,38 @@ median of nine measured launches. Performance depends on the machine, system loa
 `uv run bench/realism.py --note "what changed"` additionally requires the sibling project's private local
 reference set and web-view runs. Those reference images and generated comparison outputs are not published.
 
+## Agent control
+
+Build with `just build`, then configure an MCP client to run the absolute path to
+`target/release/nades-mcp` with stdio transport. The server starts its sibling sandbox binary directly.
+`just mcp` is the development entry point; `just verify-mcp` exercises the actual server and app.
+
+Start with `app_status` and `maps_list`, then use `app_start`, `camera_set` and `frame_capture`.
+`view_render` takes a headless screenshot without changing the visible window. `diagnostics_get` exposes startup
+stages, CPU submission metrics, measured memory and recent logs. Images identify the map, camera, dimensions and
+animation time; live captures also identify the instance, revision and frame.
+Map changes restart the managed window. Disconnecting MCP hands a ready window to you; a future session starts its
+own instance. Manually opened windows are never controlled.
+Logs and private view state live in `~/.cache/nades/sandbox/mcp` by default. `--runs-dir`, `--packs-dir` and
+`--sandbox-binary` provide explicit development overrides. Headless rendering currently covers the base map;
+M3 throw/effect rendering is a later extension of that shared camera and image contract.
+
+The [MCP specification](docs/mcp-spec.md) defines each tool and its success criteria. The
+[verification skill](.agents/skills/verify-mcp/SKILL.md) describes repeatable local acceptance.
+
 ## Layout
 
 | Path | Role |
 |---|---|
-| `crates/sandbox` | window, egui shell, fly camera and startup clock |
+| `crates/sandbox` | window, the lineup shell, the views, startup clock |
+| `crates/control` | shared camera, scene state and application command contracts |
+| `crates/mcp` | nine agent tools, managed processes and real protocol verification |
 | `crates/render` | GPU renderer, materials, lighting, post-processing and console cameras |
 | `crates/pack` | per-map pack format, writer and memory-mapped reader |
 | `crates/source2` | VTEX textures and VPK archives |
 | `crates/packer` | builds a map pack from local exports and game files |
-| `crates/data` | brief, read-only access to the nades database |
+| `crates/data` | brief, read-only access to the nades database, with show-me-the-nades' working-tree views |
+| `crates/scene` | a throw as a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud and light, the fire |
 | `bench/` | benchmark camera, startup timing and rendering comparisons |
 | `SPEC.md`, `docs/` | plan, setup and design evidence |
 

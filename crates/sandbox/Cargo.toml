@@ -22,6 +22,12 @@ anyhow.workspace = true
 glam.workspace = true
 serde_json.workspace = true
 png.workspace = true
+nades-control = { path = "../control" }
+nades-data.workspace = true
+nades-scene.workspace = true
+serde.workspace = true
+rayon.workspace = true
+base64 = "0.23"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

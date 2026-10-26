@@ -1,7 +1,13 @@
 # Local asset setup
 
-The M2 viewer reads a prepared map pack. The packer builds it from a Source 2 Viewer GLB export and local CS2
+The viewer reads a prepared map pack for each map. The packer builds it from a Source 2 Viewer GLB export and local CS2
 files. Neither game assets nor prepared packs are distributed with this repository.
+
+## Building
+
+The workspace depends on the `show-me-the-nades` library by path (`../show-me-the-nades`, without its CLI
+features) for the 3D track types and the smoke voxel-log decoder. Check out both projects side by side before
+`cargo build`. That project is not published yet, so this repository does not build on its own.
 
 ## Preparation pipeline
 
@@ -62,14 +68,46 @@ location explicitly with `--cli`.
 Companion metadata is read beside the GLB. The viewer uses `~/.cache/nades/packs/<map>.pack`.
 The packer does not inherit the exporter's `NADES_CACHE` override; use the explicit flags above.
 
+## The lineups' inputs (M3)
+
+The map draws from its pack alone. The lineup list, the views and the effects read more, all optional (without
+them the map still opens, with no lineups or with the stand-ins named below):
+
+| Input | Default | What reads it |
+|---|---|---|
+| the nades database | `../show-me-the-nades/nades.duckdb`, or `NADES_DB` | the lineups and each throw's flight, smoke, fire and viewers, read-only and briefly |
+| show-me-the-nades' views | `../show-me-the-nades/sql/views.sql`, or `NADES_VIEWS_SQL` | applied as temp macros on every read; without the file, the database's own serve |
+| awpy's collision mesh | `~/.cache/nades/maps/<map>.mesh` (show-me-the-nades' `just map-meshes`), or `NADES_MAPS_DIR` | the result shot's line of sight and the smoke's light; without it, an overview and an unlit smoke |
+| the game's smoke noise and fire flipbooks | `~/.cache/nades/cs2/effects/web` (its `uv run scripts/cs2_effects.py web`), or `NADES_CS2_EFFECTS_DIR` | the smoke and the fire; without them, the web view's stand-ins |
+| the remembered view | `~/.cache/nades/sandbox/state.json`, or `NADES_SANDBOX_STATE` | each map's last lineup, view and camera, written on exit |
+
+The crate `show-me-the-nades` (its library: the voxel log's decoder) is a path dependency on the sibling checkout.
+
+## The macOS app (M4)
+
+```sh
+just bundle      # target/release/bundle/macos/Nades Sandbox.app, signed for this machine
+```
+
+The app reads the same inputs as the binary: the packs, maps, effects and remembered view under `~/.cache/nades`, and
+the database and views of the show-me-the-nades checkout the build was made beside. Opened from Finder it takes no
+environment of its own; `open --env NADES_DB=/path/to/copy.duckdb "target/release/bundle/macos/Nades Sandbox.app"`
+points it elsewhere, as the variables above do for the binary. Its first launch compiles the shaders (about half a
+second): macOS keeps their cache per app. It keeps the other packed maps on the GPU within a budget of 8 GiB, or half
+of what the GPU recommends where that is less; `NADES_SANDBOX_BUDGET_MB` or `--budget-mb` sets it.
+
 ## Database and verification inputs
 
-The viewer does not need a database at M2. To exercise the data crate, use a copy of a database produced by
-`show-me-the-nades`, never the live file:
+To exercise the data crate on its own, use a copy of a database produced by `show-me-the-nades`, never the live
+file:
 
 ```sh
 cargo run --release -p nades-data --example lineups -- /path/to/copy.duckdb de_cache
 ```
+
+`bench/cameras.py` and `bench/effects.py` clone the database (copy-on-write) into their run folder and start
+show-me-the-nades' web server (and, for the effects, its development server) on the clone: they need Bun and the
+sibling checkout's installed `web/` packages.
 
 `cargo test --release --workspace` uses synthetic fixtures. The ignored tests require local game files,
 exports and packs. `bench/realism.py` also requires the sibling checkout's `verify-scene-realism` skill,

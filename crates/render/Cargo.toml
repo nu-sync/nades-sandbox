@@ -8,6 +8,9 @@ publish.workspace = true
 
 [dependencies]
 nades-pack.workspace = true
+nades-scene.workspace = true
+serde_json.workspace = true
+png.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 thiserror.workspace = true
@@ -17,3 +20,5 @@ glam.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-metal.workspace = true
 objc2-quartz-core.workspace = true
+block2.workspace = true
+objc2.workspace = true

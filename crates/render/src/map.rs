@@ -8,8 +8,9 @@
 //!   `draw_indexed` whose instances index the slots, so the only state that changes between draws is the pipeline.
 //! - **The draws are recorded once** into render bundles (the map's, the 3D skybox's), which every frame executes;
 //!   csgo_effects surfaces, which read the depth drawn before them, draw in passes of their own.
-//! - **A frame** is: the sky and the 3D skybox from the sky camera; the map over them with the depth cleared; its
-//!   effects; then exposure, bloom and the present pass ([`crate::post`]).
+//! - **A frame** is: the sky and the 3D skybox from the sky camera; the map over them with the depth cleared, and the
+//!   shown throw's flight ([`crate::throw`]); the map's effects and the throw's fire; the composite, which adds the
+//!   smoke ([`crate::smoke`]); then exposure, bloom and the present pass ([`crate::post`]).
 
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -21,7 +22,9 @@ use nades_pack::scene::{AlphaMode, CubemapFog, Draw, GradientFog, IndexFormat, L
 use wgpu::util::DeviceExt as _;
 
 use crate::post::{self, HDR_FORMAT};
-use crate::view::{SkyPlacement, View};
+use crate::smoke::{Composite, SmokeFrame, SmokeLight};
+use crate::throw::{ThrowLayer, ThrowTargets, to_scene};
+use crate::view::{INCH, SkyPlacement, View};
 
 /// The depth buffer's format. Depth is reversed: 1 at the near plane, 0 at the far one.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -92,6 +95,9 @@ struct FrameUniform {
     screen: [f32; 4],
     shadow_mask: [f32; 4],
     probe_info: [f32; 4],
+    point: [f32; 4],
+    point_color: [f32; 4],
+    point_falloff: [f32; 4],
 }
 
 /// One light probe volume, as `map.wgsl` reads it.
@@ -231,9 +237,14 @@ pub fn fog_values(gradient: Option<&GradientFog>, cube: Option<&CubemapFog>, spa
 /// The targets for one frame size: the scene's colour and depth, and the post-processing's.
 pub struct Targets {
     pub post: post::Targets,
+    /// The scene before the composite pass adds the smoke into `post.hdr`.
+    scene: wgpu::TextureView,
     depth: wgpu::TextureView,
     /// The depth as the effects passes read it.
     depth_group: wgpu::BindGroup,
+    /// The scene's colour and depth, as the composite reads them.
+    scene_group: wgpu::BindGroup,
+    throw: ThrowTargets,
 }
 
 impl Targets {
@@ -243,6 +254,10 @@ impl Targets {
 }
 
 pub struct Map {
+    /// This map's own number in the process: targets made for one map are not another's.
+    pub id: u64,
+    /// What it holds on the GPU: its textures as the GPU allocated them, and its geometry.
+    pub gpu_bytes: u64,
     pub draws: usize,
     pub triangles: u64,
     frame_layout: wgpu::BindGroupLayout,
@@ -263,6 +278,31 @@ pub struct Map {
     sky: Option<(nades_pack::scene::Sky, f32, f32)>,
     placement: Option<SkyPlacement>,
     post: post::Effects,
+    /// The composite pass and the shown smoke.
+    pub composite: Composite,
+    /// The shown throw's flight, bursts and fire.
+    pub throw: ThrowLayer,
+}
+
+/// A point light an effect puts on the map, in Hammer units (three.js's PointLight in the web view).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointLight {
+    pub at: Vec3,
+    pub color: [f32; 3],
+    /// Candela.
+    pub intensity: f32,
+    /// How far it reaches (Hammer units), and how it falls off.
+    pub distance: f32,
+    pub decay: f32,
+}
+
+/// What a frame draws of the shown throw beyond what [`Map::throw`] holds: the smoke, the effect's light on the map,
+/// and how many jittered frames the target has averaged.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameEffects {
+    pub smoke: Option<SmokeFrame>,
+    pub light: Option<PointLight>,
+    pub accumulated: u32,
 }
 
 impl Map {
@@ -312,36 +352,28 @@ impl Map {
         keys.dedup();
 
         let (shader, layout, effects_layout) = (&shader, &layout, &effects_layout);
-        let (pipelines, sky_pipeline, post, textures, geometry) = std::thread::scope(|s| {
+        let (pipelines, sky_pipeline, post, textures, geometry, composite, mut throw) = std::thread::scope(|s| {
             // each pipeline on its own thread, while this one sets up the buffers and textures
             let pipelines: Vec<_> = keys.iter().map(|&k| s.spawn(move || (k, pipeline(device, if matches!(k.stage, Stage::Effects | Stage::EffectsAdditive) { effects_layout } else { layout }, shader, k)))).collect();
             let sky = s.spawn(move || sky_pipeline(device, layout, shader));
             let post = s.spawn(move || post::Effects::new(device, queue, &scene.post, output));
+            let composite = s.spawn(move || Composite::new(device, SmokeLight::of(scene.sun.as_ref())));
+            let throw = s.spawn(move || ThrowLayer::new(device, queue));
             let geometry = buffer_over(device, "geometry", pack.geometry(), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE);
-            let texels = buffer_over(device, "textures", pack.textures(), wgpu::BufferUsages::COPY_SRC);
             mark("map:buffers");
             let textures: Vec<wgpu::Texture> = scene.textures.iter().map(|t| create_texture(device, t)).collect();
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("textures") });
-            for (t, texture) in scene.textures.iter().zip(&textures) {
-                let chunk = scene.chunks[t.chunk as usize].offset;
-                for (level, mip) in t.mips.iter().enumerate() {
-                    let (width, height) = mip.copy_size(t.format);
-                    encoder.copy_buffer_to_texture(
-                        wgpu::TexelCopyBufferInfo { buffer: &texels, layout: wgpu::TexelCopyBufferLayout { offset: chunk + mip.offset, bytes_per_row: Some(mip.bytes_per_row), rows_per_image: Some(mip.rows) } },
-                        wgpu::TexelCopyTextureInfo { texture, mip_level: level as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                        wgpu::Extent3d { width, height, depth_or_array_layers: mip.layers },
-                    );
-                }
-            }
-            queue.submit([encoder.finish()]);
+            upload_textures(device, queue, pack, scene, &textures);
             mark("map:copies");
             let pipelines: HashMap<Key, wgpu::RenderPipeline> = pipelines.into_iter().map(|p| p.join().expect("a pipeline thread")).collect();
             let sky = sky.join().expect("the sky's pipeline thread");
             let post = post.join().expect("the post-processing's thread");
+            let composite = composite.join().expect("the composite's thread");
+            let throw = throw.join().expect("the throw's thread");
             mark("map:pipelines");
-            (pipelines, sky, post, textures, geometry)
+            (pipelines, sky, post, textures, geometry, composite, throw)
         });
 
+        let gpu_bytes = geometry.size() + scene.textures.iter().zip(&textures).map(|(t, texture)| allocated_bytes(texture).unwrap_or_else(|| texture_bytes(t))).sum::<u64>();
         let white = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor { label: Some("white"), size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] },
@@ -481,6 +513,7 @@ impl Map {
         };
         mark("map:bundle");
 
+        throw.toward_sun = composite.light.toward_sun;
         let sky_face = scene.sky.map_or(0, |s| scene.textures[s.texture as usize].width);
         let shadow_width = |l: Option<Lightmaps>| l.and_then(|l| l.shadows).map_or(0.0, |t| scene.textures[t as usize].width as f32);
         let map_light = PassLight { lightmaps: scene.lightmaps, shadow_width: shadow_width(scene.lightmaps), fog: fog_values(scene.post.gradient_fog.as_ref(), scene.post.fog.as_ref(), WORLD_SPACE, sky_face), probes: probe_count };
@@ -501,7 +534,10 @@ impl Map {
             let t = &scene.textures[s.texture as usize];
             (s, ((t.width as f32).log2() - 3.0).max(0.0), (t.mips.len() as f32 - 3.0).max(0.0))
         });
+        static MAPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            id: MAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            gpu_bytes,
             draws: all.len(),
             triangles: all.iter().map(|d| d.triangles()).sum(),
             frame_layout,
@@ -522,6 +558,8 @@ impl Map {
             sky,
             placement,
             post,
+            composite,
+            throw,
         }
     }
 
@@ -541,11 +579,30 @@ impl Map {
             })
             .create_view(&Default::default());
         let depth_group = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("scene depth"), layout: &self.depth_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&depth) }] });
+        let scene = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("scene"),
+                size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let scene_group = self.composite.scene_group(device, &scene, &depth);
+        let throw = self.throw.targets(device, &depth);
         let _ = &self.frame_layout;
-        Targets { post, depth, depth_group }
+        Targets { post, scene, depth, depth_group, scene_group, throw }
     }
 
-    fn frame_uniform(&self, view: &View, aspect: f32, light: &PassLight, size: (u32, u32), seconds: f32) -> FrameUniform {
+    /// The map's sun (towards it, in Hammer units' axes), for what the throw lights with it.
+    pub fn toward_sun(&self) -> Vec3 {
+        self.composite.light.toward_sun
+    }
+
+    fn frame_uniform(&self, view: &View, aspect: f32, light: &PassLight, size: (u32, u32), seconds: f32, point: Option<&PointLight>) -> FrameUniform {
         let view_proj = view.view_proj(aspect);
         let lightmaps = light.lightmaps.map_or([NONE; 4], |l| [l.irradiance, l.directional.unwrap_or(NONE), l.shadows.unwrap_or(NONE), u32::from(light.shadow_width > 4096.0)]);
         let (sky, sky_info) = match &self.sky {
@@ -571,41 +628,56 @@ impl Map {
             screen: [size.0 as f32, size.1 as f32, view.near, view.far],
             shadow_mask: std::array::from_fn(|c| if light.lightmaps.and_then(|l| l.sun_channel) == Some(c as u8) { 1.0 } else { 0.0 }),
             probe_info: [light.probes as f32, 0.0, 0.0, 0.0],
+            point: point.map_or([0.0; 4], |p| {
+                let at = to_scene(glam::DVec3::new(p.at.x.into(), p.at.y.into(), p.at.z.into()));
+                [at.x, at.y, at.z, p.intensity]
+            }),
+            point_color: point.map_or([0.0; 4], |p| [p.color[0], p.color[1], p.color[2], p.distance]),
+            point_falloff: [point.map_or(1.0, |p| p.decay), INCH, 0.0, 0.0],
         }
     }
 
-    fn effects_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &wgpu::BindGroup, draws: &[EffectDraw]) {
-        if draws.is_empty() {
+    /// The csgo_effects surfaces of one pass (and, in the map's, the throw's fire), over the depth drawn before them.
+    fn effects_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &wgpu::BindGroup, draws: &[EffectDraw], throw: bool) {
+        let throw = throw && self.throw.has_effects();
+        if draws.is_empty() && !throw {
             return;
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("effects"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.post.hdr_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.scene, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &targets.depth, depth_ops: None, stencil_ops: None }),
             ..Default::default()
         });
-        pass.set_bind_group(0, frame, &[]);
-        pass.set_bind_group(1, &self.scene_group, &[]);
-        pass.set_bind_group(2, &targets.depth_group, &[]);
-        for d in draws {
-            pass.set_pipeline(&self.pipelines[&d.key]);
-            pass.set_index_buffer(self.geometry.slice(..), d.format);
-            pass.draw_indexed(d.indices.clone(), 0, d.slots.clone());
+        if !draws.is_empty() {
+            pass.set_bind_group(0, frame, &[]);
+            pass.set_bind_group(1, &self.scene_group, &[]);
+            pass.set_bind_group(2, &targets.depth_group, &[]);
+            for d in draws {
+                pass.set_pipeline(&self.pipelines[&d.key]);
+                pass.set_index_buffer(self.geometry.slice(..), d.format);
+                pass.draw_indexed(d.indices.clone(), 0, d.slots.clone());
+            }
+        }
+        if throw {
+            self.throw.draw_effects(&mut pass, &targets.throw);
         }
     }
 
-    /// Every pass of a frame from `view` up to the present pass: the sky and the 3D skybox, the map, its effects, the
-    /// exposure and the bloom, into `targets`. `seconds` animates the effects' masks.
-    pub fn render(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, targets: &Targets, view: &View, seconds: f32) {
+    /// Every pass of a frame from `view` up to the present pass: the sky and the 3D skybox, the map and the shown throw,
+    /// their effects, the composite (with the smoke), the exposure and the bloom, into `targets`. `seconds` animates
+    /// the map effects' masks; `effects` says what of the throw this frame draws (its layer holds the rest).
+    pub fn render(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, targets: &Targets, view: &View, seconds: f32, effects: &FrameEffects) {
         let size = targets.size();
         let aspect = size.0 as f32 / size.1 as f32;
         let sky_view = self.placement.map_or(*view, |p| p.view(view));
-        queue.write_buffer(&self.map_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(view, aspect, &self.map_light, size, seconds)));
-        queue.write_buffer(&self.sky_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(&sky_view, aspect, &self.sky_light, size, seconds)));
+        queue.write_buffer(&self.map_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(view, aspect, &self.map_light, size, seconds, effects.light.as_ref())));
+        queue.write_buffer(&self.sky_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(&sky_view, aspect, &self.sky_light, size, seconds, None)));
+        self.composite.prepare(queue, view, size, effects.smoke);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.post.hdr_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.scene, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &targets.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
             });
@@ -617,17 +689,19 @@ impl Map {
                 pass.execute_bundles(std::iter::once(bundle));
             }
         }
-        self.effects_pass(encoder, targets, &self.sky_frame.1, &self.sky_effects);
+        self.effects_pass(encoder, targets, &self.sky_frame.1, &self.sky_effects, false);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("map"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.post.hdr_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &targets.scene, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &targets.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
             });
             pass.execute_bundles(std::iter::once(&self.map_bundle));
+            self.throw.draw_scene(&mut pass);
         }
-        self.effects_pass(encoder, targets, &self.map_frame.1, &self.map_effects);
+        self.effects_pass(encoder, targets, &self.map_frame.1, &self.map_effects, true);
+        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if effects.smoke.is_some() { effects.accumulated } else { 0 });
         self.post.encode(encoder, &targets.post);
     }
 
@@ -860,7 +934,8 @@ fn sky_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, shader: &w
     })
 }
 
-fn create_texture(device: &wgpu::Device, t: &Texture) -> wgpu::Texture {
+/// A texture as the pack describes it, empty: its format, size, layers and mip chain.
+pub fn create_texture(device: &wgpu::Device, t: &Texture) -> wgpu::Texture {
     use wgpu::TextureFormat as F;
     let format = match (t.format, t.srgb) {
         (TextureFormat::Bc1, false) => F::Bc1RgbaUnorm,
@@ -922,17 +997,94 @@ fn noise_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureVie
         .create_view(&Default::default())
 }
 
-/// A GPU buffer holding `bytes`: on Metal the bytes' own pages, elsewhere (or where Metal declines) a copy.
-fn buffer_over(device: &wgpu::Device, label: &str, bytes: &'static [u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+/// Staging the Textures section may hold in flight where the GPU cannot read the pack's own pages.
+const STAGING: u64 = 256 << 20;
+
+/// Copies every texture's mips from the pack's Textures section into `textures`.
+///
+/// - On Metal the GPU reads the mapping itself: one buffer over the whole section, one submission. The pack's pages are
+///   the staging, and macOS charges them to the file's cache, not to the process (S20).
+/// - Elsewhere the section goes through staging buffers a chunk (≈32 MiB) at a time, at most [`STAGING`] bytes of them in
+///   flight, so an upload never holds a copy of a whole map's textures.
+fn upload_textures(device: &wgpu::Device, queue: &wgpu::Queue, pack: &'static Pack, scene: &Scene, textures: &[wgpu::Texture]) {
+    let copy = |encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer, base: u64, t: &Texture, texture: &wgpu::Texture| {
+        for (level, mip) in t.mips.iter().enumerate() {
+            let (width, height) = mip.copy_size(t.format);
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo { buffer, layout: wgpu::TexelCopyBufferLayout { offset: base + mip.offset, bytes_per_row: Some(mip.bytes_per_row), rows_per_image: Some(mip.rows) } },
+                wgpu::TexelCopyTextureInfo { texture, mip_level: level as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width, height, depth_or_array_layers: mip.layers },
+            );
+        }
+    };
     #[cfg(target_os = "macos")]
-    if let Some(buffer) = metal::no_copy(device, label, bytes, usage) {
-        return buffer;
+    if let Some(texels) = metal::no_copy(device, "textures", pack.textures(), wgpu::BufferUsages::COPY_SRC) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("textures") });
+        for (t, texture) in scene.textures.iter().zip(textures) {
+            copy(&mut encoder, &texels, scene.chunks[t.chunk as usize].offset, t, texture);
+        }
+        queue.submit([encoder.finish()]);
+        return;
     }
+    let section = pack.textures();
+    let mut in_flight: std::collections::VecDeque<(wgpu::SubmissionIndex, u64)> = Default::default();
+    let mut held = 0;
+    for (k, chunk) in scene.chunks.iter().enumerate() {
+        let staging = buffer_copy(device, "textures chunk", &section[chunk.range()], wgpu::BufferUsages::COPY_SRC);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("textures") });
+        for (t, texture) in scene.textures.iter().zip(textures).filter(|(t, _)| t.chunk as usize == k) {
+            copy(&mut encoder, &staging, 0, t, texture);
+        }
+        let size = staging.size();
+        in_flight.push_back((queue.submit([encoder.finish()]), size));
+        held += size;
+        // the oldest chunks' staging is let go once the GPU has copied out of it
+        while held > STAGING
+            && let Some((index, size)) = in_flight.pop_front()
+        {
+            let _ = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None });
+            held -= size;
+        }
+    }
+}
+
+/// A texture's bytes as the GPU stores them: whole blocks, every mip and layer, no row padding.
+fn texture_bytes(t: &Texture) -> u64 {
+    let block = t.format.block_dim();
+    t.mips.iter().map(|m| u64::from(m.width.div_ceil(block)) * u64::from(m.height.div_ceil(block)) * u64::from(t.format.block_bytes()) * u64::from(m.layers)).sum()
+}
+
+/// What the GPU allocated for `texture` (Metal says; 4–15% above its blocks), where the backend can say.
+fn allocated_bytes(texture: &wgpu::Texture) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_metal::MTLAllocation as _;
+        // SAFETY: only the texture's allocated size is read
+        unsafe { texture.as_hal::<wgpu::hal::api::Metal>().map(|raw| raw.raw_handle().allocatedSize() as u64) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = texture;
+        None
+    }
+}
+
+/// A GPU buffer holding a copy of `bytes`, written through a mapping at creation.
+fn buffer_copy(device: &wgpu::Device, label: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
     let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: true });
     buffer.get_mapped_range_mut(..bytes.len() as u64).expect("mapped at creation").copy_from_slice(bytes);
     buffer.unmap();
     buffer
+}
+
+/// A GPU buffer holding `bytes`: on Metal the bytes' own pages, elsewhere (or where Metal declines) a copy.
+pub fn buffer_over(device: &wgpu::Device, label: &str, bytes: &'static [u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    #[cfg(target_os = "macos")]
+    if let Some(buffer) = metal::no_copy(device, label, bytes, usage) {
+        return buffer;
+    }
+    buffer_copy(device, label, bytes, usage)
 }
 
 #[cfg(target_os = "macos")]
@@ -1024,7 +1176,7 @@ mod tests {
         assert_eq!([slots[1].world, slots[2].world], [translation(11.0), translation(21.0)]);
         assert_eq!(std::mem::size_of::<Slot>(), 144, "map.wgsl's Slot is 144 bytes");
         assert_eq!(std::mem::size_of::<GpuMaterial>(), 784, "map.wgsl's Material is 784 bytes");
-        assert_eq!(std::mem::size_of::<FrameUniform>(), 368, "map.wgsl's Frame is 368 bytes");
+        assert_eq!(std::mem::size_of::<FrameUniform>(), 416, "map.wgsl's Frame is 416 bytes");
         assert_eq!(std::mem::size_of::<GpuProbeVolume>(), 160, "map.wgsl's ProbeVolume is 160 bytes");
     }
 

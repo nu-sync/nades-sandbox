@@ -12,11 +12,15 @@ rust-version = "1.95"
 publish = false
 
 [workspace.dependencies]
+nades-control = { path = "crates/control" }
 nades-render = { path = "crates/render" }
 nades-pack = { path = "crates/pack" }
 nades-source2 = { path = "crates/source2" }
 nades-data = { path = "crates/data" }
 nades-packer = { path = "crates/packer" }
+nades-scene = { path = "crates/scene" }
+# the 3D tracks and the voxel log's decoder, from show-me-the-nades itself (its library builds without the CLI's crates)
+show-me-the-nades = { path = "../show-me-the-nades", default-features = false }
 
 # GPU and window: one wgpu for the renderer and egui (egui-wgpu 0.37 is built on wgpu 30)
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal", "dx12"] }
@@ -26,8 +30,11 @@ egui-wgpu = { version = "0.37", default-features = false, features = ["winit"] }
 egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
 pollster = "1"
 # Metal: GPU buffers over the pack's own mapped pages (crates/render, map.rs) and the window's first drawable (lib.rs)
-objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "block2", "MTLAllocation", "MTLBuffer", "MTLDevice", "MTLDrawable", "MTLResource", "MTLTexture"] }
-objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer", "CAMetalLayer", "objc2-metal"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "MTLAllocation", "MTLBuffer", "MTLDevice", "MTLDrawable", "MTLResource", "MTLTexture"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CABase", "CALayer", "CAMetalLayer", "objc2-metal"] }
+# the first frame's presented handler (when the window server put it on the display)
+block2 = "0.6.2"
+objc2 = "0.6.5"
 
 # data and assets
 duckdb = { version = "~1.20000.0", features = ["bundled"] } # the same DuckDB as nades, or its database will not open

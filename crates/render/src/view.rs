@@ -42,8 +42,13 @@ impl View {
     /// A CS2 console position and angles, as `setpos x y z; setang pitch yaw` gives them: `setpos` is the player's
     /// feet, the eye `eye_height` units above (64 standing, 46 crouched); pitch is positive looking down.
     pub fn from_setpos(setpos: [f32; 3], pitch: f32, yaw: f32, eye_height: f32) -> Self {
-        let source_eye = [setpos[0], setpos[1], setpos[2] + eye_height];
-        let eye = Vec3::new(source_eye[1], source_eye[2], source_eye[0]) * INCH;
+        Self::from_cs([setpos[0], setpos[1], setpos[2] + eye_height], pitch, yaw, VERTICAL_FOV_DEGREES)
+    }
+
+    /// A CS2 eye (Hammer units, z up), its angles (pitch positive looking down, yaw from +x toward +y) and vertical field
+    /// of view in degrees, looking with no roll, as the web view's `engine.look` places its camera.
+    pub fn from_cs(eye: [f32; 3], pitch: f32, yaw: f32, fov_degrees: f32) -> Self {
+        let eye = Vec3::new(eye[1], eye[2], eye[0]) * INCH;
         let (p, y) = (pitch.to_radians(), yaw.to_radians());
         // Source's forward (x, y, z) = (cos p cos y, cos p sin y, −sin p), turned into the scene's frame
         let source_forward = Vec3::new(p.cos() * y.cos(), p.cos() * y.sin(), -p.sin());
@@ -53,7 +58,7 @@ impl View {
         let right = Vec3::Y.cross(back).normalize();
         let up = back.cross(right);
         let rotation = Quat::from_mat3(&glam::Mat3::from_cols(right, up, back));
-        Self { eye, rotation, fov_y: VERTICAL_FOV_DEGREES.to_radians(), near: 4.0 * INCH, far: 30_000.0 * INCH }
+        Self { eye, rotation, fov_y: fov_degrees.to_radians(), near: 4.0 * INCH, far: 30_000.0 * INCH }
     }
 
     /// Where the view direction points.

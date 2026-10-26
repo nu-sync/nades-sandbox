@@ -47,13 +47,20 @@ def run(args: list[str], timeout: float = 120) -> str | None:
 def on_screen(result: dict) -> dict:
     marks = dict(result["marks"])
     before = result.get("pre_main_ms") or 0.0
+    memory = {stage: (footprint, graphics) for stage, footprint, graphics in result.get("memory", [])}
     return {
         "total_ms": round(before + max(marks["frame:presented"], marks["window:visible"]), 2),
         "presented_ms": round(before + marks["frame:presented"], 2),
         "visible_ms": round(before + marks["window:visible"], 2),
         "window_ms": round(before + marks["window"], 2),
         "loaded_ms": round(before + marks["loaded"], 2),
+        # the first frame's wait for the GPU, after the loader's warm-up frames
+        "first_gpu_ms": round(marks["frame:gpu"] - marks["frame:submitted"], 2),
         "pre_main_ms": before,
+        # the process's own readings (macOS): footprint and its graphics share when the window shows, and the peak
+        "visible_footprint_mb": memory.get("window:visible", (None, None))[0],
+        "visible_graphics_mb": memory.get("window:visible", (None, None))[1],
+        "peak_footprint_mb": result.get("peak_footprint_mb"),
     }
 
 
@@ -119,6 +126,7 @@ def main() -> int:
             "visible_median_ms": median([r["visible_ms"] for r in first]),
             "window_median_ms": median([r["window_ms"] for r in first]),
             "loaded_median_ms": median([r["loaded_ms"] for r in first]),
+            "first_gpu_median_ms": median([r["first_gpu_ms"] for r in first]),
             "loads": [r["load"] for r in first],
         },
         "steady_windowed": {"runs": [{k: r.get(k) for k in ("median_ms", "p95_ms", "display", "refresh_hz", "load")} for r in windowed]},
@@ -128,7 +136,12 @@ def main() -> int:
             "p95_ms": max(r["p95_ms"] for r in offscreen),
             "loads": [r["load"] for r in offscreen],
         },
-        "memory": {"peak_footprint_mb": median([m["peak_footprint_mb"] for m in memory if m["peak_footprint_mb"]]), "max_rss_mb": median([m["max_rss_mb"] for m in memory if m["max_rss_mb"]])},
+        "memory": {
+            "peak_footprint_mb": median([m["peak_footprint_mb"] for m in memory if m["peak_footprint_mb"]]),
+            "max_rss_mb": median([m["max_rss_mb"] for m in memory if m["max_rss_mb"]]),
+            "visible_footprint_mb": median([r["visible_footprint_mb"] for r in first if r["visible_footprint_mb"]] or [0]),
+            "visible_graphics_mb": median([r["visible_graphics_mb"] for r in first if r["visible_graphics_mb"]] or [0]),
+        },
     }
     (out / "results.json").write_text(json.dumps(results, indent=1) + "\n")
     f, w, o = results["first_frame"], results["steady_windowed"], results["steady_offscreen"]
@@ -136,13 +149,15 @@ def main() -> int:
         f"# {opts.map}: start-up and steady frame, {time.strftime('%Y-%m-%d %H:%M')}",
         "",
         f"- On screen from process start: median {f['median_ms']} ms of {f['runs']} runs ({f['best_ms']}–{f['worst_ms']}); "
-        f"presented {f['presented_median_ms']}, window visible {f['visible_median_ms']}, window made {f['window_median_ms']}, map loaded {f['loaded_median_ms']} (medians).",
+        f"presented {f['presented_median_ms']}, window visible {f['visible_median_ms']}, window made {f['window_median_ms']}, map loaded {f['loaded_median_ms']}, "
+        f"the first frame's GPU wait {f['first_gpu_median_ms']} (medians).",
         f"- Load averages: {'; '.join(f['loads'])}.",
         "- Steady frame, windowed (vsync off), per run: "
         + ("; ".join(f"median {r['median_ms']} ms, 95th percentile {r['p95_ms']} ms on {r['display']} at {r['refresh_hz']} Hz" for r in w["runs"]) or "no run drew (the window was hidden)")
         + ".",
         f"- Steady frame, offscreen at {o['size']} (each frame finished on the GPU): median {o['median_ms']} ms, worst 95th percentile {o['p95_ms']} ms.",
-        f"- Peak memory footprint {results['memory']['peak_footprint_mb']} MB, maximum resident {results['memory']['max_rss_mb']} MB (medians of 3).",
+        f"- Peak memory footprint {results['memory']['peak_footprint_mb']} MB, maximum resident {results['memory']['max_rss_mb']} MB (medians of 3); "
+        f"when the window shows, footprint {results['memory']['visible_footprint_mb']} MB of which {results['memory']['visible_graphics_mb']} MB the GPU's (median).",
         "",
     ]
     (out / "report.md").write_text("\n".join(report))

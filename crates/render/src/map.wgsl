@@ -51,6 +51,13 @@ struct Frame {
     shadow_mask: vec4<f32>,
     // x the light probe volumes this pass samples (0 for none)
     probe_info: vec4<f32>,
+    // an effect's point light (a fire, a flash, an HE: three.js's PointLight in the web view): xyz where, in this
+    // pass's space; w its intensity in candela (0: none)
+    point: vec4<f32>,
+    // rgb its linear colour, w the distance it reaches (Hammer units; 0: no limit)
+    point_color: vec4<f32>,
+    // x how fast it falls off (three's decay), y metres per Hammer unit
+    point_falloff: vec4<f32>,
 }
 
 // one light probe volume (crates/pack ProbeVolume; Source 2 Viewer's LightProbeVolume)
@@ -677,6 +684,17 @@ fn light(s: Surface, in: Varyings, lightmap: Uv, front: bool, double_sided: bool
         let v_dot_h = max(dot(l, h), 0.0);
         let f = mix(f0, vec3<f32>(1.0), pow(1.0 - v_dot_h, 5.0));
         specular = d_ggx(n_dot_h, max(roughness * roughness, 0.0001)) * vis_schlick(n_dot_l, n_dot_v, roughness) * n_dot_l * f * sun;
+    }
+    // an effect's light, as three.js lights a standard material with a point light (its Lambert divides by π)
+    if frame.point.w > 0.0 {
+        let to_light = frame.point.xyz - in.world;
+        let d = length(to_light) / frame.point_falloff.y;
+        var falloff = 1.0 / max(pow(d, frame.point_falloff.x), 0.01);
+        if frame.point_color.w > 0.0 {
+            let edge = clamp(1.0 - pow(d / frame.point_color.w, 4.0), 0.0, 1.0);
+            falloff *= edge * edge;
+        }
+        direct += frame.point_color.rgb * (frame.point.w * falloff * max(dot(n, normalize(to_light)), 0.0) * 0.318309886);
     }
     // the sky's reflection, no brighter than the light that reaches here (CS2's normalisation, capped at 1)
     if frame.sky_info.x > 0.5 {

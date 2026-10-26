@@ -3,7 +3,8 @@
 //! with one texture found by name, one whose name is ambiguous (found through TextureParams), and an image with no
 //! game file (decoded from the export); a map VPK holding the three lightmaps (BC6H irradiance, BC1 direction, BC4
 //! shadows); the entity lump naming the sun's shadow channel; and a stand-in for Source 2 Viewer's CLI that says which
-//! meshes the game lightmaps.
+//! meshes the game lightmaps. The stand-in is a shell script, so the test runs where one does (not on Windows).
+#![cfg(unix)]
 
 use std::path::Path;
 

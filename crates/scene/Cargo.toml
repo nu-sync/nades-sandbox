@@ -1,0 +1,14 @@
+[package]
+name = "nades-scene"
+description = "A throw becomes a stage: CS2's cameras, the result camera through the collider, the smoke's cloud and light, the fire"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nades-data.workspace = true
+show-me-the-nades.workspace = true
+glam.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
