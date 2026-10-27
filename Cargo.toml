@@ -22,6 +22,8 @@ nades-source-demo = { path = "crates/source-demo" }
 nades-config = { path = "crates/config" }
 nades-packer = { path = "crates/packer" }
 nades-scene = { path = "crates/scene" }
+nades-physics = { path = "crates/physics" }
+nades-effects = { path = "crates/effects" }
 
 # GPU and window: one wgpu for the renderer and egui (egui-wgpu 0.37 is built on wgpu 30)
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal", "dx12"] }

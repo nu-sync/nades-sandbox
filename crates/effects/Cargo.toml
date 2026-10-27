@@ -1,0 +1,13 @@
+[package]
+name = "nades-effects"
+description = "What a simulated grenade leaves: the smoke's voxel grid and the fire's flames, from the map's collider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+nades-scene.workspace = true
+nades-model.workspace = true
+nades-physics.workspace = true
+glam.workspace = true

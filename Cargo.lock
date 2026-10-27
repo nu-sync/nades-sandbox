@@ -1867,6 +1867,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nades-effects"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "nades-model",
+ "nades-physics",
+ "nades-scene",
+]
+
+[[package]]
 name = "nades-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1923,6 +1933,15 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nades-physics"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "nades-scene",
+ "serde",
 ]
 
 [[package]]
