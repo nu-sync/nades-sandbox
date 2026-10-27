@@ -636,6 +636,25 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
     through the data thread) and its 2 standalone checks, the scene's 21; Clippy clean.
   - The fixture through the binary: `check` reports no problems and its feature table; `--cameras` and
     `--render --throw` read it.
+  - **Parity with show-me-the-nades**, on its export of an APFS copy of `nades.duckdb` (247 demos, 116,480 throws,
+    2.47 GB, `check`: no problems). The exporter was the in-progress `nades export --cs2-throws` of another session's
+    uncommitted worktree, run read-only; the main checkout had none yet. `tag_parity` and `bench/cameras.py`:
+    - **technique**: 111,654 throws the same, none different; 4,826 lack the release facts on both sides.
+    - **landing callouts**: 114,542 the same (98.3%), 1,140 different, 784 missing on both, 14 on one side. From
+      show-me-the-nades' own `place_cells` the sandbox's lookup gives 116,241 of 116,480 (99.8%): the rule holds, and
+      the difference is the samples. Its cells count every living pawn every 32 ticks, warm-up and freeze time
+      included; the file carries live-round samples twice a second.
+    - **groups**: 32,688 of ours against 32,682 of theirs; 23,100 agree exactly (41,727 throws), and 85.5% of throws
+      carry their group's commonest `nades.lineup`. Replaying show-me-the-nades' own anchors (its `lineups` table, in
+      creation order) over the file's facts with the sandbox's rule gives all 115,434 tagged throws their own lineup:
+      the rule and the facts are exact, and the difference is the order groups start in. Its registry keeps anchors
+      across ingest runs, and 34 of the 247 demos were ingested out of match order; §4 takes `played_at`. The 3 demos
+      without rounds add 599 grouped throws it leaves untagged.
+    - **cameras**: 84 throws on 7 maps, all four views identical to the web view's (0.0000 units): 11 flash victims
+      placed from samples, 36 opponents, 37 overviews (`.runs/cameras-20261026-190548`).
+  - **Costs** on that file: a map's first list 0.25–0.37 s (reading 180–275 ms, the rules 66–110 ms), off the first
+    frame's path; every filter change after it 6–12 ms in memory, where each was a 93–114 ms DuckDB read before (on
+    ≈96 demos). Three runs each, load average 5–14.
 - **Not done:** the demo adapter (§6, step 2) and maps from the game's files (§7, step 3); labelled stand-ins for a smoke
   without voxels or a fire without flames (§2: today such a stage says what is missing); players across name changes
   by Steam id; the MCP `lineups_list`, which exists only in uncommitted work at the time of writing.

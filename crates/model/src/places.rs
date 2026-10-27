@@ -5,7 +5,7 @@
 //!
 //! show-me-the-nades' `places.rs`, in the same f32 arithmetic, with its test.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::facts::Vec3;
 
@@ -40,21 +40,23 @@ pub struct Callouts {
 impl Callouts {
     /// The cells `points` fill: per cell the place seen most often, ties to the name first in order.
     pub fn learn<'a>(points: impl IntoIterator<Item = (Vec3, &'a str)>) -> Self {
-        let mut counts: BTreeMap<[i32; 3], BTreeMap<&str, u64>> = BTreeMap::new();
+        // a cell holds a few names: a short list each, and the cells in order once counted
+        let mut counts: HashMap<[i32; 3], Vec<(&str, u64)>> = HashMap::new();
         for (p, place) in points {
             if place.is_empty() || !p.iter().all(|v| v.is_finite()) {
                 continue;
             }
-            *counts.entry(cell_of(p)).or_default().entry(place).or_default() += 1;
-        }
-        Self::from_cells(counts.into_iter().filter_map(|(c, names)| {
-            let mut best: Option<(&str, u64)> = None;
-            for (name, n) in names {
-                if best.is_none_or(|(_, m)| n > m) {
-                    best = Some((name, n));
-                }
+            let names = counts.entry(cell_of(p)).or_default();
+            match names.iter_mut().find(|(n, _)| *n == place) {
+                Some((_, k)) => *k += 1,
+                None => names.push((place, 1)),
             }
-            best.map(|(name, _)| (c, name.to_string()))
+        }
+        let mut cells: Vec<_> = counts.into_iter().collect();
+        cells.sort_unstable_by_key(|(c, _)| *c);
+        Self::from_cells(cells.into_iter().filter_map(|(c, names)| {
+            // the most samples, ties to the name first in order
+            names.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|(name, _)| (c, name.to_string()))
         }))
     }
 

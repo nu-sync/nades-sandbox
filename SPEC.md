@@ -310,7 +310,7 @@ panel) has no native counterpart: it exists to work around the browser.
 | Pipelines at start-up | warm: none waited for (macOS's shader cache); ≈360–440 ms on the first launch after a shader change (M2's pipelines, in parallel), and 497–630 ms on the first launch of a binary at a new path or a new app bundle: the cache is the program's | |
 | Peak memory, de_cache | 2.07–2.19 GB footprint (M4; M3 2.07, M2 2.0; M1's 640 MB pack 0.72–0.75 GB): the textures as Metal allocates them 983 MB, the driver's first submission 119 MB and first render pass ≈200 MB, what drawing the map's triangles holds 170–360 MB, the window ≈150 MB; the upload's staging none (S20) | |
 | Pack build | 1.5–3.9 s a map (M2) | |
-| Database: list | 93–114 ms, open to close, with the working tree's views (M3; replaced by the in-memory library, S24) | off the first frame's path: met |
+| Data: list | a map's first: 0.25–0.37 s on 247 demos (reading 180–275 ms, the rules 66–110 ms); each filter change after it 6–12 ms in memory (S24). M3's DuckDB read: 93–114 ms per change on ≈96 demos | off the first frame's path: met |
 
 Timing runs: `nades-sandbox --exit-after-first-frame` prints every stage as JSON. `python3 bench/startup.py` runs the
 first frame, both steady-frame benches and peak memory with the load average beside each, into

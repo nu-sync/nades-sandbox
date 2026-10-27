@@ -4,6 +4,9 @@
 //! results they were ported from.
 //!
 //!   cargo run --release -p nades-source-file --example tag_parity -- <cs2-throws file>... [--ns nades] [--json out.json]
+//!                                                                    [--dump throws.csv]
+//!
+//! `--dump` writes every throw's id, map, start, landing, group and tags, for looking into a difference.
 //!
 //! A group agrees when it and one tag value name exactly the same throws.
 
@@ -81,12 +84,13 @@ struct Groups {
 
 fn main() {
     let mut files: Vec<PathBuf> = Vec::new();
-    let (mut ns, mut json) = ("nades".to_string(), None::<PathBuf>);
+    let (mut ns, mut json, mut dump) = ("nades".to_string(), None::<PathBuf>, None::<PathBuf>);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--ns" => ns = args.next().expect("--ns needs a namespace"),
             "--json" => json = Some(args.next().expect("--json needs a file").into()),
+            "--dump" => dump = Some(args.next().expect("--dump needs a file").into()),
             _ => files.push(arg.into()),
         }
     }
@@ -96,6 +100,7 @@ fn main() {
     let (mut techniques, mut callouts, mut groups) = (Tally::default(), Tally::default(), Groups::default());
     let mut maps_json = Vec::new();
     let mut examples: Vec<String> = Vec::new();
+    let mut rows: Vec<String> = vec!["throw_id,map,grenade,order,start_x,start_y,start_z,land_x,land_y,land_z,group,lineup_tag,technique,technique_tag,callout,callout_tag".into()];
     for map in source.maps().unwrap() {
         let started = Instant::now();
         let facts = source.map(&map).unwrap();
@@ -104,12 +109,36 @@ fn main() {
         let built = Instant::now();
         let library = Library::new(facts, places);
         let build_ms = built.elapsed().as_secs_f64() * 1e3;
+        // a filter change: the slice's lineups and the filters' choices, in memory
+        let listed = Instant::now();
+        let shown = library.lineups(&nades_model::LineupQuery::default()).len();
+        let _ = library.facets(None);
+        let list_ms = listed.elapsed().as_secs_f64() * 1e3;
         let (mut t, mut c, mut g) = (Tally::default(), Tally::default(), Groups::default());
         let mut by_group: BTreeMap<u32, BTreeSet<&str>> = BTreeMap::new();
         let mut by_tag: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
         let mut members: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
-        for (throw, d) in library.throws() {
+        for (order, (throw, d)) in library.throws().enumerate() {
             let technique = d.technique.map(|x| x.name());
+            if dump.is_some() {
+                let field = |v: Option<&str>| v.map_or(String::new(), |v| format!("\"{}\"", v.replace('"', "\"\"")));
+                let land = d.landing.map_or(",,".into(), |l| format!("{},{},{}", l[0], l[1], l[2]));
+                rows.push(format!(
+                    "{},{},{},{order},{},{},{},{land},{},{},{},{},{},{}",
+                    throw.id,
+                    map,
+                    throw.grenade,
+                    throw.start[0],
+                    throw.start[1],
+                    throw.start[2],
+                    d.lineup.map_or(String::new(), |l| l.0.to_string()),
+                    field(tag(&throw.tags, &lineup_key)),
+                    field(technique.as_deref()),
+                    field(tag(&throw.tags, &technique_key)),
+                    field(d.to.as_deref()),
+                    field(tag(&throw.tags, &callout_key))
+                ));
+            }
             if !t.add(technique.as_deref(), tag(&throw.tags, &technique_key)) && examples.len() < 40 {
                 examples.push(format!("technique {} {}: ours {:?}, theirs {:?}", map, throw.id, technique, tag(&throw.tags, &technique_key)));
             }
@@ -144,7 +173,7 @@ fn main() {
             }
         }
         println!(
-            "{map}: {} throws in {} demos ({:.0} ms read, {:.0} ms rules, {} callout cells) · groups: {} of ours, {} of theirs, {} agree ({} throws), {} throws in groups that do not · technique: {:?} · callout: {:?}",
+            "{map}: {} throws in {} demos ({:.0} ms read, {:.0} ms rules, {} callout cells, {shown} lineups listed in {list_ms:.1} ms) · groups: {} of ours, {} of theirs, {} agree ({} throws), {} throws in groups that do not · technique: {:?} · callout: {:?}",
             library.throws().count(),
             library.demos().len(),
             read_ms,
@@ -159,7 +188,7 @@ fn main() {
             c
         );
         maps_json.push(format!(
-            "{{\"map\":{},\"throws\":{},\"read_ms\":{read_ms:.1},\"rules_ms\":{build_ms:.1},\"groups\":{},\"technique\":{},\"callout\":{}}}",
+            "{{\"map\":{},\"throws\":{},\"read_ms\":{read_ms:.1},\"rules_ms\":{build_ms:.1},\"list_ms\":{list_ms:.2},\"groups\":{},\"technique\":{},\"callout\":{}}}",
             serde_like::string(&map.0),
             library.throws().count(),
             serde_like::object(&[("ours", g.ours), ("theirs", g.theirs), ("agreeing", g.agreeing), ("throws_agreeing", g.throws_agreeing), ("throws_disagreeing", g.throws_disagreeing), ("grouped_untagged", g.grouped_untagged), ("tagged_ungrouped", g.tagged_ungrouped)]),
@@ -178,6 +207,10 @@ fn main() {
         for e in &examples {
             println!("  {e}");
         }
+    }
+    if let Some(path) = dump {
+        std::fs::write(&path, rows.join("\n") + "\n").unwrap();
+        println!("\n{}", path.display());
     }
     if let Some(path) = json {
         let body = format!(
