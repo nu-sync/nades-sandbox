@@ -3,8 +3,10 @@
 ## Intent
 
 nades-sandbox shows a CS2 map and the lineups thrown on it, drawn from the game's own files and the throws' own data,
-instantly. The throws are facts in `cs2-throws` files ([docs/standalone-api.md](docs/standalone-api.md)), which any
-parser can write; show-me-the-nades (a separate project) is one producer. The sandbox stands alone: it builds with no
+instantly. The maps are packed on this machine from CS2's files (`nades-pack setup <map>`, `nades-pack <map>`). The
+throws are facts in `cs2-throws` files ([docs/standalone-api.md](docs/standalone-api.md)), which the sandbox's own demo
+reader writes from `.dem` files and any parser can write; show-me-the-nades (a separate project) is one optional
+producer. The sandbox stands alone: it builds with no
 sibling checkout, and everything it computes from the facts is its own rule (`crates/model`). [SPEC.md](SPEC.md) is the plan
 (scope, architecture, milestones and their acceptance checks); [docs/decisions.md](docs/decisions.md) holds each
 decision with its evidence. Add a decision there when you make one that a reader would otherwise have to reconstruct.
@@ -37,13 +39,13 @@ uv run bench/effects.py --nades <checkout>                  # chosen throws' eff
 python3 bench/resident.py                                   # every map in one session: switches, memory, the budget
 just bundle                                                 # the macOS app: target/release/bundle/macos/Nades Sandbox.app
 just check-windows                                          # type-check and lint the workspace for Windows (DX12)
-cargo run --release -p nades-render --example upload_memory -- ~/.cache/nades/packs/de_cache.pack   # where a map's memory goes
+cargo run --release -p nades-render --example upload_memory -- <packs>/de_cache.pack   # where a map's memory goes
 ```
 
 ## Working rules
 
-- **Valve's assets stay on this machine.** Map exports (`~/.cache/nades/maps`), the game's files (`~/.cache/nades/cs2`)
-  and anything built from them (packs, the effects pack) are never committed, uploaded or shared. Rendered
+- **Valve's assets stay on this machine.** The game's files (the `[assets] game` folder), the geometry exports (the
+  platform cache's `exports/`) and anything built from them (packs, the effects pack) are never committed, uploaded or shared. Rendered
   images at most. `.gitignore` refuses packs, glbs and `.vtex_c` files; keep it that way.
 - **The data is the user's.** cs2-throws files are read read-only; never experiment on one in place, and never open
   show-me-the-nades' `nades.duckdb`: the benches clone it and read the clone's export. Tests write their own files.

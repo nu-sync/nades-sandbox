@@ -1,7 +1,8 @@
 # nades-sandbox
 
-A native CS2 map viewer built in Rust with wgpu. This first public preview renders maps with their materials,
-baked lighting, sky, fog and post-processing, with a fly camera and offscreen rendering from CS2 console cameras.
+A native CS2 map viewer and lineup sandbox built in Rust with wgpu. It renders any official map from the game's own
+files, with its materials, baked lighting, sky, fog and post-processing, and shows the grenades thrown on it, read from
+CS2 demos or from `cs2-throws` files, with a fly camera and offscreen rendering from CS2 console cameras.
 
 ![de_cache rendered in nades-sandbox](docs/images/de_cache.png)
 
@@ -10,22 +11,23 @@ baked lighting, sky, fog and post-processing, with a fly camera and offscreen re
 **M4 (version 0.1.0).** Tested on Apple Silicon macOS. The renderer is working. Since M3 the window
 is a lineup sandbox: the lineups of the throws in your data, each seen from the thrower's eye, zoomed on the aim
 point, from an opponent's eye or orbiting it, with the flight, smoke, fire, flash or HE, a time scrubber and the
-practice command to copy. Since M4 every pool map stays on the GPU within a memory budget, so picking another map
-shows it in the next frame, and `just bundle` makes a macOS app. The workspace type-checks for Windows
+practice command to copy. Since M4 every packed map stays on the GPU within a memory budget, so picking another map
+shows it in the next frame, and `just bundle` makes a macOS app. The sandbox is now standalone: it reads CS2 demos
+itself and packs any official map from the game's files. The workspace type-checks for Windows
 (`just check-windows`) but has not been run there; Linux is not verified.
 
 The throws come from **`cs2-throws` files**: one SQLite file of what CS2 demos record about grenade throws, named
 after the game's own properties and events ([the format](docs/standalone-api.md#3-the-facts-cs2-throws-version-1)).
 Any parser can write one: `tools/cs2_throws.py` is a reference writer that needs only Python's standard library, and
-`show-me-the-nades` (a separate project for CS2 demo analytics) exports its database with
-`nades export --cs2-throws`. Everything computed from those facts (lineup grouping, technique, practice commands,
+the sandbox's own demo reader writes one per demo (`--data match.dem`); other producers, such as the separate
+`show-me-the-nades` analytics project (`nades export --cs2-throws`), are optional. Everything computed from those facts (lineup grouping, technique, practice commands,
 round time, landing callouts, the opponent's viewpoints) is the sandbox's own rule, the same for every file
 (`crates/model`). A producer's own labels travel as tags, shown and filterable but never interpreted.
 
-This preview requires locally prepared CS2 assets. It contains no game files or map packs. The map preparation
-pipeline currently lives in the separate, unpublished `show-me-the-nades` project, so a fresh clone builds and tests
-on its own but does not provide the inputs needed to render a map. [Asset setup](docs/setup.md) describes the required
-layout and overrides.
+The repository contains no game files or map packs: each machine builds its own from CS2's files. `nades-pack setup
+<map>` fetches what a map needs from Steam's CS2 depot (DepotDownloader, anonymous), and `nades-pack <map>` builds its
+pack with Source 2 Viewer's CLI and Bun (glTF-Transform). [Asset setup](docs/setup.md) describes the settings and the
+folders.
 
 [The specification](SPEC.md) records the milestones and historical performance measurements;
 [the decision log](docs/decisions.md) records the architecture and rendering evidence.
@@ -34,16 +36,20 @@ layout and overrides.
 
 Install Rust 1.95 or newer and the Xcode Command Line Tools on macOS. [just](https://just.systems/) is optional;
 Python 3 is needed for the tests' fixture writer and the startup benchmarks, and [uv](https://docs.astral.sh/uv/) for
-the rendering comparison script. The first build compiles bundled SQLite. The repository builds on its own.
+the rendering comparison script. Packing needs [Source 2 Viewer's CLI](https://github.com/ValveResourceFormat/ValveResourceFormat),
+[Bun](https://bun.sh/) and, to fetch maps, [DepotDownloader](https://github.com/SteamRE/DepotDownloader). The first
+build compiles bundled SQLite. The repository builds on its own.
 
 ```sh
 cargo build --release
 cargo test --release --workspace
 cargo clippy --release --workspace --all-targets
 
-# After preparing the local inputs described in docs/setup.md:
-./target/release/nades-pack de_cache
-./target/release/nades-sandbox --map de_cache --data throws.sqlite
+# With the settings described in docs/setup.md (CS2's folder, the CLI, DepotDownloader):
+./target/release/nades-pack setup de_cache    # fetch the map's files from Steam, once
+./target/release/nades-pack de_cache          # build its pack
+./target/release/nades-pack --effects         # once: the smoke noise and fire flipbooks every map shares
+./target/release/nades-sandbox --map de_cache --data match.dem
 ```
 
 `--data` names a CS2 demo, a cs2-throws file, or a folder of either (repeatable; a demo in two files is taken once).
@@ -87,8 +93,9 @@ Render one frame from a CS2 console camera or a throw's view, or print the start
 ./target/release/nades-sandbox --exit-after-first-frame
 ```
 
-Check the views and the effects against show-me-the-nades' web view. Both read a clone of its database, the sandbox
-through the clone's cs2-throws export; the checkout is named, never assumed:
+Where a show-me-the-nades checkout is at hand, the views and the effects can be checked against its web view (the
+sandbox's cameras and effects are ports of it). Both read a clone of its database, the sandbox through the clone's
+cs2-throws export; the checkout is named, never assumed:
 
 ```sh
 python3 bench/cameras.py --nades <show-me-the-nades checkout>   # every view's camera for 84 throws, against the web view's own choice
@@ -131,12 +138,12 @@ The [MCP specification](docs/mcp-spec.md) defines each tool and its success crit
 | `crates/render` | GPU renderer, materials, lighting, post-processing and console cameras |
 | `crates/pack` | per-map pack format, writer and memory-mapped reader |
 | `crates/source2` | VTEX textures and VPK archives |
-| `crates/packer` | builds a map pack from local exports and game files |
+| `crates/packer` | `nades-pack`: fetches a map's files (`setup`) and builds its pack from the game's files: the geometry export, textures, light, sky, post-processing, collider; and the shared effects pack |
 | `crates/model` | the sandbox's vocabulary and rules: CS2's facts, the `ThrowSource` port, grouping, technique, practice commands, round time, callouts, viewpoints, the smoke's voxel-log decoder, and `Library` |
 | `crates/source-file` | the `cs2-throws` file adapter: version 2 SQLite files, several merged into one source, and `check` |
 | `crates/source-demo` | the demo adapter: a CS2 `.dem` file, read with awpy, becomes a cs2-throws file in the cache |
-| `crates/config` | where the settings come from: `--data`, `NADES_SANDBOX_DATA`, the config file, the default |
-| `crates/scene` | a throw as a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud and light, the fire |
+| `crates/config` | where the settings come from (data, packs, CS2's files, the tools): a flag, `NADES_SANDBOX_*`, the config file, the default |
+| `crates/scene` | a throw as a stage: CS2's cameras, the result shot through the map's collider, the smoke's cloud and light, the fire |
 | `tools/cs2_throws.py` | the format's schema and a reference writer, Python's standard library only |
 | `bench/` | benchmark camera, startup timing and rendering comparisons |
 | `SPEC.md`, `docs/` | plan, setup and design evidence |

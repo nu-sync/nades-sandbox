@@ -1,7 +1,7 @@
 # Local asset setup
 
-The viewer reads a prepared map pack for each map. The packer builds it from a Source 2 Viewer GLB export and local CS2
-files. Neither game assets nor prepared packs are distributed with this repository.
+The viewer reads a pack for each map, built on this machine by `nades-pack` from CS2's own files. Neither game
+assets nor packs are distributed with this repository.
 
 ## Building
 
@@ -14,7 +14,7 @@ The workspace builds on its own (`cargo build --release`): no path dependency le
 export, the decompiles), Bun's `bunx` (glTF-Transform 4.5.1, which compresses the geometry export) and, to fetch a map
 from Steam, DepotDownloader. `nades-pack setup <map>` fetches what a map needs into the game folder (anonymously, from
 the CS2 depot, pinned to the build the folder already holds; a pool map is a few hundred MB, the first one more for the
-shared archives); `nades-pack <map>` then builds its pack. show-me-the-nades' `export_map.py` is no longer needed.
+shared archives); `nades-pack <map>` then builds its pack.
 
 ## Input layout
 
@@ -98,8 +98,9 @@ The packs folder follows the same order (`--packs`, `NADES_SANDBOX_PACKS`, `[ass
 ### Writing cs2-throws files
 
 `tools/cs2_throws.py` holds the schema (docs/standalone-api.md §3) and a `Writer` that needs only Python's standard
-library; its `fixture` command is a worked example that fills every table. show-me-the-nades writes its database as one
-file with `nades export --cs2-throws <file>`. Either way, `nades-sandbox check <file>` names the file's problems and,
+library; its `fixture` command is a worked example that fills every table. The sandbox's demo reader writes one per demo
+into its cache; show-me-the-nades, an optional producer, writes its whole database as one file with
+`nades export --cs2-throws <file>`. Either way, `nades-sandbox check <file>` names the file's problems and,
 feature by feature, what its facts allow and which fact a feature lacks.
 
 ## The macOS app (M4)
@@ -108,8 +109,8 @@ feature by feature, what its facts allow and which fact a feature lacks.
 just bundle      # target/release/bundle/macos/Nades Sandbox.app, signed for this machine
 ```
 
-The app reads the same inputs as the binary: the packs, maps, effects and remembered view under `~/.cache/nades`, and
-the throws its config file names. Opened from Finder it takes no environment of its own;
+The app reads the same inputs as the binary: the packs and effects in the packs folder, the remembered view, and the
+throws its config file names. Opened from Finder it takes no environment of its own;
 `open --env NADES_SANDBOX_DATA=/path/to/throws.sqlite "target/release/bundle/macos/Nades Sandbox.app"` points it
 elsewhere, as the variables above do for the binary. Its first launch compiles the shaders (about half a
 second): macOS keeps their cache per app. It keeps the other packed maps on the GPU within a budget of 8 GiB, or half
@@ -125,13 +126,15 @@ cargo run --release -p nades-source-file --example tag_parity -- /path/to/throws
 The second compares the sandbox's groups, techniques and landing callouts with a producer's own labels for them (here
 show-me-the-nades' `nades.lineup`, `nades.technique` and `nades.land_place` tags) and counts every difference.
 
-`bench/cameras.py` and `bench/effects.py` compare the sandbox with show-me-the-nades' web view. They take that
+The comparisons below are optional: they need a show-me-the-nades checkout, whose web view the sandbox's cameras and
+effects were ported from. `bench/cameras.py` and `bench/effects.py` compare the sandbox with that web view. They take that
 checkout as `--nades <dir>` (or `SHOW_ME_THE_NADES`), clone its database (copy-on-write) into their run folder, start
 its web server (and, for the effects, its development server) on the clone, and export the clone with its
 `nades export --cs2-throws` for the sandbox (`--data` takes an export made earlier instead). They need Bun and that
 checkout's installed `web/` packages. Never point them at the live `nades.duckdb` without the clone.
 
 `cargo test --release --workspace` uses synthetic fixtures, among them the one `tools/cs2_throws.py` writes. The
-ignored tests require local game files, exports and packs. `bench/realism.py --nades <dir>` also requires that
+ignored tests require local game files and packs (`NADES_PACK_EXPORT=<glb>` names the export `tests/export.rs`
+checks). `bench/realism.py --nades <dir>` also requires that
 checkout's `verify-scene-realism` skill, reference shots and latest web rendering run; it reads those in place. Its
 generated comparisons stay local.
