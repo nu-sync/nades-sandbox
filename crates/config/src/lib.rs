@@ -5,8 +5,10 @@
 //!
 //! The assets' settings take one path each, with the same precedence ([`Asset`]): the packs (`--packs`,
 //! `NADES_SANDBOX_PACKS`, `[assets] packs`, else `packs/` in the platform's cache folder), CS2's files (`--game`,
-//! `NADES_SANDBOX_GAME`, `[assets] game`, no default) and Source 2 Viewer's CLI (`--s2v`, `NADES_SANDBOX_S2V`,
-//! `[tools] s2v`, no default).
+//! `NADES_SANDBOX_GAME`, `[assets] game`, no default), Source 2 Viewer's CLI (`--s2v`, `NADES_SANDBOX_S2V`,
+//! `[tools] s2v`, no default), Bun's `bunx` for glTF-Transform (`--bunx`, `NADES_SANDBOX_BUNX`, `[tools] bunx`, else
+//! the PATH's) and DepotDownloader (`--depotdownloader`, `NADES_SANDBOX_DEPOTDOWNLOADER`, `[tools] depotdownloader`, no
+//! default).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -52,6 +54,8 @@ struct AssetsSection {
 #[derive(Debug, Default, Deserialize)]
 struct ToolsSection {
     s2v: Option<PathBuf>,
+    bunx: Option<PathBuf>,
+    depotdownloader: Option<PathBuf>,
 }
 
 /// A setting of one path (docs/standalone-api.md §8).
@@ -63,6 +67,10 @@ pub enum Asset {
     Game,
     /// Source 2 Viewer's CLI.
     S2v,
+    /// Bun's `bunx`, which runs glTF-Transform for the geometry export.
+    Bunx,
+    /// DepotDownloader, which `nades-pack setup` fetches a map's files from Steam with.
+    DepotDownloader,
 }
 
 impl Asset {
@@ -71,6 +79,8 @@ impl Asset {
             Asset::Packs => "--packs",
             Asset::Game => "--game",
             Asset::S2v => "--s2v",
+            Asset::Bunx => "--bunx",
+            Asset::DepotDownloader => "--depotdownloader",
         }
     }
 
@@ -79,6 +89,8 @@ impl Asset {
             Asset::Packs => "NADES_SANDBOX_PACKS",
             Asset::Game => "NADES_SANDBOX_GAME",
             Asset::S2v => "NADES_SANDBOX_S2V",
+            Asset::Bunx => "NADES_SANDBOX_BUNX",
+            Asset::DepotDownloader => "NADES_SANDBOX_DEPOTDOWNLOADER",
         }
     }
 
@@ -88,6 +100,8 @@ impl Asset {
             Asset::Packs => "[assets] packs",
             Asset::Game => "[assets] game",
             Asset::S2v => "[tools] s2v",
+            Asset::Bunx => "[tools] bunx",
+            Asset::DepotDownloader => "[tools] depotdownloader",
         }
     }
 
@@ -96,13 +110,17 @@ impl Asset {
             Asset::Packs => file.assets.packs.as_ref(),
             Asset::Game => file.assets.game.as_ref(),
             Asset::S2v => file.tools.s2v.as_ref(),
+            Asset::Bunx => file.tools.bunx.as_ref(),
+            Asset::DepotDownloader => file.tools.depotdownloader.as_ref(),
         }
     }
 
     fn default(self) -> Option<PathBuf> {
         match self {
             Asset::Packs => Some(dirs().map_or_else(|| PathBuf::from("packs"), |d| d.cache_dir().join("packs"))),
-            Asset::Game | Asset::S2v => None,
+            // bunx where the PATH has it
+            Asset::Bunx => std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("bunx")).find(|b| b.is_file())),
+            Asset::Game | Asset::S2v | Asset::DepotDownloader => None,
         }
     }
 }
@@ -157,6 +175,16 @@ pub fn asset(asset: Asset, flag: Option<&Path>) -> Result<Option<Setting>> {
 /// The packs folder for this run, given `--packs`.
 pub fn packs(flag: Option<&Path>) -> Result<Setting> {
     Ok(asset(Asset::Packs, flag)?.expect("the packs have a default"))
+}
+
+/// The platform's cache folder for the sandbox (`~/Library/Caches/io.github.nu-sync.nades-sandbox` on macOS).
+pub fn cache_dir() -> PathBuf {
+    dirs().map_or_else(|| PathBuf::from("cache"), |d| d.cache_dir().to_path_buf())
+}
+
+/// Where the packer makes the maps' geometry exports: `exports/` in the cache folder.
+pub fn exports_dir() -> PathBuf {
+    cache_dir().join("exports")
 }
 
 /// The shared effects pack in a packs folder: the game's smoke noise and fire flipbooks, for every map.
