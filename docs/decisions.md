@@ -675,3 +675,35 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Not done:** the demo adapter (§6, step 2) and maps from the game's files (§7, step 3); labelled stand-ins for a smoke
   without voxels or a fire without flames (§2: today such a stage says what is missing); players across name changes
   by Steam id; the MCP `lineups_list`, which exists only in uncommitted work at the time of writing.
+
+## S25 · cs2-throws 2.0: integer keys inside the file
+
+- **Decision:** inside one file, rows refer to a demo, a player, a place and a throw by small integer keys
+  (`demos.demo`, `players.player` per demo, `places.place`, `throws.throw`); `demo_id` and `throw_id` stay the ids
+  across files, in the API and in merging. `player_samples` and `flames` are `without rowid` tables whose primary keys
+  are their only index; tags split into `demo_tags` and `throw_tags`. Writers set `page_size = 16384`. The reader takes
+  2.x and refuses 1.x, saying to write the file again. Version 1 was days old with no outside users.
+- **Why:** version 1 of the 247-demo export was 2.47 GB, 77% of it `player_samples` (1,280 MB) and its index (611 MB):
+  each of 7.78 M rows, and each index entry, repeated the 64-character `demo_id`, the player's name and Steam id, and
+  the place name.
+- **Measured** on version 1's own rows, re-keyed with SQL (same 247 demos; ≈ rows are version 1's other tables plus
+  the measured samples):
+  | Layout | File |
+  |---|---:|
+  | version 1 | 2,467 MB |
+  | integer demo and player keys, `without rowid` samples, place as text (samples alone: 622 MB) | ≈1,200 MB |
+  | the same with integer place keys (samples: 564 MB) | ≈1,140 MB |
+  | also integer throw keys for flames, blinds, voxels and tags; tags split | 911 MB |
+  | the same, 16 KB pages (voxel logs 143 → 97 MB) | 831 MB |
+  | the same, 64 KB pages | 819 MB |
+  16 KB pages take most of the gain without making a point read (one throw's tracks) read 64 KB. show-me-the-nades'
+  export inserts row by row, which leaves `without rowid` pages about two thirds full; it builds into a scratch file and
+  `vacuum into` the final one (0.9 s), so its file is 830 MB, the same bytes on every run, in 9.5 s (version 1: 11.6 s).
+- **Parity** on that export: every fact equal to version 1's file (each table rebuilt through the keys and compared
+  with `except` both ways, 7.78 M samples included); `check`'s census identical; `tag_parity`'s tallies identical
+  (techniques 111,654 the same and none different, callouts 98.3%); `bench/cameras.py` 84/84 in every view
+  (`.runs/cameras-20261026-221946`).
+- **Read cost:** a map's facts read in 137–207 ms on the large maps against 165–252 ms from version 1 (three runs,
+  median, load average 8–14). Every map query starts from `demos` with `cross join`: left to itself SQLite scanned all
+  430 k throw tags to skip a sort, and de_train's read went from 4 to 35 ms.
+

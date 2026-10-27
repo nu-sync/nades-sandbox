@@ -136,7 +136,7 @@ crates/source2   CS2's files: VTEX textures (BC blocks, mips, cubes, volumes), V
 crates/packer    `nades-pack <map>`: builds a map's pack from the export, the game's files and their entities
 crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
                  (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
-crates/source-file  the cs2-throws file adapter: version 1 SQLite files, several merged, and `check`
+crates/source-file  the cs2-throws file adapter: version 2 SQLite files, several merged, and `check`
 crates/config    where the settings come from (§8): flag, environment, config file, default
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
@@ -273,7 +273,7 @@ panel) has no native counterpart: it exists to work around the browser.
 - **Facts, derivations, tags** (docs/standalone-api.md §2): a source hands over facts only, as `crates/model` names
   them; everything computed from them is the model's, one implementation for every source; a producer's own labels are
   tags, shown and filterable, never interpreted.
-- **The source:** `crates/source-file` reads cs2-throws version 1 files read-only. Several files merge into one source,
+- **The source:** `crates/source-file` reads cs2-throws version 2 files read-only. Several files merge into one source,
   each demo taken from the first file that has it; another major version is refused, naming both; unknown tables and
   columns are ignored. A file written again (its size or modification time) is opened again, and the source's revision
   changes: the app looks every 5 s and reads the list and the stages again. A file being written is `Busy`, retried

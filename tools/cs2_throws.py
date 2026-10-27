@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""cs2-throws version 1: the schema and a reference writer, with Python's standard library only.
+"""cs2-throws version 2: the schema and a reference writer, with Python's standard library only.
 
 A cs2-throws file is one SQLite file of what CS2 demos record about grenade throws, named after the game's own
 properties and events (docs/standalone-api.md §3). Any parser can write one; nades-sandbox reads it with
 `--data <file>` and checks it with `nades-sandbox check <file>`.
 
-    python3 tools/cs2_throws.py schema OUT.sqlite     # an empty version 1 file
+    python3 tools/cs2_throws.py schema OUT.sqlite     # an empty version 2 file
     python3 tools/cs2_throws.py fixture OUT.sqlite    # a small worked example that fills every table
 
 Conventions are the game's: Hammer units with z up; angles in degrees as m_angEyeAngles stores them, pitch positive
@@ -30,37 +30,53 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 FORMAT = "cs2-throws"
-VERSION = "1.0"
+VERSION = "2.0"
 
 SCHEMA = """
 create table meta (key text primary key, value text not null);
--- required: format = 'cs2-throws', version = '1.0'; optional: producer (free text), created (ISO 8601, UTC)
+-- required: format = 'cs2-throws', version = '2.0'; optional: producer (free text), created (ISO 8601, UTC)
 
 create table demos (
-    demo_id   text primary key,  -- recommended: the .dem file's SHA-256, hex
-    map       text not null,     -- the demo header's map name, e.g. 'de_inferno'
-    played_at integer,           -- unix ms, UTC, when known
+    demo      integer primary key,  -- the file's own key for the demo; other tables refer to it by this
+    demo_id   text not null unique, -- the demo's id across files; recommended: the .dem file's SHA-256, hex
+    map       text not null,        -- the demo header's map name, e.g. 'de_inferno'
+    played_at integer,              -- unix ms, UTC, when known
     file_name text
 );
 
+create table players (           -- optional; each name and Steam id pair a demo shows
+    demo    integer not null,    -- demos.demo
+    player  integer not null,    -- the file's own key for the player within the demo
+    name    text,                -- m_iszPlayerName
+    steamid text,                -- m_steamID (SteamID64), decimal
+    primary key (demo, player)
+) without rowid;
+
+create table places (            -- optional; the place names the file uses
+    place integer primary key,
+    name  text not null unique   -- m_szLastPlaceName
+);
+
 create table rounds (            -- optional
-    demo_id text not null, number integer not null,
+    demo integer not null, number integer not null,
     freeze_end_tick integer,     -- round_freeze_end
     plant_tick integer,          -- bomb_planted
     end_tick integer,            -- round_end
     winner text,                 -- 'T' | 'CT'
-    primary key (demo_id, number)
-);
+    primary key (demo, number)
+) without rowid;
 
 create table throws (
-    throw_id text primary key,   -- unique in the file; recommended '<demo_id>:<tick>:<projectile entity index>'
-    demo_id  text not null,
+    throw    integer primary key,  -- the file's own key for the throw; other tables refer to it by this
+    throw_id text not null unique, -- the throw's id across files; recommended '<demo_id>:<tick>:<projectile entity index>'
+    demo     integer not null,     -- demos.demo
     round    integer,
-    tick     integer not null,   -- the projectile's first tick
-    grenade  text not null,      -- from the projectile's class; molotov or incendiary by m_bIsIncGrenade
-    side     text not null,      -- the thrower's m_iTeamNum
-    player   text, steamid text, team text,  -- m_iszPlayerName, m_steamID (SteamID64), m_szClanTeamname
-    place    text,               -- the thrower's m_szLastPlaceName
+    tick     integer not null,     -- the projectile's first tick
+    grenade  text not null,        -- from the projectile's class; molotov or incendiary by m_bIsIncGrenade
+    side     text not null,        -- the thrower's m_iTeamNum
+    player   integer,              -- players.player in this demo: the thrower
+    team     text,                 -- the thrower's m_szClanTeamname
+    place    integer,              -- places.place: the thrower's m_szLastPlaceName
     start_x real not null, start_y real not null, start_z real not null,  -- m_vInitialPosition
     vel_x real, vel_y real, vel_z real,                                    -- m_vInitialVelocity
     -- the thrower's pawn at `tick`, when known
@@ -76,56 +92,68 @@ create table throws (
     end_tick integer,                                           -- its expiry event (smokegrenade_expired, inferno_expire)
     flight blob  -- the projectile's networked positions; per point, little-endian i32 tick, f32 x, f32 y, f32 z
 );
-create index throws_by_demo on throws (demo_id, tick);
+create index throws_by_demo on throws (demo, tick);
 
 create table smoke_voxels (      -- optional
-    throw_id   text primary key,
+    throw      integer primary key, -- throws.throw
     first_tick integer not null, -- the tick m_nVoxelFrameDataSize first became non-zero
     x real, y real, z real,      -- m_vSmokeDetonationPos
     bytes blob not null          -- m_VoxelFrameData[0 .. m_nVoxelFrameDataSize], as last networked
 );
 
 create table flames (            -- optional; the inferno's arrays
-    throw_id text not null, slot integer not null,
+    throw integer not null, slot integer not null,             -- throws.throw
     x real not null, y real not null, z real not null,         -- m_firePositions[slot]
     nx real, ny real, nz real,                                 -- m_BurnNormal[slot]
-    first_tick integer not null, last_tick integer not null    -- while m_bFireIsBurning[slot]
-);
-create index flames_by_throw on flames (throw_id);
+    first_tick integer not null, last_tick integer not null,   -- while m_bFireIsBurning[slot]
+    primary key (throw, slot)
+) without rowid;
 
 create table blinds (            -- optional; player_blind
-    throw_id text not null, player text, steamid text, side text,
+    throw  integer not null,     -- throws.throw
+    player integer,              -- players.player in the throw's demo: who was blinded
+    side   text,
     x real, y real, z real,      -- the victim's origin at the event, when known
-    seconds  real not null       -- blind_duration
+    seconds real not null        -- blind_duration
 );
-create index blinds_by_throw on blinds (throw_id);
+create index blinds_by_throw on blinds (throw);
 
 create table player_samples (    -- optional; any rate (viewpoints want 2 a second or more)
-    demo_id text not null, tick integer not null,
-    player text, steamid text, side text not null,
+    demo   integer not null,     -- demos.demo
+    tick   integer not null,
+    player integer not null,     -- players.player in this demo
+    side   text not null,
     x real not null, y real not null, z real not null,  -- the pawn's origin
     pitch real, yaw real, duck real,
-    alive integer not null,      -- m_lifeState
-    place text                   -- m_szLastPlaceName
-);
-create index samples_by_tick on player_samples (demo_id, tick);
+    alive  integer not null,     -- m_lifeState
+    place  integer,              -- places.place: m_szLastPlaceName
+    primary key (demo, tick, player)
+) without rowid;
 
-create table tags (              -- optional; a producer's own labels
-    subject text not null,       -- a demo_id or a throw_id
-    key     text not null,       -- '<namespace>.<name>', e.g. 'nades.lineup', 'hltv.event'
-    value   text not null
+create table demo_tags (         -- optional; a producer's own labels of a demo
+    demo  integer not null,      -- demos.demo
+    key   text not null,         -- '<namespace>.<name>', e.g. 'hltv.event'
+    value text not null
 );
-create index tags_by_subject on tags (subject);
+create index demo_tags_by_demo on demo_tags (demo);
+
+create table throw_tags (        -- optional; a producer's own labels of a throw
+    throw integer not null,      -- throws.throw
+    key   text not null,         -- '<namespace>.<name>', e.g. 'nades.lineup'
+    value text not null
+);
+create index throw_tags_by_throw on throw_tags (throw);
 """
 
 GRENADES = ("smoke", "flash", "he", "molotov", "incendiary", "decoy")
 SIDES = ("T", "CT")
 THROW_COLUMNS = (
-    "throw_id", "demo_id", "round", "tick", "grenade", "side", "player", "steamid", "team", "place",
+    "throw_id", "demo", "round", "tick", "grenade", "side", "player", "team", "place",
     "start_x", "start_y", "start_z", "vel_x", "vel_y", "vel_z", "origin_x", "origin_y", "origin_z",
     "takeoff_x", "takeoff_y", "takeoff_z", "pitch", "yaw", "pvel_x", "pvel_y", "pvel_z", "on_ground", "duck",
     "walking", "detonate_tick", "det_x", "det_y", "det_z", "end_tick", "flight",
 )
+PAGE_SIZE = 16384
 
 
 def flight_blob(points: list[tuple[int, float, float, float]]) -> bytes:
@@ -138,22 +166,49 @@ def xyz(prefix: str, point) -> dict:
 
 
 class Writer:
-    """Writes one cs2-throws file. Values are plain Python: None for what is not known."""
+    """Writes one cs2-throws file. Values are plain Python: None for what is not known.
+
+    Demos and throws are named by their ids (`demo_id`, `throw_id`); the writer gives each, and each player and place,
+    the file's own integer key. A demo comes before its rounds, throws and samples, and a throw before its effects."""
 
     def __init__(self, path: Path | str, producer: str = "tools/cs2_throws.py") -> None:
         self.path = Path(path)
         if self.path.exists():
             self.path.unlink()
         self.db = sqlite3.connect(self.path)
+        self.db.execute(f"pragma page_size = {PAGE_SIZE}")
         self.db.executescript(SCHEMA)
         created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.db.executemany("insert into meta values (?, ?)", [("format", FORMAT), ("version", VERSION), ("producer", producer), ("created", created)])
+        self.demos: dict[str, int] = {}
+        self.throws: dict[str, tuple[int, int]] = {}
+        self.players: dict[tuple[int, str | None, str | None], int] = {}
+        self.player_count: dict[int, int] = {}
+        self.places: dict[str, int] = {}
+
+    def player(self, demo: int, name: str | None, steamid) -> int | None:
+        """The key of a demo's player, added on first sight; None when neither name nor Steam id is known."""
+        steamid = None if steamid is None else str(steamid)
+        if name is None and steamid is None:
+            return None
+        key = (demo, name, steamid)
+        if key not in self.players:
+            self.players[key] = self.player_count[demo] = self.player_count.get(demo, 0) + 1
+            self.db.execute("insert into players values (?, ?, ?, ?)", (demo, self.players[key], name, steamid))
+        return self.players[key]
+
+    def place(self, name: str | None) -> int | None:
+        if not name:
+            return None
+        if name not in self.places:
+            self.places[name] = self.db.execute("insert into places (name) values (?)", (name,)).lastrowid
+        return self.places[name]
 
     def demo(self, demo_id: str, map: str, played_at: int | None = None, file_name: str | None = None) -> None:
-        self.db.execute("insert into demos values (?, ?, ?, ?)", (demo_id, map, played_at, file_name))
+        self.demos[demo_id] = self.db.execute("insert into demos (demo_id, map, played_at, file_name) values (?, ?, ?, ?)", (demo_id, map, played_at, file_name)).lastrowid
 
     def round(self, demo_id: str, number: int, freeze_end_tick=None, plant_tick=None, end_tick=None, winner=None) -> None:
-        self.db.execute("insert into rounds values (?, ?, ?, ?, ?, ?)", (demo_id, number, freeze_end_tick, plant_tick, end_tick, winner))
+        self.db.execute("insert into rounds values (?, ?, ?, ?, ?, ?)", (self.demos[demo_id], number, freeze_end_tick, plant_tick, end_tick, winner))
 
     def throw(self, throw_id: str, demo_id: str, tick: int, grenade: str, side: str, start, *, round=None, player=None,
               steamid=None, team=None, place=None, velocity=None, origin=None, takeoff=None, pitch=None, yaw=None,
@@ -161,9 +216,10 @@ class Writer:
         """`detonation` is (tick, (x, y, z)); `flight` is [(tick, x, y, z), ...] from the release on."""
         if grenade not in GRENADES or side not in SIDES:
             raise ValueError(f"{throw_id}: grenade {grenade!r} or side {side!r} is not one of {GRENADES} / {SIDES}")
+        demo = self.demos[demo_id]
         row = {
-            "throw_id": throw_id, "demo_id": demo_id, "round": round, "tick": tick, "grenade": grenade, "side": side,
-            "player": player, "steamid": None if steamid is None else str(steamid), "team": team, "place": place,
+            "throw_id": throw_id, "demo": demo, "round": round, "tick": tick, "grenade": grenade, "side": side,
+            "player": self.player(demo, player, steamid), "team": team, "place": self.place(place),
             **xyz("start_", start), **xyz("vel_", velocity), **xyz("origin_", origin), **xyz("takeoff_", takeoff),
             "pitch": pitch, "yaw": yaw, **xyz("pvel_", pawn_velocity),
             "on_ground": None if on_ground is None else int(on_ground), "duck": duck,
@@ -173,26 +229,39 @@ class Writer:
         if detonation is not None:
             row.update({"detonate_tick": detonation[0], **xyz("det_", detonation[1])})
         values = [row.get(c) for c in THROW_COLUMNS]
-        self.db.execute(f"insert into throws ({', '.join(THROW_COLUMNS)}) values ({', '.join('?' * len(THROW_COLUMNS))})", values)
+        key = self.db.execute(f"insert into throws ({', '.join(THROW_COLUMNS)}) values ({', '.join('?' * len(THROW_COLUMNS))})", values).lastrowid
+        self.throws[throw_id] = (key, demo)
 
     def smoke_voxels(self, throw_id: str, first_tick: int, origin, data: bytes) -> None:
         x, y, z = origin if origin is not None else (None, None, None)
-        self.db.execute("insert into smoke_voxels values (?, ?, ?, ?, ?, ?)", (throw_id, first_tick, x, y, z, data))
+        self.db.execute("insert into smoke_voxels values (?, ?, ?, ?, ?, ?)", (self.throws[throw_id][0], first_tick, x, y, z, data))
 
     def flame(self, throw_id: str, slot: int, pos, first_tick: int, last_tick: int, normal=None) -> None:
         nx, ny, nz = normal if normal is not None else (None, None, None)
-        self.db.execute("insert into flames values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (throw_id, slot, *pos, nx, ny, nz, first_tick, last_tick))
+        self.db.execute("insert into flames values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (self.throws[throw_id][0], slot, *pos, nx, ny, nz, first_tick, last_tick))
 
     def blind(self, throw_id: str, seconds: float, player=None, steamid=None, side=None, pos=None) -> None:
+        throw, demo = self.throws[throw_id]
         x, y, z = pos if pos is not None else (None, None, None)
-        self.db.execute("insert into blinds values (?, ?, ?, ?, ?, ?, ?, ?)", (throw_id, player, None if steamid is None else str(steamid), side, x, y, z, seconds))
+        self.db.execute("insert into blinds values (?, ?, ?, ?, ?, ?, ?)", (throw, self.player(demo, player, steamid), side, x, y, z, seconds))
 
     def sample(self, demo_id: str, tick: int, side: str, origin, alive: bool, player=None, steamid=None, pitch=None, yaw=None, duck=None, place=None) -> None:
-        self.db.execute("insert into player_samples values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (demo_id, tick, player, None if steamid is None else str(steamid), side, *origin, pitch, yaw, duck, int(alive), place))
+        """One player at one tick; a sample needs its player's name or Steam id."""
+        demo = self.demos[demo_id]
+        key = self.player(demo, player, steamid)
+        if key is None:
+            raise ValueError(f"{demo_id} tick {tick}: a sample needs a player name or a Steam id")
+        self.db.execute("insert into player_samples values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (demo, tick, key, side, *origin, pitch, yaw, duck, int(alive), self.place(place)))
 
     def tag(self, subject: str, key: str, value: str) -> None:
-        self.db.execute("insert into tags values (?, ?, ?)", (subject, key, value))
+        """A label of a demo (by its demo_id) or a throw (by its throw_id), written after its subject."""
+        if subject in self.demos:
+            self.db.execute("insert into demo_tags values (?, ?, ?)", (self.demos[subject], key, value))
+        elif subject in self.throws:
+            self.db.execute("insert into throw_tags values (?, ?, ?)", (self.throws[subject][0], key, value))
+        else:
+            raise ValueError(f"tag {key}: {subject!r} is no demo or throw written so far")
 
     def close(self) -> None:
         self.db.commit()

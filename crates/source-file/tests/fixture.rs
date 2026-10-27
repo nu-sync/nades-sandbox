@@ -98,7 +98,7 @@ fn check_finds_no_problem_and_counts_what_the_fixture_holds() {
     let dir = scratch("check");
     let report = check(&fixture(&dir)).unwrap();
     assert!(report.errors.is_empty() && report.warnings.is_empty(), "{:?} {:?}", report.errors, report.warnings);
-    assert!(report.meta.contains(&("format".into(), "cs2-throws".into())) && report.meta.contains(&("version".into(), "1.0".into())));
+    assert!(report.meta.contains(&("format".into(), "cs2-throws".into())) && report.meta.contains(&("version".into(), "2.0".into())));
     let c = report.census;
     assert_eq!((c.demos, c.throws, c.landed, c.with_flight, c.with_view, c.with_release, c.airborne, c.airborne_with_takeoff), (3, 11, 11, 3, 3, 3, 1, 1));
     assert_eq!((c.smokes, c.smokes_with_voxels, c.fires, c.fires_with_flames, c.flashes, c.blinds), (5, 2, 2, 2, 2, 2));
@@ -108,6 +108,14 @@ fn check_finds_no_problem_and_counts_what_the_fixture_holds() {
     write("schema", &empty);
     let report = check(&empty).unwrap();
     assert_eq!((report.census.throws, report.errors.len()), (0, 0));
+    // a key that names no row is a warning: the reader reads it as unknown
+    let dangling = fixture(&dir);
+    let db = rusqlite::Connection::open(&dangling).unwrap();
+    db.execute_batch("insert into player_samples values (1, 99999, 42, 'T', 0, 0, 0, null, null, null, 1, 77); insert into throw_tags values (12345, 'x.y', 'z')").unwrap();
+    drop(db);
+    let report = check(&dangling).unwrap();
+    assert_eq!(report.errors, Vec::<String>::new());
+    assert_eq!(report.warnings, ["1 player samples whose player is not in players", "1 player samples whose place is not in places", "1 throw tags of no throw in throws"]);
     let broken = dir.join("broken.sqlite");
     std::fs::write(&broken, b"not a database at all, just bytes that are long enough to look like a header").unwrap();
     assert!(matches!(check(&broken), Err(SourceError::Corrupt(_))));
@@ -124,12 +132,12 @@ fn files_merge_taking_each_demo_once_and_another_major_version_is_refused() {
     // a folder gives its cs2-throws files
     std::fs::write(dir.join("notes.txt"), "not a throws file").unwrap();
     assert_eq!(nades_source_file::expand(std::slice::from_ref(&dir)).unwrap(), [second.clone(), first.clone()]);
-    // version 2 is refused, naming both versions
-    rusqlite::Connection::open(&second).unwrap().execute("update meta set value = '2.0' where key = 'version'", []).unwrap();
+    // version 1 is refused, naming both versions and what to do, before its tables are looked at
+    rusqlite::Connection::open(&second).unwrap().execute_batch("update meta set value = '1.0' where key = 'version'; alter table demos rename column demo to x").unwrap();
     match FileSource::open(std::slice::from_ref(&second)) {
-        Err(SourceError::Incompatible { found, supported }) => assert_eq!((found, supported), (format!("{} is cs2-throws 2.0", second.display()), "cs2-throws 1.x")),
+        Err(e @ SourceError::Incompatible { .. }) => assert_eq!(e.to_string(), format!("{} is cs2-throws 1.0, an older version: write it again with a current producer, and this sandbox reads cs2-throws 2.x", second.display())),
         Err(other) => panic!("{other}"),
-        Ok(_) => panic!("version 2 was read"),
+        Ok(_) => panic!("version 1 was read"),
     }
     assert!(matches!(FileSource::open(&[dir.join("missing.sqlite")]), Err(SourceError::Missing(_))));
     assert!(matches!(FileSource::open(&[dir.join("match.dem")]), Err(SourceError::Missing(_))), "a missing demo is missing");

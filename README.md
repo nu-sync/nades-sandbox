@@ -130,7 +130,7 @@ The [MCP specification](docs/mcp-spec.md) defines each tool and its success crit
 | `crates/source2` | VTEX textures and VPK archives |
 | `crates/packer` | builds a map pack from local exports and game files |
 | `crates/model` | the sandbox's vocabulary and rules: CS2's facts, the `ThrowSource` port, grouping, technique, practice commands, round time, callouts, viewpoints, the smoke's voxel-log decoder, and `Library` |
-| `crates/source-file` | the `cs2-throws` file adapter: version 1 SQLite files, several merged into one source, and `check` |
+| `crates/source-file` | the `cs2-throws` file adapter: version 2 SQLite files, several merged into one source, and `check` |
 | `crates/config` | where the settings come from: `--data`, `NADES_SANDBOX_DATA`, the config file, the default |
 | `crates/scene` | a throw as a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud and light, the fire |
 | `tools/cs2_throws.py` | the format's schema and a reference writer, Python's standard library only |

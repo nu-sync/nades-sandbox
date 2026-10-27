@@ -77,13 +77,13 @@ mod tests {
     #[test]
     fn the_report_names_the_file_its_problems_and_each_feature() {
         let report = Report {
-            meta: vec![("format".into(), "cs2-throws".into()), ("version".into(), "1.0".into()), ("producer".into(), "a parser".into())],
+            meta: vec![("format".into(), "cs2-throws".into()), ("version".into(), "2.0".into()), ("producer".into(), "a parser".into())],
             errors: vec!["2 throws with a side other than 'T' or 'CT'".into()],
             warnings: Vec::new(),
             census: Census { demos: 1, throws: 4, landed: 4, with_flight: 1, ..Default::default() },
         };
         let text = describe("x.sqlite", &report);
-        assert!(text.starts_with("x.sqlite: cs2-throws 1.0 (producer a parser)\n  1 demo, 4 throws, 0 player samples\n  error: 2 throws"), "{text}");
+        assert!(text.starts_with("x.sqlite: cs2-throws 2.0 (producer a parser)\n  1 demo, 4 throws, 0 player samples\n  error: 2 throws"), "{text}");
         assert!(text.contains("  partly  the drawn trajectory (1 of 4)\n          needs the flight · 3 throws without a flight\n"), "{text}");
         assert!(text.contains("  off     technique (movement, click)\n"), "{text}");
     }

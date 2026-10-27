@@ -1,7 +1,8 @@
 # A standalone, general-purpose sandbox: the proposed APIs (for review)
 
 Proposal, revision 2, 2026-10-26. Step 1 (the core, the file adapter and the switch away from show-me-the-nades'
-database) is implemented; docs/decisions.md S24 records it and the refinements to §4 it needed.
+database) is implemented; docs/decisions.md S24 records it and the refinements to §4 it needed. §3 is at version 2.0
+(S25): integer keys inside the file, a third of version 1's size.
 
 **The goal.** Anyone with CS2 demos sees their throws in 3D on any CS2 map. Nothing the sandbox exposes depends on
 how show-me-the-nades, or any other tool, stores or labels its data.
@@ -62,7 +63,7 @@ Every other fact is optional. Each feature names the facts it needs:
 
 `nades-sandbox check <file>` prints this table for a given file: what works, what is off and which fact is missing.
 
-## 3. The facts: `cs2-throws`, version 1
+## 3. The facts: `cs2-throws`, version 2
 
 The container is one SQLite file:
 - any language writes it, Python's standard library included;
@@ -74,35 +75,60 @@ The container is one SQLite file:
 `m_angEyeAngles` stores them; pitch is positive looking down. Ticks are server ticks, 64 a second. Sides are `T` and
 `CT`; grenades are `smoke`, `flash`, `he`, `molotov`, `incendiary` and `decoy`.
 
+**Keys.** `demo_id` and `throw_id` name a demo and a throw across files, and tags and the sandbox's API use them. Inside
+one file, tables refer to a demo, a player, a place and a throw by small integer keys the writer picks: `demos.demo`,
+`players.player` (per demo), `places.place` and `throws.throw`. A writer that leaves the key out of an insert gets
+SQLite's next row id. A player is one name and Steam id pair, so a player renamed mid-demo has two keys.
+
+**Writing it well.** Set `pragma page_size = 16384` before the first `create table`: the file is ≈10% smaller than
+with SQLite's 4 KB default, mostly in voxel logs. Write each table in its key order; `player_samples` and `flames` are
+stored in key order, so their keys are their only index.
+
 ```sql
 create table meta (key text primary key, value text not null);
--- required: format = 'cs2-throws', version = '1.0'; optional: producer (free text), created (ISO 8601, UTC)
+-- required: format = 'cs2-throws', version = '2.0'; optional: producer (free text), created (ISO 8601, UTC)
 
 create table demos (
-    demo_id   text primary key,  -- recommended: the .dem file's SHA-256, hex
-    map       text not null,     -- the demo header's map name, e.g. 'de_inferno'
-    played_at integer,           -- unix ms, UTC, when known
+    demo      integer primary key,  -- the file's own key for the demo; other tables refer to it by this
+    demo_id   text not null unique, -- the demo's id across files; recommended: the .dem file's SHA-256, hex
+    map       text not null,        -- the demo header's map name, e.g. 'de_inferno'
+    played_at integer,              -- unix ms, UTC, when known
     file_name text
 );
 
+create table players (           -- optional; each name and Steam id pair a demo shows
+    demo    integer not null,    -- demos.demo
+    player  integer not null,    -- the file's own key for the player within the demo
+    name    text,                -- m_iszPlayerName
+    steamid text,                -- m_steamID (SteamID64), decimal
+    primary key (demo, player)
+) without rowid;
+
+create table places (            -- optional; the place names the file uses
+    place integer primary key,
+    name  text not null unique   -- m_szLastPlaceName
+);
+
 create table rounds (            -- optional
-    demo_id text not null, number integer not null,
+    demo integer not null, number integer not null,
     freeze_end_tick integer,     -- round_freeze_end
     plant_tick integer,          -- bomb_planted
     end_tick integer,            -- round_end
     winner text,                 -- 'T' | 'CT'
-    primary key (demo_id, number)
-);
+    primary key (demo, number)
+) without rowid;
 
 create table throws (
-    throw_id text primary key,   -- unique in the file; recommended '<demo_id>:<tick>:<projectile entity index>'
-    demo_id  text not null,
+    throw    integer primary key,  -- the file's own key for the throw; other tables refer to it by this
+    throw_id text not null unique, -- the throw's id across files; recommended '<demo_id>:<tick>:<projectile entity index>'
+    demo     integer not null,     -- demos.demo
     round    integer,
-    tick     integer not null,   -- the projectile's first tick
-    grenade  text not null,      -- from the projectile's class; molotov or incendiary by m_bIsIncGrenade
-    side     text not null,      -- the thrower's m_iTeamNum
-    player   text, steamid text, team text,  -- m_iszPlayerName, m_steamID (SteamID64), m_szClanTeamname
-    place    text,               -- the thrower's m_szLastPlaceName
+    tick     integer not null,     -- the projectile's first tick
+    grenade  text not null,        -- from the projectile's class; molotov or incendiary by m_bIsIncGrenade
+    side     text not null,        -- the thrower's m_iTeamNum
+    player   integer,              -- players.player in this demo: the thrower
+    team     text,                 -- the thrower's m_szClanTeamname
+    place    integer,              -- places.place: the thrower's m_szLastPlaceName
     start_x real not null, start_y real not null, start_z real not null,  -- m_vInitialPosition
     vel_x real, vel_y real, vel_z real,                                    -- m_vInitialVelocity
     -- the thrower's pawn at `tick`, when known
@@ -118,55 +144,73 @@ create table throws (
     end_tick integer,                                           -- its expiry event (smokegrenade_expired, inferno_expire)
     flight blob  -- the projectile's networked positions; per point, little-endian i32 tick, f32 x, f32 y, f32 z
 );
-create index throws_by_demo on throws (demo_id, tick);
+create index throws_by_demo on throws (demo, tick);
 
 create table smoke_voxels (      -- optional
-    throw_id   text primary key,
+    throw      integer primary key, -- throws.throw
     first_tick integer not null, -- the tick m_nVoxelFrameDataSize first became non-zero
     x real, y real, z real,      -- m_vSmokeDetonationPos
     bytes blob not null          -- m_VoxelFrameData[0 .. m_nVoxelFrameDataSize], as last networked
 );
 
 create table flames (            -- optional; the inferno's arrays
-    throw_id text not null, slot integer not null,
+    throw integer not null, slot integer not null,             -- throws.throw
     x real not null, y real not null, z real not null,         -- m_firePositions[slot]
     nx real, ny real, nz real,                                 -- m_BurnNormal[slot]
-    first_tick integer not null, last_tick integer not null    -- while m_bFireIsBurning[slot]
-);
-create index flames_by_throw on flames (throw_id);
+    first_tick integer not null, last_tick integer not null,   -- while m_bFireIsBurning[slot]
+    primary key (throw, slot)
+) without rowid;
 
 create table blinds (            -- optional; player_blind
-    throw_id text not null, player text, steamid text, side text,
+    throw  integer not null,     -- throws.throw
+    player integer,              -- players.player in the throw's demo: who was blinded
+    side   text,
     x real, y real, z real,      -- the victim's origin at the event, when known
-    seconds  real not null       -- blind_duration
+    seconds real not null        -- blind_duration
 );
-create index blinds_by_throw on blinds (throw_id);
+create index blinds_by_throw on blinds (throw);
 
 create table player_samples (    -- optional; any rate (viewpoints want 2 a second or more)
-    demo_id text not null, tick integer not null,
-    player text, steamid text, side text not null,
+    demo   integer not null,     -- demos.demo
+    tick   integer not null,
+    player integer not null,     -- players.player in this demo
+    side   text not null,
     x real not null, y real not null, z real not null,  -- the pawn's origin
     pitch real, yaw real, duck real,
-    alive integer not null,      -- m_lifeState
-    place text                   -- m_szLastPlaceName
-);
-create index samples_by_tick on player_samples (demo_id, tick);
+    alive  integer not null,     -- m_lifeState
+    place  integer,              -- places.place: m_szLastPlaceName
+    primary key (demo, tick, player)
+) without rowid;
 
-create table tags (              -- optional; a producer's own labels
-    subject text not null,       -- a demo_id or a throw_id
-    key     text not null,       -- '<namespace>.<name>', e.g. 'nades.lineup', 'hltv.event'
-    value   text not null
+create table demo_tags (         -- optional; a producer's own labels of a demo
+    demo  integer not null,      -- demos.demo
+    key   text not null,         -- '<namespace>.<name>', e.g. 'hltv.event'
+    value text not null
 );
-create index tags_by_subject on tags (subject);
+create index demo_tags_by_demo on demo_tags (demo);
+
+create table throw_tags (        -- optional; a producer's own labels of a throw
+    throw integer not null,      -- throws.throw
+    key   text not null,         -- '<namespace>.<name>', e.g. 'nades.lineup'
+    value text not null
+);
+create index throw_tags_by_throw on throw_tags (throw);
 ```
 
 **Compatibility:**
-- A reader accepts any 1.x and ignores the tables and columns it does not know.
+- A reader accepts any 2.x and ignores the tables and columns it does not know.
 - A producer bumps the major version for any change of meaning.
 - A reader refuses another major version and names both versions.
 
-**Size:** ≈200–250 MB per 100 demos, as measured for revision 1. The large parts (flights, samples, voxel logs,
-flames) are unchanged.
+**Size:** ≈340 MB per 100 demos, as measured for version 2.0: show-me-the-nades' export of 247 demos (116,480 throws,
+7.78 M player samples, twice a second in live rounds) is 830 MB. Player samples are 497 MB of it (64 bytes a row,
+most of it their six reals), throws with their flights 177 MB, smoke voxel logs 97 MB, flames 24 MB, tags 22 MB. One
+map's facts read in 0.14–0.21 s, 17% faster than from version 1.
+
+**Version 1** (2026-10-26, no outside users) repeated `demo_id`, the player's name and Steam id, and the place as
+text in every sample row, with a separate index over them: 2.47 GB for the same 247 demos, 77% of it samples. Version 2
+changed only how rows refer to each other; every fact and every column's meaning is as it was. The sandbox refuses a 1.x
+file and says to write it again.
 
 ## 4. What the sandbox derives
 

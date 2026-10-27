@@ -1,4 +1,4 @@
-//! The `cs2-throws` file adapter (docs/standalone-api.md §3, §6): reads version 1 files with SQLite, read-only, and
+//! The `cs2-throws` file adapter (docs/standalone-api.md §3, §6): reads version 2 files with SQLite, read-only, and
 //! merges several into one [`ThrowSource`]. A demo in two files (the same `demo_id`) is taken once, from the first file
 //! that has it; another major version is refused, naming both. Tables and columns this reader does not know are
 //! ignored, and optional ones a file leaves out read as empty.
@@ -24,29 +24,32 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params};
 
 pub const FORMAT: &str = "cs2-throws";
-/// The major version this reader reads; any 1.x.
-pub const MAJOR: u32 = 1;
-const SUPPORTED: &str = "cs2-throws 1.x";
+/// The major version this reader reads; any 2.x.
+pub const MAJOR: u32 = 2;
+const SUPPORTED: &str = "cs2-throws 2.x";
 
-/// The tables and columns of version 1 this reader reads: each table's first `n` columns are required when the
+/// The tables and columns of version 2 this reader reads: each table's first `n` columns are required when the
 /// table is there. `meta`, `demos` and `throws` must be there.
 const TABLES: &[(&str, usize, &[&str])] = &[
     ("meta", 2, &["key", "value"]),
-    ("demos", 2, &["demo_id", "map", "played_at", "file_name"]),
-    ("rounds", 2, &["demo_id", "number", "freeze_end_tick", "plant_tick", "end_tick", "winner"]),
+    ("demos", 3, &["demo", "demo_id", "map", "played_at", "file_name"]),
+    ("players", 2, &["demo", "player", "name", "steamid"]),
+    ("places", 2, &["place", "name"]),
+    ("rounds", 2, &["demo", "number", "freeze_end_tick", "plant_tick", "end_tick", "winner"]),
     (
         "throws",
-        8,
+        9,
         &[
-            "throw_id", "demo_id", "tick", "grenade", "side", "start_x", "start_y", "start_z", "round", "player", "steamid", "team", "place", "vel_x", "vel_y", "vel_z", "origin_x", "origin_y", "origin_z", "takeoff_x", "takeoff_y", "takeoff_z", "pitch", "yaw", "pvel_x", "pvel_y", "pvel_z",
-            "on_ground", "duck", "walking", "detonate_tick", "det_x", "det_y", "det_z", "end_tick", "flight",
+            "throw", "throw_id", "demo", "tick", "grenade", "side", "start_x", "start_y", "start_z", "round", "player", "team", "place", "vel_x", "vel_y", "vel_z", "origin_x", "origin_y", "origin_z", "takeoff_x", "takeoff_y", "takeoff_z", "pitch", "yaw", "pvel_x", "pvel_y", "pvel_z", "on_ground",
+            "duck", "walking", "detonate_tick", "det_x", "det_y", "det_z", "end_tick", "flight",
         ],
     ),
-    ("smoke_voxels", 3, &["throw_id", "first_tick", "bytes", "x", "y", "z"]),
-    ("flames", 7, &["throw_id", "slot", "x", "y", "z", "first_tick", "last_tick", "nx", "ny", "nz"]),
-    ("blinds", 2, &["throw_id", "seconds", "player", "steamid", "side", "x", "y", "z"]),
-    ("player_samples", 7, &["demo_id", "tick", "side", "x", "y", "z", "alive", "player", "steamid", "pitch", "yaw", "duck", "place"]),
-    ("tags", 3, &["subject", "key", "value"]),
+    ("smoke_voxels", 3, &["throw", "first_tick", "bytes", "x", "y", "z"]),
+    ("flames", 7, &["throw", "slot", "x", "y", "z", "first_tick", "last_tick", "nx", "ny", "nz"]),
+    ("blinds", 2, &["throw", "seconds", "player", "side", "x", "y", "z"]),
+    ("player_samples", 8, &["demo", "tick", "player", "side", "x", "y", "z", "alive", "pitch", "yaw", "duck", "place"]),
+    ("demo_tags", 3, &["demo", "key", "value"]),
+    ("throw_tags", 3, &["throw", "key", "value"]),
 ];
 
 /// A flight point's bytes: i32 tick, f32 x, y, z, little-endian.
@@ -84,9 +87,28 @@ impl Schema {
         self.0.get(table).is_some_and(|c| c.contains(column))
     }
 
-    /// `columns` as a select list, a column the file lacks as null.
-    fn cols(&self, table: &str, columns: &[&str]) -> String {
-        columns.iter().map(|c| if self.has(table, c) { format!("\"{c}\"") } else { "null".into() }).collect::<Vec<_>>().join(", ")
+    /// `columns` of `table` (as `alias`) as a select list, a column the file lacks as null.
+    fn cols(&self, table: &str, alias: &str, columns: &[&str]) -> String {
+        columns.iter().map(|c| if self.has(table, c) { format!("{alias}.\"{c}\"") } else { "null".into() }).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The name and Steam id of the player a `table` row (as `alias`) names in the demo `demo`: a select list of two
+    /// and its join, or two nulls when the file cannot say.
+    fn player(&self, table: &str, alias: &str, demo: &str) -> (String, String) {
+        if self.has_table("players") && self.has(table, "player") {
+            (self.cols("players", "pn", &["name", "steamid"]), format!(" left join players pn on pn.demo = {demo} and pn.player = {alias}.player"))
+        } else {
+            ("null, null".into(), String::new())
+        }
+    }
+
+    /// The place name a `table` row (as `alias`) names: a select expression and its join.
+    fn place(&self, table: &str, alias: &str) -> (String, String) {
+        if self.has_table("places") && self.has(table, "place") {
+            ("pl.name".into(), format!(" left join places pl on pl.place = {alias}.place"))
+        } else {
+            ("null".into(), String::new())
+        }
     }
 }
 
@@ -134,6 +156,7 @@ fn version(meta: &[(String, String)], path: &Path) -> Result<String, SourceError
     let version = value("version").ok_or_else(|| SourceError::Corrupt(format!("{}: meta has no version", path.display())))?;
     match version.split('.').next().and_then(|m| m.trim().parse::<u32>().ok()) {
         Some(MAJOR) => Ok(version.to_string()),
+        Some(older) if older < MAJOR => Err(SourceError::Incompatible { found: format!("{} is {FORMAT} {version}, an older version: write it again with a current producer", path.display()), supported: SUPPORTED }),
         _ => Err(SourceError::Incompatible { found: format!("{} is {FORMAT} {version}", path.display()), supported: SUPPORTED }),
     }
 }
@@ -141,16 +164,21 @@ fn version(meta: &[(String, String)], path: &Path) -> Result<String, SourceError
 fn open_file(path: &Path) -> Result<Open, SourceError> {
     let stamp = stamp(path)?;
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dem")) {
-        return Err(SourceError::Incompatible { found: format!("{} is a demo", path.display()), supported: "cs2-throws 1.x files (reading demos comes with the demo adapter)" });
+        return Err(SourceError::Incompatible { found: format!("{} is a demo", path.display()), supported: "cs2-throws 2.x files (reading demos comes with the demo adapter)" });
     }
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql(path))?;
     conn.busy_timeout(Duration::from_secs(2)).map_err(sql(path))?;
-    let schema = Schema::read(&conn, path)?;
+    // the version first: another version's tables are not this one's
+    let has_meta: bool = conn.query_row("select count(*) > 0 from pragma_table_info('meta')", [], |r| r.get(0)).map_err(sql(path))?;
+    if !has_meta {
+        return Err(SourceError::Corrupt(format!("{} has no meta table: not a {FORMAT} file", path.display())));
+    }
     let meta: Vec<(String, String)> = {
         let mut q = conn.prepare("select key, value from meta order by rowid").map_err(sql(path))?;
         q.query_map([], |r| Ok((text(r, 0)?.unwrap_or_default(), text(r, 1)?.unwrap_or_default()))).map_err(sql(path))?.collect::<Result<_, _>>().map_err(sql(path))?
     };
     version(&meta, path)?;
+    let schema = Schema::read(&conn, path)?;
     Ok(Open { path: path.to_path_buf(), conn, stamp, schema, meta })
 }
 
@@ -278,7 +306,7 @@ impl ThrowSource for FileSource {
     fn map_of(&self, throw: &ThrowId) -> Result<Option<MapName>, SourceError> {
         self.with(|inner| {
             for (i, f) in inner.files.iter().enumerate() {
-                let demo: Option<String> = f.conn.query_row("select demo_id from throws where throw_id = ?1", [throw.as_str()], |r| text(r, 0)).optional().map_err(sql(&f.path))?.flatten();
+                let demo: Option<String> = f.conn.query_row("select d.demo_id from throws t join demos d on d.demo = t.demo where t.throw_id = ?1", [throw.as_str()], |r| text(r, 0)).optional().map_err(sql(&f.path))?.flatten();
                 if let Some(demo) = demo.filter(|d| inner.owns(i, d)) {
                     return Ok(inner.owners.get(&demo).map(|(_, m)| MapName(m.clone())));
                 }
@@ -305,8 +333,12 @@ impl ThrowSource for FileSource {
             if !f.schema.has_table("player_samples") {
                 return Ok(Vec::new());
             }
-            let columns = f.schema.cols("player_samples", &["tick", "player", "steamid", "side", "x", "y", "z", "pitch", "yaw", "duck", "alive", "place"]);
-            let mut q = f.conn.prepare(&format!("select {columns} from player_samples where demo_id = ?1 and tick between ?2 and ?3 order by tick")).map_err(sql(&f.path))?;
+            let s = &f.schema;
+            let (who, players) = s.player("player_samples", "s", "s.demo");
+            let (place, places) = s.place("player_samples", "s");
+            let columns = s.cols("player_samples", "s", &["side", "x", "y", "z", "pitch", "yaw", "duck", "alive"]);
+            let query = format!("select s.tick, {who}, {columns}, {place} from demos d cross join player_samples s on s.demo = d.demo{players}{places} where d.demo_id = ?1 and s.tick between ?2 and ?3 order by s.tick, s.player");
+            let mut q = f.conn.prepare(&query).map_err(sql(&f.path))?;
             let rows = q.query_map(params![demo.as_str(), ticks.start().0, ticks.end().0], |r| {
                 Ok((|| {
                     Some(Sample {
@@ -335,11 +367,12 @@ impl ThrowSource for FileSource {
         self.with(|inner| {
             let mut out = Vec::new();
             for (i, f) in inner.files.iter().enumerate() {
-                if !f.schema.has_table("player_samples") || !f.schema.has("player_samples", "place") {
+                if !f.schema.has_table("player_samples") || !f.schema.has_table("places") || !f.schema.has("player_samples", "place") {
                     continue;
                 }
-                let demos: Vec<String> = inner.owners.iter().filter(|(_, (at, m))| *at == i && m == map.as_str()).map(|(d, _)| d.clone()).collect();
-                let mut q = f.conn.prepare("select x, y, z, place from player_samples where demo_id = ?1 and alive <> 0 and place is not null and place <> ''").map_err(sql(&f.path))?;
+                let mut demos: Vec<String> = inner.owners.iter().filter(|(_, (at, m))| *at == i && m == map.as_str()).map(|(d, _)| d.clone()).collect();
+                demos.sort();
+                let mut q = f.conn.prepare("select s.x, s.y, s.z, pl.name from demos d cross join player_samples s on s.demo = d.demo join places pl on pl.place = s.place where d.demo_id = ?1 and s.alive <> 0 and pl.name <> '' order by s.tick, s.player").map_err(sql(&f.path))?;
                 for demo in demos {
                     let rows = q.query_map([demo], |r| Ok((|| Some(([real_at(r, 0)?, real_at(r, 1)?, real_at(r, 2)?], text_at(r, 3)?)))())).map_err(sql(&f.path))?;
                     for row in rows {
@@ -407,12 +440,14 @@ fn flight(bytes: &[u8]) -> Option<Vec<(Tick, Vec3)>> {
     bytes.len().is_multiple_of(POINT).then(|| bytes.chunks_exact(POINT).map(point).collect())
 }
 
+/// The columns of `throws` a [`Throw`] reads, after its id, demo, round, tick, grenade, side, player and Steam id,
+/// team and place.
 const THROW_COLUMNS: &[&str] = &[
-    "throw_id", "demo_id", "round", "tick", "grenade", "side", "player", "steamid", "team", "place", "start_x", "start_y", "start_z", "vel_x", "vel_y", "vel_z", "origin_x", "origin_y", "origin_z", "takeoff_x", "takeoff_y", "takeoff_z", "pitch", "yaw", "pvel_x", "pvel_y", "pvel_z", "on_ground",
-    "duck", "walking", "detonate_tick", "det_x", "det_y", "det_z", "end_tick",
+    "start_x", "start_y", "start_z", "vel_x", "vel_y", "vel_z", "origin_x", "origin_y", "origin_z", "takeoff_x", "takeoff_y", "takeoff_z", "pitch", "yaw", "pvel_x", "pvel_y", "pvel_z", "on_ground", "duck", "walking", "detonate_tick", "det_x", "det_y", "det_z", "end_tick",
 ];
 
-/// A `throws` row (THROW_COLUMNS, then the flight's last point); None when its required facts do not read.
+/// A `throws` row (throw_id, demo_id, round, tick, grenade, side, name, Steam id, team, place, THROW_COLUMNS, then the
+/// flight's last point); None when its required facts do not read.
 fn throw_of(r: &Row) -> Option<Throw> {
     let pawn = three(r, 16).map(|origin| Pawn {
         origin,
@@ -448,25 +483,29 @@ fn throw_of(r: &Row) -> Option<Throw> {
     })
 }
 
+/// Reads one map's facts. Each query starts from the map's demos (`cross join` keeps SQLite to that order), so a small
+/// map reads only its own rows.
 fn read_map(f: &Open, map: &str, owns: &dyn Fn(&str) -> bool, facts: &mut MapFacts) -> rusqlite::Result<()> {
     let s = &f.schema;
     let mut demo_tags: HashMap<String, Tags> = HashMap::new();
     let mut throw_tags: HashMap<String, Tags> = HashMap::new();
-    if s.has_table("tags") {
-        let mut q = f.conn.prepare("select subject, key, value from tags where subject in (select demo_id from demos where map = ?1) order by rowid")?;
+    if s.has_table("demo_tags") {
+        let mut q = f.conn.prepare("select d.demo_id, g.key, g.value from demos d cross join demo_tags g on g.demo = d.demo where d.map = ?1 order by g.rowid")?;
         for row in q.query_map([map], |r| Ok((text(r, 0)?, text(r, 1)?, text(r, 2)?)))? {
             if let (Some(subject), Some(key), Some(value)) = row? {
                 demo_tags.entry(subject).or_default().push((key, value));
             }
         }
-        let mut q = f.conn.prepare("select g.subject, g.key, g.value from tags g join throws t on t.throw_id = g.subject where t.demo_id in (select demo_id from demos where map = ?1) order by g.rowid")?;
+    }
+    if s.has_table("throw_tags") {
+        let mut q = f.conn.prepare("select t.throw_id, g.key, g.value from demos d cross join throws t on t.demo = d.demo cross join throw_tags g on g.throw = t.throw where d.map = ?1 order by g.rowid")?;
         for row in q.query_map([map], |r| Ok((text(r, 0)?, text(r, 1)?, text(r, 2)?)))? {
             if let (Some(subject), Some(key), Some(value)) = row? {
                 throw_tags.entry(subject).or_default().push((key, value));
             }
         }
     }
-    let mut q = f.conn.prepare(&format!("select demo_id, map, {} from demos where map = ?1", s.cols("demos", &["played_at", "file_name"])))?;
+    let mut q = f.conn.prepare(&format!("select d.demo_id, d.map, {} from demos d where d.map = ?1 order by d.demo", s.cols("demos", "d", &["played_at", "file_name"])))?;
     for row in q.query_map([map], |r| Ok((text(r, 0)?, text(r, 1)?, int(r, 2), text(r, 3)?)))? {
         let (Some(id), Some(map), played_at, file_name) = row? else { continue };
         if owns(&id) {
@@ -475,7 +514,8 @@ fn read_map(f: &Open, map: &str, owns: &dyn Fn(&str) -> bool, facts: &mut MapFac
         }
     }
     if s.has_table("rounds") {
-        let mut q = f.conn.prepare(&format!("select demo_id, number, {} from rounds where demo_id in (select demo_id from demos where map = ?1)", s.cols("rounds", &["freeze_end_tick", "plant_tick", "end_tick", "winner"])))?;
+        let columns = s.cols("rounds", "r", &["freeze_end_tick", "plant_tick", "end_tick", "winner"]);
+        let mut q = f.conn.prepare(&format!("select d.demo_id, r.number, {columns} from demos d cross join rounds r on r.demo = d.demo where d.map = ?1 order by r.demo, r.number"))?;
         for row in q.query_map([map], |r| {
             Ok((|| {
                 Some(Round {
@@ -493,8 +533,16 @@ fn read_map(f: &Open, map: &str, owns: &dyn Fn(&str) -> bool, facts: &mut MapFac
             }
         }
     }
-    let flight_end = if s.has("throws", "flight") { format!("case when length(flight) >= {POINT} and length(flight) % {POINT} = 0 then substr(flight, -{POINT}) end") } else { "null".into() };
-    let mut q = f.conn.prepare(&format!("select {}, {flight_end} from throws where demo_id in (select demo_id from demos where map = ?1)", s.cols("throws", THROW_COLUMNS)))?;
+    let flight_end = if s.has("throws", "flight") { format!("case when length(t.flight) >= {POINT} and length(t.flight) % {POINT} = 0 then substr(t.flight, -{POINT}) end") } else { "null".into() };
+    let (who, players) = s.player("throws", "t", "t.demo");
+    let (place, places) = s.place("throws", "t");
+    let query = format!(
+        "select t.throw_id, d.demo_id, {}, t.tick, t.grenade, t.side, {who}, {}, {place}, {}, {flight_end} from demos d cross join throws t on t.demo = d.demo{players}{places} where d.map = ?1 order by t.demo, t.tick, t.throw",
+        s.cols("throws", "t", &["round"]),
+        s.cols("throws", "t", &["team"]),
+        s.cols("throws", "t", THROW_COLUMNS),
+    );
+    let mut q = f.conn.prepare(&query)?;
     for row in q.query_map([map], |r| Ok(throw_of(r)))? {
         if let Some(mut throw) = row?.filter(|t| owns(t.demo.as_str())) {
             throw.tags = throw_tags.remove(throw.id.as_str()).unwrap_or_default();
@@ -507,21 +555,21 @@ fn read_map(f: &Open, map: &str, owns: &dyn Fn(&str) -> bool, facts: &mut MapFac
 fn read_tracks(f: &Open, throw: &str, owns: &dyn Fn(&str) -> bool) -> Result<Option<Tracks>, SourceError> {
     let s = &f.schema;
     let e = sql(&f.path);
-    let flight_column = if s.has("throws", "flight") { "flight" } else { "null" };
-    // its demo, its grenade and its flight's bytes
-    type Row = (Option<String>, Option<String>, Option<Vec<u8>>);
+    let flight_column = if s.has("throws", "flight") { "t.flight" } else { "null" };
+    // its key, its demo's key and id, its grenade and its flight's bytes
+    type Row = (i64, i64, Option<String>, Option<String>, Option<Vec<u8>>);
     let row: Option<Row> = f
         .conn
-        .query_row(&format!("select demo_id, grenade, {flight_column} from throws where throw_id = ?1"), [throw], |r| {
-            let blob = match r.get_ref(2)? {
+        .query_row(&format!("select t.throw, t.demo, d.demo_id, t.grenade, {flight_column} from throws t join demos d on d.demo = t.demo where t.throw_id = ?1"), [throw], |r| {
+            let blob = match r.get_ref(4)? {
                 ValueRef::Blob(b) => Some(b.to_vec()),
                 _ => None,
             };
-            Ok((text(r, 0)?, text(r, 1)?, blob))
+            Ok((r.get(0)?, r.get(1)?, text(r, 2)?, text(r, 3)?, blob))
         })
         .optional()
         .map_err(&e)?;
-    let Some((Some(demo), Some(grenade), blob)) = row else { return Ok(None) };
+    let Some((key, demo_key, Some(demo), Some(grenade), blob)) = row else { return Ok(None) };
     if !owns(&demo) {
         return Ok(None);
     }
@@ -534,7 +582,7 @@ fn read_tracks(f: &Open, throw: &str, owns: &dyn Fn(&str) -> bool) -> Result<Opt
         Grenade::Smoke if s.has_table("smoke_voxels") => {
             let voxels = f
                 .conn
-                .query_row(&format!("select first_tick, bytes, {} from smoke_voxels where throw_id = ?1", s.cols("smoke_voxels", &["x", "y", "z"])), [throw], |r| {
+                .query_row(&format!("select v.first_tick, v.bytes, {} from smoke_voxels v where v.throw = ?1", s.cols("smoke_voxels", "v", &["x", "y", "z"])), [key], |r| {
                     let bytes = match r.get_ref(1)? {
                         ValueRef::Blob(b) => b.to_vec(),
                         _ => Vec::new(),
@@ -548,17 +596,18 @@ fn read_tracks(f: &Open, throw: &str, owns: &dyn Fn(&str) -> bool) -> Result<Opt
         }
         Grenade::Smoke => Effect::Smoke(None),
         Grenade::Molotov | Grenade::Incendiary if s.has_table("flames") => {
-            let mut q = f.conn.prepare(&format!("select slot, x, y, z, first_tick, last_tick, {} from flames where throw_id = ?1 order by slot", s.cols("flames", &["nx", "ny", "nz"]))).map_err(&e)?;
+            let mut q = f.conn.prepare(&format!("select f.slot, f.x, f.y, f.z, f.first_tick, f.last_tick, {} from flames f where f.throw = ?1 order by f.slot", s.cols("flames", "f", &["nx", "ny", "nz"]))).map_err(&e)?;
             let rows = q
-                .query_map([throw], |r| Ok((|| Some(Flame { slot: u32::try_from(int(r, 0)?).ok()?, pos: three(r, 1)?, first: Tick(int(r, 4)? as i32), last: Tick(int(r, 5)? as i32), normal: three(r, 6) }))()))
+                .query_map([key], |r| Ok((|| Some(Flame { slot: u32::try_from(int(r, 0)?).ok()?, pos: three(r, 1)?, first: Tick(int(r, 4)? as i32), last: Tick(int(r, 5)? as i32), normal: three(r, 6) }))()))
                 .map_err(&e)?;
             Effect::Fire(rows.collect::<Result<Vec<_>, _>>().map_err(&e)?.into_iter().flatten().collect())
         }
         Grenade::Molotov | Grenade::Incendiary => Effect::Fire(Vec::new()),
         Grenade::Flash if s.has_table("blinds") => {
-            let mut q = f.conn.prepare(&format!("select seconds, {} from blinds where throw_id = ?1 order by rowid", s.cols("blinds", &["player", "steamid", "side", "x", "y", "z"]))).map_err(&e)?;
+            let (who, players) = s.player("blinds", "b", &demo_key.to_string());
+            let mut q = f.conn.prepare(&format!("select b.seconds, {who}, {} from blinds b{players} where b.throw = ?1 order by b.rowid", s.cols("blinds", "b", &["side", "x", "y", "z"]))).map_err(&e)?;
             let rows = q
-                .query_map([throw], |r| Ok((|| Some(Blind { seconds: real_at(r, 0)?, player: Player { name: text_at(r, 1), steamid: steamid(r, 2) }, side: text_at(r, 3).and_then(|s| Side::parse(&s)), pos: three(r, 4) }))()))
+                .query_map([key], |r| Ok((|| Some(Blind { seconds: real_at(r, 0)?, player: Player { name: text_at(r, 1), steamid: steamid(r, 2) }, side: text_at(r, 3).and_then(|s| Side::parse(&s)), pos: three(r, 4) }))()))
                 .map_err(&e)?;
             Effect::Flash(rows.collect::<Result<Vec<_>, _>>().map_err(&e)?.into_iter().flatten().collect())
         }
@@ -580,7 +629,7 @@ pub struct Report {
     pub census: Census,
 }
 
-/// Reads one file as a whole: an error when it is not a cs2-throws 1.x file at all, else its problems and census.
+/// Reads one file as a whole: an error when it is not a cs2-throws 2.x file at all, else its problems and census.
 pub fn check(path: &Path) -> Result<Report, SourceError> {
     let f = open_file(path)?;
     let s = &f.schema;
@@ -588,14 +637,16 @@ pub fn check(path: &Path) -> Result<Report, SourceError> {
     let count = |query: &str| -> Result<u64, SourceError> { f.conn.query_row(query, [], |r| r.get::<_, i64>(0)).map(|n| n as u64).map_err(&e) };
     let mut report = Report { meta: f.meta.clone(), ..Default::default() };
     let some = |cols: &[&str]| cols.iter().map(|c| if s.has("throws", c) { format!("{c} is not null") } else { "0".into() }).collect::<Vec<_>>().join(" and ");
+    // the throws whose player's `column` the file knows
+    let thrower = |column: &str| if s.has_table("players") && s.has("throws", "player") && s.has("players", column) { format!("select count(*) from throws t join players p on p.demo = t.demo and p.player = t.player where p.{column} is not null and p.{column} <> ''") } else { "select 0".into() };
     let c = &mut report.census;
     c.demos = count("select count(*) from demos")?;
     c.throws = count("select count(*) from throws")?;
     let has_flight = if s.has("throws", "flight") { format!("(flight is not null and length(flight) >= {POINT})") } else { "0".into() };
     c.landed = count(&format!("select count(*) from throws where ({}) or {has_flight}", some(&["detonate_tick", "det_x", "det_y", "det_z"])))?;
-    c.with_player = count(&format!("select count(*) from throws where {} and player <> ''", some(&["player"])))?;
+    c.with_player = count(&thrower("name"))?;
     c.with_team = count(&format!("select count(*) from throws where {} and team <> ''", some(&["team"])))?;
-    c.with_steamid = count(&format!("select count(*) from throws where {}", some(&["steamid"])))?;
+    c.with_steamid = count(&thrower("steamid"))?;
     if s.has("throws", "flight") {
         c.with_flight = count(&format!("select count(*) from throws where flight is not null and length(flight) >= {}", 2 * POINT))?;
     }
@@ -610,22 +661,22 @@ pub fn check(path: &Path) -> Result<Report, SourceError> {
     c.fires = count("select count(*) from throws where grenade in ('molotov', 'incendiary')")?;
     c.flashes = count("select count(*) from throws where grenade = 'flash'")?;
     if s.has_table("smoke_voxels") {
-        c.smokes_with_voxels = count("select count(*) from throws where grenade = 'smoke' and throw_id in (select throw_id from smoke_voxels)")?;
+        c.smokes_with_voxels = count("select count(*) from throws where grenade = 'smoke' and throw in (select throw from smoke_voxels)")?;
     }
     if s.has_table("flames") {
-        c.fires_with_flames = count("select count(*) from throws where grenade in ('molotov', 'incendiary') and throw_id in (select throw_id from flames)")?;
+        c.fires_with_flames = count("select count(*) from throws where grenade in ('molotov', 'incendiary') and throw in (select throw from flames)")?;
     }
     if s.has_table("blinds") {
         c.blinds = count("select count(*) from blinds")?;
     }
     if s.has_table("rounds") {
-        c.demos_with_rounds = count("select count(distinct demo_id) from rounds where demo_id in (select demo_id from demos)")?;
+        c.demos_with_rounds = count("select count(*) from demos where demo in (select demo from rounds)")?;
     }
     if s.has_table("player_samples") {
         c.samples = count("select count(*) from player_samples")?;
-        c.demos_with_samples = count("select count(distinct demo_id) from player_samples where demo_id in (select demo_id from demos)")?;
-        if s.has("player_samples", "place") {
-            c.samples_with_place = count("select count(*) from player_samples where place is not null and place <> ''")?;
+        c.demos_with_samples = count("select count(*) from demos d where exists (select 1 from player_samples s where s.demo = d.demo)")?;
+        if s.has("player_samples", "place") && s.has_table("places") {
+            c.samples_with_place = count("select count(*) from player_samples s join places p on p.place = s.place where p.name <> ''")?;
         }
     }
 
@@ -639,30 +690,56 @@ pub fn check(path: &Path) -> Result<Report, SourceError> {
     problem(true, count(&format!("select count(*) from throws where grenade not in ({grenades}) or grenade is null"))?, format!("throws with a grenade other than {grenades}"));
     problem(true, count("select count(*) from throws where side not in ('T', 'CT') or side is null")?, "throws with a side other than 'T' or 'CT'".into());
     problem(true, count("select count(*) from throws where start_x is null or start_y is null or start_z is null or tick is null")?, "throws without a tick or a start".into());
-    problem(true, count("select count(*) from throws where demo_id not in (select demo_id from demos)")?, "throws whose demo is not in demos".into());
+    problem(true, count("select count(*) from throws where demo not in (select demo from demos)")?, "throws whose demo is not in demos".into());
     problem(true, unlanded, "throws with neither a detonation nor a flight to land them".into());
     problem(true, count("select count(*) from demos where map is null or map = ''")?, "demos without a map".into());
     if s.has("throws", "flight") {
         problem(true, count(&format!("select count(*) from throws where flight is not null and length(flight) % {POINT} <> 0"))?, format!("flights that are not a whole number of {POINT}-byte points"));
+    }
+    // a key that names no row reads as unknown
+    let players = |table: &str, demo: &str, from: &str| -> Result<u64, SourceError> {
+        if !s.has(table, "player") {
+            return Ok(0);
+        }
+        let known = if s.has_table("players") { format!(" and not exists (select 1 from players p where p.demo = {demo} and p.player = x.player)") } else { String::new() };
+        count(&format!("select count(*) from {from} where x.player is not null{known}"))
+    };
+    problem(false, players("throws", "x.demo", "throws x")?, "throws whose player is not in players".into());
+    if s.has("throws", "place") {
+        let known = if s.has_table("places") { " and place not in (select place from places)" } else { "" };
+        problem(false, count(&format!("select count(*) from throws where place is not null{known}"))?, "throws whose place is not in places".into());
     }
     if s.has_table("smoke_voxels") {
         let mut q = f.conn.prepare("select bytes from smoke_voxels").map_err(&e)?;
         let logs = q.query_map([], |r| Ok(matches!(r.get_ref(0)?, ValueRef::Blob(b) if nades_model::smoke::decode(b).is_err()))).map_err(&e)?;
         let bad = logs.collect::<Result<Vec<bool>, _>>().map_err(&e)?.into_iter().filter(|b| *b).count();
         problem(true, bad as u64, "smoke voxel logs that do not decode".into());
-        problem(false, count("select count(*) from smoke_voxels where throw_id not in (select throw_id from throws where grenade = 'smoke')")?, "smoke voxel logs of no smoke in throws".into());
+        problem(false, count("select count(*) from smoke_voxels where throw not in (select throw from throws where grenade = 'smoke')")?, "smoke voxel logs of no smoke in throws".into());
     }
     if s.has_table("flames") {
-        problem(false, count("select count(*) from flames where throw_id not in (select throw_id from throws where grenade in ('molotov', 'incendiary'))")?, "flames of no fire in throws".into());
+        problem(false, count("select count(*) from flames where throw not in (select throw from throws where grenade in ('molotov', 'incendiary'))")?, "flames of no fire in throws".into());
     }
     if s.has_table("blinds") {
-        problem(false, count("select count(*) from blinds where throw_id not in (select throw_id from throws where grenade = 'flash')")?, "blinds of no flash in throws".into());
+        problem(false, count("select count(*) from blinds where throw not in (select throw from throws where grenade = 'flash')")?, "blinds of no flash in throws".into());
+        problem(false, players("blinds", "t.demo", "blinds x join throws t on t.throw = x.throw")?, "blinds whose player is not in players".into());
     }
     if s.has_table("player_samples") {
         problem(true, count("select count(*) from player_samples where side not in ('T', 'CT') or side is null")?, "player samples with a side other than 'T' or 'CT'".into());
+        problem(false, count("select count(*) from player_samples where demo not in (select demo from demos)")?, "player samples of no demo in demos".into());
+        problem(false, players("player_samples", "x.demo", "player_samples x")?, "player samples whose player is not in players".into());
+        if s.has("player_samples", "place") {
+            let known = if s.has_table("places") { " and place not in (select place from places)" } else { "" };
+            problem(false, count(&format!("select count(*) from player_samples where place is not null{known}"))?, "player samples whose place is not in places".into());
+        }
     }
     if s.has_table("rounds") {
-        problem(false, count("select count(*) from rounds where demo_id not in (select demo_id from demos)")?, "rounds of no demo in demos".into());
+        problem(false, count("select count(*) from rounds where demo not in (select demo from demos)")?, "rounds of no demo in demos".into());
+    }
+    if s.has_table("demo_tags") {
+        problem(false, count("select count(*) from demo_tags where demo not in (select demo from demos)")?, "demo tags of no demo in demos".into());
+    }
+    if s.has_table("throw_tags") {
+        problem(false, count("select count(*) from throw_tags where throw not in (select throw from throws)")?, "throw tags of no throw in throws".into());
     }
     Ok(report)
 }
@@ -688,11 +765,13 @@ mod tests {
     fn versions_are_read_by_their_major_number() {
         let meta = |version: &str| vec![("format".to_string(), FORMAT.to_string()), ("version".to_string(), version.to_string())];
         let path = Path::new("x.sqlite");
-        assert_eq!(version(&meta("1.0"), path).unwrap(), "1.0");
-        assert_eq!(version(&meta("1.7"), path).unwrap(), "1.7");
-        match version(&meta("2.0"), path) {
-            Err(SourceError::Incompatible { found, supported }) => assert_eq!((found.as_str(), supported), ("x.sqlite is cs2-throws 2.0", "cs2-throws 1.x")),
-            other => panic!("{other:?}"),
+        assert_eq!(version(&meta("2.0"), path).unwrap(), "2.0");
+        assert_eq!(version(&meta("2.7"), path).unwrap(), "2.7");
+        for (old, found) in [("1.0", "x.sqlite is cs2-throws 1.0, an older version: write it again with a current producer"), ("3.0", "x.sqlite is cs2-throws 3.0")] {
+            match version(&meta(old), path) {
+                Err(SourceError::Incompatible { found: f, supported }) => assert_eq!((f.as_str(), supported), (found, "cs2-throws 2.x")),
+                other => panic!("{other:?}"),
+            }
         }
         assert!(matches!(version(&[("format".into(), "nades-lineups".into())], path), Err(SourceError::Incompatible { .. })));
     }
