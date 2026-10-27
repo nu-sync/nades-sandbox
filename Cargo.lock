@@ -1749,10 +1749,17 @@ dependencies = [
 name = "nades-effects"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "glam",
+ "lz4_flex",
  "nades-model",
+ "nades-pack",
  "nades-physics",
  "nades-scene",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1004,3 +1004,109 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   release from 51 setups, and, where the packs are, every landing within its recorded error (skipped without them).
 - **Not done:** surface materials (the collider has none), players as obstacles, the game's own hull against the
   collision mesh's edges, and subtick releases (the recorded start already carries them).
+
+
+## S33 · The simulated smoke and fire, learned from recorded ones
+
+- **Decision:** `crates/effects` makes what a grenade leaves from the map's collider alone, so a placed throw's effect
+  respects walls. `smoke_grid` builds what the game's voxel log would have said: the solid voxels, the bricks sent
+  over time, the emitters and the smoke's length. `fill_cloud` grows the cloud from those, as it does from a recorded
+  log. `fire_flames` and `fire_flames_of(kind, …)` grow the flames. Every number was measured against recorded smokes
+  and fires: show-me-the-nades' 247 demos, exported to a local cs2-throws file, with the packs' colliders.
+- **The smoke**:
+  - **Solid voxels.** A voxel is solid where a collider surface passes through it, found with 8×8 rays per voxel
+    face along each axis (`voxels::surface`). Against the log's own masks this scores IoU 0.95–0.97 per map, at 99%
+    precision. Thickening the voxels by 2–8 units only loses precision, so the game tests the plain voxel.
+    - Most misses touch a found surface: geometry the game has and awpy's mesh lacks.
+    - Inferno's 3.6% extra is props the smoke ignores.
+    - The recorded sends combined with these solids give cloud IoU 0.98, so the solids are not what the score loses.
+  - **The log's shape.**
+    - The emitters: 40–44, all in frame 0, level 5 (some level 0), never in solid geometry.
+    - They sit on a 40-unit lattice over the floor around the grenade, in two layers 40 units apart with a cluster
+      above. Near walls they spill through openings, like a sample of the early cloud.
+    - Frame 0 sends 31–47 bricks, about those within two voxels of an emitter. More bricks trickle out until about
+      frame 200.
+    - The smoke runs 202 frames and fades from frame 174.
+    - Two smokes that went off within a unit of each other give the same cloud: IoU 0.92–0.99 per map. The game is
+      deterministic, and that is the ceiling.
+  - **The model.**
+    - A Dijkstra flood of open voxels from the grenade's voxel, over 26 neighbours. A step up costs 1.75 and a step down
+      0.75 against 1 sideways, so the cloud hugs the floor and runs down drops.
+    - The emitters are the first 44 flood voxels on the 40-unit lattice through the grenade.
+    - A brick is sent once the flood comes within a voxel of it, until 78 bricks are sent.
+    - Time: the flood holds 1800 − 1350·e^(−f/15) voxels at frame f.
+    - These were found by grid and random search (the measure below), on 20–30 smokes per map.
+  - **Scores** (`examples/effects_check.rs`, 120 smokes a map, logs that ran their course):
+
+    | map | IoU whole smoke | 0.5 s | 1 s | 2 s | 4 s | 12 s | solid voxels | twins (ceiling) |
+    |---|---:|---:|---:|---:|---:|---:|---:|---:|
+    | de_ancient | 0.799 | 0.718 | 0.754 | 0.749 | 0.767 | 0.784 | 0.972 | 0.942 |
+    | de_anubis | 0.783 | 0.721 | 0.750 | 0.724 | 0.748 | 0.766 | 0.969 | 0.986 |
+    | de_cache | 0.774 | 0.687 | 0.763 | 0.774 | 0.791 | 0.790 | 0.952 | 0.967 |
+    | de_dust2 | 0.772 | 0.698 | 0.742 | 0.726 | 0.744 | 0.757 | 0.966 | 0.967 |
+    | de_inferno | 0.788 | 0.730 | 0.745 | 0.722 | 0.743 | 0.767 | 0.946 | 0.971 |
+    | de_mirage | 0.744 | 0.729 | 0.744 | 0.702 | 0.720 | 0.732 | 0.970 | 0.915 |
+    | de_nuke | 0.779 | 0.729 | 0.782 | 0.758 | 0.771 | 0.785 | 0.971 | 0.987 |
+  - **What still differs:** which bricks the server sends, and that alone. The game's rule is deterministic but not
+    recovered.
+    - Neither flood distance nor horizontal distance separates sent from unsent bricks sharply. At a given distance,
+      the share sent falls gradually from 100% to 0% over 4–6 voxels.
+    - The recorded clouds run further along corridors and floors than ours and rise less. Ours spill over ledges a
+      little more.
+    - Brick quantization makes each wrong brick cost 64 voxels.
+    - The recorded emitters lift the score by 0.04, so the early spread is part of what is missing.
+  - **Rejected:**
+    - A flood capped by a voxel volume or by a distance: 0.72–0.75.
+    - A 6-neighbour flood.
+    - A geometric rule for frame 0's bricks: no effect.
+    - A fixed emitter layout, moved off walls: 0.75.
+    - Each emitter spreading its level in steps: 0.65–0.75.
+- **The fire** (CS2's inferno; 16 flames in 94% of fires):
+
+  | | molotov | incendiary |
+  |---|---|---|
+  | farthest flame from the first (exactly) | 150 | 110 |
+  | a flame from its nearest earlier one | 44–75, median 58 | 28–54, median 38 |
+  | nearest neighbour, median | 52 | 35 |
+  | when they catch (median by slot) | 0 … 1.53 s, about 0.1 s apart | 0 … 0.23 s |
+  | all go out at | 7.0 s | 5.48 s |
+  | step up / down to a child (99%) | +40 / −52 | +18 / −32 |
+
+  - The first flame lies on the floor under the detonation (median 2 units below; a burst in the air falls up to
+    about 120).
+  - The fire leans along the grenade's travel: the flames' centroid sits on the forward side in 70% of fires, but only
+    about 35 units off.
+  - **The model** (`fire.rs`) grows a tree of flames on the collider:
+    - Each flame in turn, oldest first, tries a child: a hashed direction, 0.6–1 of a step (80 or 60 units) away.
+    - A child is kept when it stays within the range, is at least 46 or 34 units from every flame, and has a floor
+      within 40 units up and 56 down. The way must be open at the parent's waist, or at the child's going upstairs.
+      Walls and drops stop it.
+    - Flames catch on the recorded median schedule and all go out together.
+    - The draws are hashed from the detonation point, so a scrubbed scene shows the same fire.
+    - The forward lean is left out: the contract carries no velocity.
+  - **Scores:** of the floor the recorded flames cover (40-unit discs), the share ours cover, and the reverse:
+
+    | map | molotov rec / sim | at 1 s | incendiary rec / sim | twins molotov / incendiary |
+    |---|---|---|---|---|
+    | de_ancient | 0.761 / 0.757 | 0.664 / 0.603 | 0.802 / 0.738 | 0.770 / 0.838 |
+    | de_anubis | 0.735 / 0.734 | 0.641 / 0.659 | 0.782 / 0.726 | 0.746 / 0.851 |
+    | de_cache | 0.741 / 0.706 | 0.641 / 0.579 | 0.732 / 0.682 | 0.787 / 0.782 |
+    | de_dust2 | 0.767 / 0.769 | 0.664 / 0.658 | 0.814 / 0.802 | 0.808 / 0.848 |
+    | de_inferno | 0.747 / 0.760 | 0.643 / 0.666 | 0.789 / 0.751 | 0.786 / 0.772 |
+    | de_mirage | 0.748 / 0.773 | 0.688 / 0.688 | 0.800 / 0.758 | 0.768 / 0.799 |
+    | de_nuke | 0.719 / 0.733 | 0.630 / 0.633 | 0.796 / 0.713 | 0.711 / 0.879 |
+
+    Molotovs are at the ceiling: two recorded fires from the same spot overlap no more, because the game draws its
+    directions at random. Incendiaries are about 0.05 below it.
+- **Checks:**
+  - `cargo run --release -p nades-effects --example effects_check -- <export> [--per-map N] [--twins]` prints the
+    tables. The export comes from show-me-the-nades' `nades export --cs2-throws` and is never committed.
+  - `tests/fixture.rs` holds the scores in CI on `fixtures/effects.json` (62 KB, derived numbers only): one smoke and
+    two fires per map, each with the voxelized map around it, the recorded cloud or flames, and its score. Fires run
+    on a collider of those voxels there.
+  - The unit tests cover rooms, walls, a ledge and stairs.
+  - Offscreen renders of eight smokes and eight fires on Dust II, Inferno and Mirage, recorded beside simulated
+    through the scene's renderer, look alike. One Inferno smoke runs further down an alley in ours.
+- **Contract:** `fire_flames(detonation, normal, collider)` stays, for the molotov. `fire_flames_of(kind, …)` is
+  added, because an incendiary's fire is smaller and shorter. `normal` is unused: the fire starts on the floor under
+  the detonation, whatever the grenade hit.
