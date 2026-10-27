@@ -1940,8 +1940,12 @@ name = "nades-physics"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "nades-config",
+ "nades-pack",
  "nades-scene",
+ "rusqlite",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
