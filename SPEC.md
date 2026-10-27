@@ -1,8 +1,9 @@
 # nades-sandbox: specification
 
 A native app that shows a CS2 map and the grenades thrown on it, from the throws' own data, instantly. It reads
-`cs2-throws` files, the facts CS2 demos record, which any parser can write (docs/standalone-api.md); `show-me-the-nades`
-(a separate project, which keeps the analytics, guides and replays in its web app) is one producer. It plays back whole
+CS2 demos, through its own reader, and `cs2-throws` files, the facts CS2 demos record, which any parser can write
+(docs/standalone-api.md); `show-me-the-nades` (a separate project, which keeps the analytics, guides and replays in its
+web app) is one optional producer. Its maps come from the game's own files, packed on this machine. It plays back whole
 rounds from demos.
 
 Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
@@ -30,6 +31,10 @@ Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
 - Standalone, step 2 (S28): CS2 demos are read directly (`crates/source-demo`, awpy): `--data` takes `.dem` files and
   folders, a demo dropped onto the window is imported with its progress shown, and each is parsed once into the cache.
   On six ESL Pro League demos its files match show-me-the-nades' export row for row.
+- Standalone, step 3 (S26, S29): packs come from the game's files alone. `nades-pack setup <map>` fetches a map from
+  Steam's CS2 depot; `nades-pack <map>` makes its geometry export, collider, light, sky and post-processing records
+  itself, with Source 2 Viewer's CLI and glTF-Transform; `nades-pack --effects` packs the smoke's noise and the fire's
+  flipbooks once. Every pool map's pack rebuilds byte for byte, and de_vertigo, outside the pool, packs and renders.
 - M3 made it the lineup sandbox: a map's lineups from the nades database, cut by side, grenade, team, player and phase;
   each seen from the thrower's eye, zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, the
   smoke, fire, flash or HE as the round had it, a time scrubber and the practice command; every view of 84 throws opens
@@ -92,8 +97,10 @@ cannot follow (show-me-the-nades' `docs/research/native-sandbox.md` and the meas
 
 ## 3. Scope
 
-**Now (M1–M4):** the pool maps with their textured exports, the lineups and throws in cs2-throws files, the four
-views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the practice command, every map resident.
+**Now (M1–M4, standalone):** any official map, packed from the game's files (the seven pool maps checked against the
+game and the web view, de_vertigo packed beside them); the lineups and throws of CS2 demos and cs2-throws files; the
+four views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the practice command, every packed map
+resident.
 
 **M5:** demo replay, round by round, with players and every grenade (§10).
 
@@ -115,10 +122,10 @@ The stack, with what each choice rests on. [docs/decisions.md](docs/decisions.md
 | Engine | none: our own renderer over wgpu | |
 | Shaders | WGSL, checked by naga at build time, composed with naga_oil, a few uber-shaders with overridable constants | naga 30.0.1, naga_oil 0.23 |
 | Data | cs2-throws files: SQLite, bundled, read-only (`crates/source-file`); the config file in TOML, its folder from `directories` | rusqlite 0.41, toml 1, directories 6 |
-| Assets | packs memory-mapped (memmap2), tables in postcard, LZ4 (lz4_flex), our own VTEX reader; meshopt for the export's geometry; Source 2 Viewer's CLI when packing (S9) | 0.9, 1.1, 0.14, 0.7 |
+| Assets | packs memory-mapped (memmap2), tables in postcard, LZ4 (lz4_flex), our own VTEX and VPK readers; meshopt for the export's geometry; when packing, Source 2 Viewer's CLI (export and decompiles, S9, S26), glTF-Transform through Bun (S29), DepotDownloader for `setup` | 0.9, 1.1, 0.14, 0.7; glTF-Transform 4.5.1 |
 | Maths, threads | glam, rayon | 0.34, 1.12 |
 | Profiling | start-up marks (JSON), wgpu-profiler (GPU timestamps; built on the same wgpu 30), tracing with Tracy | 0.28, 0.1 |
-| Collision | awpy's collision mesh and a BVH over it, as the web view does since D26 | awpy 3.1 |
+| Collision | the map's physics, reduced as awpy reduces it (byte for byte awpy's published mesh), in the pack's Collider section, and a BVH over it, as the web view does since D26 (S26) | |
 
 Why not an engine, measured (`prototypes/engine-bakeoff`, decision S2): Bevy 0.20, on Rust 1.99.1 and the same
 wgpu and winit as ours, configured at its leanest. To the empty window's first frame it costs a median +58 ms per
@@ -148,7 +155,7 @@ crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the Th
 crates/source-file  the cs2-throws file adapter: version 2 SQLite files, several merged, and `check`
 crates/source-demo  the demo adapter: `.dem` files read with awpy into cs2-throws files in the cache (S28)
 crates/config    where the settings come from (§8): flag, environment, config file, default
-crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
+crates/scene     a throw becomes a stage: CS2's cameras, the result shot through the map's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
 crates/control   app control's protocol, and crates/mcp its MCP server (a separate workstream on the same app)
                  the replay (M5): crates/model's `replay` (who is where at a tick), crates/sandbox's `replay.rs` (a
@@ -163,7 +170,7 @@ main      main ─ EventLoop (AppKit, ~30 ms) ─ launch (~14) ─ window + CAMe
 loader    main ─ mmap pack ─ device (~3–14) ─ buffers and textures, pipelined (~40–60) ─ pipelines ─┴─ first frame ─ on screen
                                                                                                                     │
 data      the list (~100 ms), then every listed lineup's throw, the selected first ─────────────────────────────────┤
-collider  awpy's mesh and its BVH (6–39 ms) ─────────────────────────────────────────────────────────────────────────┤
+collider  the pack's collider and its BVH (6–39 ms) ─────────────────────────────────────────────────────────────────────────┤
 effects   the game's smoke noise and fire flipbooks ─────────────────────────────────────────────────────────────────┘
 stages    each throw's stage on every core (rayon), once the collider is there
 maps      once the window shows: the other packed maps, one at a time, each drawn offscreen; their lists, stages (S19)
@@ -244,15 +251,17 @@ It is keyed by the game build and the export's hash, rebuilt when either changes
   - **Geometry:** vertex and index buffers in the shaders' layouts (quantized as exported).
   - **Textures:** mips as GPU blocks (BC1/BC4/BC5/BC6H/BC7; RGBA8 for the few images with no game file), rows padded
     to 256 bytes for buffer-to-texture copies, grouped in chunks.
-  - **Collider** (reserved): unused, since the BVH over awpy's mesh builds in 6–39 ms when a map opens (S15).
+  - **Collider:** the map's occluding triangles, from its physics (AWMH layout); the BVH over them builds in 6–39 ms
+    when a map opens (S15, S26).
 - **Texture sources:**
-  - Base colours map to `.vtex_c` files by name, or else through each material's `TextureParams` (Cache: 296 of 518
-    images by name, 69% of the pixels; Mirage: 353 of 407). The rest are the export's WebP, decoded at pack time.
+  - Base colours map to `.vtex_c` files in `pak01` by name, or else through each material's `TextureParams` (Cache:
+    296 of 518 images by name, 69% of the pixels; Mirage: 353 of 407). The rest are the export's WebP, decoded at pack
+    time.
   - The other material textures come from the material's `vmat` parameters. Normal maps and the upper layers' colours
     are capped at 1024 texels, data textures at 512 (S11).
   - Normal maps stay hemi-octahedral, as the game stores them, and are decoded in the shader.
   - The lightmaps and light probes are `.vtex_c` files inside each map's VPK
-    (`~/.cache/nades/cs2/game/csgo/maps/<map>.vpk`; the 3D skybox's are in its prefab's). On de_cache, stored:
+    (`game/csgo/maps/<map>.vpk` in the game folder; the 3D skybox's are in its prefab's). On de_cache, stored:
     irradiance 78.5 MB, directional irradiance 7.6 MB, direct light shadows 2.7 MB, the light probe atlas 82 MB.
 - **Size:** 347 MB (Mirage) to 1,385 MB (Inferno). de_cache's is 1,078 MB: 299 MB of colour, 185 MB of normals,
   143 MB of lightmaps and 175 MB of light probes (S11). Format 1's was 640 MB.
@@ -347,8 +356,9 @@ first frame, both steady-frame benches and peak memory with the load average bes
 
 ## 11. Rules
 
-- **Valve's assets stay on this machine.** Packs, exports and the game files live under `~/.cache/nades`. They are
-  never committed, uploaded or shared; rendered images at most.
+- **Valve's assets stay on this machine.** Packs, exports and the game files live in the folders the settings name
+  (docs/standalone-api.md §8: the packs folder, CS2's folder, the exports in the platform's cache). They are never
+  committed, uploaded or shared; rendered images at most.
 - **The user's data is read, never written,** and never experimented on: tests write their own files
   (`tools/cs2_throws.py fixture`), checks use a copy.
 - **Nothing waits for a human:** a missing pack is built, and a file being written is retried.
@@ -364,19 +374,21 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | Opening maps in the background competes for the GPU with the shown one | its frames meanwhile: median 4.7–4.9 ms, p95 15–17, worst 40–56 ms (a few hitches in the first 2 s); smaller submissions for the copies and warm-ups if it shows |
 | Windows: checked, never run | `just check-windows` type-checks and lints every crate for x86_64-pc-windows-msvc with stand-ins for the C++ libraries; a run on a Windows machine (DX12, the fallbacks of S23) |
 | Whole-frame brightness: dust2, cache, mirage and nuke read 0.8–2.8 levels brighter than the web view against the game, though closer by blurred \|Δ\| | `bench/realism.py` on each look change; its history is `.runs/realism-history.jsonl` |
-| Packing needs Source 2 Viewer's CLI and its decompiled entity lumps | without the CLI the packer falls back to the web view's lightmap rule and says so; without the lumps it packs no light probes and no sky |
+| Packing needs three outside tools: Source 2 Viewer's CLI, Bun (glTF-Transform) and DepotDownloader | each is a setting with a clear error when missing; `--export` takes a geometry export made elsewhere; reading the meshes from the VPKs directly (§13) would remove the CLI and Bun |
+| With `pak01` mounted, the CLI passes over a file whose archive is missing in silence | `nades-pack setup` finds a map's archives with `pak01` unmounted, where the CLI names what it cannot load (S29) |
 | Smoke at Retina resolution (4× the pixels) | at 1444×1420 a smoke in view costs 1–2 ms a frame (median 5.6–7.1 against 4.9), p95 under 8.9; a smoke filling a 2880×1800 frame is not measured yet: GPU timestamps of the composite at 1× and 2×, and half resolution with a depth-aware upsample if it needs it |
 | The effects' point lights on CS2's baked light: three.js's model (Lambert over π) added to a CS2-style diffuse | `bench/effects.py`: Inferno's flash reaches further up the walls than the web view's (0.21 of the frame against 0.13) |
 | A producer leaves facts out (show-me-the-nades' export: blinded players' positions, samples' duck amounts) | the sandbox derives what the facts allow (a blinded player stands at their sample nearest the flash, S24) and `check` names the rest |
-| Game updates change the files | packs keyed by game build; rebuild on change |
+| Game updates change the files | packs keyed by game build; `setup` pins the depot's manifest to the one the game folder holds, so a fetch never mixes builds; rebuild on change |
 | Two front-ends to keep | the web app keeps analytics; the sandbox replaces `/scene` only when M3 matches it |
 
 ## 13. Choices still open
 
 - **Windows:** the workspace builds for it as far as a Mac can check (S23); running it, and packaging it (an installer,
   and the packs and exports made there), wait for a Windows machine.
-- **The pack's geometry source:** the Source 2 Viewer export stays the input until a Rust reader for the game's meshes
-  (VBIB in `vmdl`/`vwrld`) earns its cost.
+- **The pack's geometry source:** the packer's own export through Source 2 Viewer's CLI and glTF-Transform (S29) stays
+  the input until a Rust reader for the game's meshes (VBIB in `vmdl`/`vwrld`) earns its cost; it would also have to
+  reproduce glTF-Transform's welding, instancing and quantization to keep the packs the same.
 - ~~**Replay data (M5)**~~ settled (S30): tracks 16 a second in cs2-throws 2.1, measured against every tick; the
   samples, two a second, when a file has none.
 
