@@ -75,7 +75,7 @@ fn vpk(files: &[(&str, &str, &str, &[u8])]) -> Vec<u8> {
 }
 
 fn webp(width: u32, height: u32, seed: u8) -> Vec<u8> {
-    let pixels: Vec<u8> = (0..width * height).flat_map(|i| [seed.wrapping_add(i as u8 * 9), 255 - seed, i as u8 * 3, if i % 2 == 0 { 255 } else { 40 }]).collect();
+    let pixels: Vec<u8> = (0..width * height).flat_map(|i| [seed.wrapping_add((i as u8).wrapping_mul(9)), 255 - seed, (i as u8).wrapping_mul(3), if i % 2 == 0 { 255 } else { 40 }]).collect();
     let mut out = Vec::new();
     image_webp::WebPEncoder::new(&mut out).encode(&pixels, width, height, image_webp::ColorType::Rgba8).unwrap();
     out
