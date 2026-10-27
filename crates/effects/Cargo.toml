@@ -11,3 +11,12 @@ nades-scene.workspace = true
 nades-model.workspace = true
 nades-physics.workspace = true
 glam.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+nades-pack.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lz4_flex.workspace = true

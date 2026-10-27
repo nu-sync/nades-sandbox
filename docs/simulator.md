@@ -42,7 +42,9 @@ The recorded-data features leave the app:
   `practice_command()`. The collider is the pack's (`nades_scene::collider::Collider`).
 - `crates/effects` (`nades-effects`): `smoke_grid(detonation, collider) -> nades_scene::smoke::Grid` (solid voxels
   from the collider; the scene's `fill_cloud`, the port of the web view's smoke, grows the cloud from it) and
-  `fire_flames(detonation, normal, collider) -> Vec<nades_scene::fire::Flame>` (the scene's `build_fire` draws them).
+  `fire_flames(detonation, normal, collider) -> Vec<nades_scene::fire::Flame>` (a molotov's; the scene's `build_fire`
+  draws them), and `fire_flames_of(kind, detonation, collider)` for either grenade, since an incendiary's fire is
+  smaller and shorter (S33).
 - The app: `crates/sandbox` holds the scene, the throw tool and the views; `crates/control`/`crates/mcp` the agent
   tools. A scene file is versioned (`"format": "nades-sandbox-scene", "version": 1`).
 
