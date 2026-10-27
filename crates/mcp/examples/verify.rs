@@ -675,6 +675,10 @@ async fn scene_journey(client: &Client, evidence: &mut Evidence, instance: &str)
     evidence.check("throw_update changes a throw in place", throws(&two) == 2 && updated.structured_content.as_ref().unwrap()["scene"]["throws"][1]["crouch"] == true)?;
     client.error(evidence, "throw_update", json!({"instance_id":instance,"index":5,"throw":smoke})).await?;
     client.error(evidence, "throw_add", json!({"instance_id":instance,"throw":{"grenade":"smoke","feet":[0,0,0],"pitch":120,"yaw":0}})).await?;
+    client.error(evidence, "throw_remove", json!({"instance_id":instance,"index":9})).await?;
+    client.error(evidence, "scene_get", json!({"instance_id":"no-such-instance"})).await?;
+    client.error(evidence, "scene_set", json!({"instance_id":instance,"scene":{"format":"other","map":"de_cache"}})).await?;
+    client.error(evidence, "time_set", json!({"instance_id":instance,"seconds":-1.0})).await?;
     let removed = client.ok(evidence, "throw_remove", json!({"instance_id":instance,"index":1})).await?;
     evidence.check("throw_remove takes a throw out", throws(&removed) == 1)?;
     let simulated = client.settled_state(evidence).await?;
@@ -768,7 +772,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let tools = client.service.list_all_tools().await?;
     let actual: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     evidence.check(
-        "discover all thirteen tools",
+        "discover all nineteen tools",
         tools.len() == TOOLS.len() && actual == BTreeSet::from(TOOLS),
     )?;
     evidence.check(
@@ -1476,7 +1480,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     )?;
     later.disconnect().await?;
     evidence.check(
-        "all thirteen tools have positive and negative scenarios",
+        "all nineteen tools have positive and negative scenarios",
         TOOLS.iter().all(|tool| {
             evidence.calls.get(*tool).is_some_and(|counts| counts.0 > 0)
                 && evidence.negative_cases.contains(*tool)
