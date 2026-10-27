@@ -103,6 +103,7 @@ reference set and web-view runs. Those reference images and generated comparison
 Build with `just build`, then configure an MCP client to run the absolute path to
 `target/release/nades-mcp` with stdio transport. The server starts its sibling sandbox binary directly.
 `just mcp` is the development entry point; `just verify-mcp` exercises the actual server and app.
+For video, install FFmpeg with `libx264` and `ffprobe` for verification.
 
 Start with `app_status` and `maps_list`, then use `app_start`, `camera_set` and `frame_capture`.
 `view_render` takes a headless screenshot without changing the visible window. `diagnostics_get` exposes startup
@@ -111,8 +112,8 @@ animation time; live captures also identify the instance, revision and frame.
 Map changes restart the managed window. Disconnecting MCP hands a ready window to you; a future session starts its
 own instance. Manually opened windows are never controlled.
 Logs and private view state live in `~/.cache/nades/sandbox/mcp` by default. `--runs-dir`, `--packs-dir` and
-`--sandbox-binary` provide explicit development overrides. Headless rendering currently covers the base map;
-M3 throw/effect rendering is a later extension of that shared camera and image contract.
+`--sandbox-binary` provide explicit development overrides. `view_render` renders base maps. Use `lineups_list` to find a recorded throw, `video_render` to render it
+headlessly, and `video_status` to retrieve the completed local MP4; `video_cancel` cancels a running job.
 
 The [MCP specification](docs/mcp-spec.md) defines each tool and its success criteria. The
 [verification skill](.agents/skills/verify-mcp/SKILL.md) describes repeatable local acceptance.

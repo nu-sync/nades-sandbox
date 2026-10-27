@@ -595,6 +595,22 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Evidence:** from a fresh target directory both pass with no warnings (Clippy with `-D warnings`).
 - **Not done:** a build that links (the Windows SDK, or the GNU target with MinGW), and a run.
 
+
+## MCP video · persistent headless throw rendering
+
+- **Decision:** `lineups_list` finds the database's recorded example throw. `video_render` starts a session-owned
+  job that loads its map and stage once, renders fixed timeline steps through the existing effect path, and streams
+  PNG frames to FFmpeg/libx264. `video_status` reports progress and the local MP4; `video_cancel` stops the job.
+  Camera keyframes use linear position/pitch interpolation and shortest-path yaw. The video and still renderer share
+  the single headless worker permit. No audio or live-window recording is added.
+- **Principles:** **Boundary Discipline** puts limits and camera validation on the shared request boundary.
+  **Build the Lever** and **Test Behavior Not Implementation** extend the real MCP verifier with encoded-video,
+  failure and subprocess-lifecycle checks. **Prove It Works** inspects the MP4 and decoded Molotov/smoke frames,
+  not merely a successful encoder exit.
+- **Evidence:** [MCP verification](../.runs/mcp-1793055808478007000/results.json),
+  [clip metadata](../.runs/video-accept/panorama-result.json), and the video verification section of
+  [the MCP specification](mcp-spec.md). An occluded live window caused one intermediate run to fail; the rerun passed.
+
 ## S24 · A generic contract: cs2-throws facts, the sandbox's own rules, producer tags
 
 - **Decision:** the sandbox reads throws as facts through a port, `ThrowSource` (`crates/model`), from `cs2-throws`

@@ -96,6 +96,7 @@ struct Args {
     size: Option<(u32, u32)>,
     control_stdio: bool,
     instance_id: Option<String>,
+    video_request: Option<PathBuf>,
     render_time: Option<f32>,
     fov: Option<f32>,
     bench_switch: Option<usize>,
@@ -121,6 +122,7 @@ fn args() -> Result<Args> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--data" => args.data.push(it.next().context("--data needs a cs2-throws file or a folder of them")?.into()),
+            "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
             "--render-time" => args.render_time = Some(numbers::<1>(it.next(), "--render-time")?[0]),
@@ -187,6 +189,9 @@ fn main() {
 fn run() -> Result<()> {
     let args = args()?;
     if args.control_stdio { clock::enable_logs(); }
+    if let Some(request) = &args.video_request {
+        return lineups::render_video(request);
+    }
     if let Some(cases) = &args.cameras {
         return lineups::print_cameras(config::source(&args.data)?.as_ref(), cases);
     }

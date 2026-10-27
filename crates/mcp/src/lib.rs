@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod video;
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const INSTRUCTIONS: &str = "Operate the native CS2 map viewer through observe → act → verify. Begin with app_status to learn what is actually shown and maps_list to discover local packs. app_start opens one agent-owned window and returns only after a map frame is presented and the window visible. Use the returned instance_id for subsequent operations; map_open may restart the app and returns a replacement instance_id. Set an absolute CS2 camera with camera_set, then use frame_capture with its revision to inspect the rendered result. Coordinates are player feet in Hammer units, Z up; pitch/yaw are degrees and positive pitch looks down. Eye height defaults to 64 units, vertical FOV to 73.7398°. Status and diagnostics expose explicitly labelled CPU timings; null GPU timings mean unavailable, not zero. view_render makes a headless base-map screenshot without launching or changing the visible window. It can reproduce a map-only capture using the same map, camera, image dimensions and render_time_seconds; selected throws and grenade effects are not yet supported headlessly. app_stop explicitly closes the owned window. Disconnect leaves an already-ready window open for the user; later MCP sessions do not reconnect to it. No tool builds packs, edits the database, or exports game assets. M3 lineups, grenade effects and timeline controls are outside this tool set.";
+const INSTRUCTIONS: &str = "Operate the native CS2 map viewer through observe → act → verify. Begin with app_status to learn what is actually shown and maps_list to discover local packs. For grenade videos, use lineups_list to find a throw, video_render to start it, then video_status to retrieve the MP4 or video_cancel to stop it. app_start opens one agent-owned window and returns only after a map frame is presented and the window visible. Use the returned instance_id for subsequent operations; map_open may restart the app and returns a replacement instance_id. Set an absolute CS2 camera with camera_set, then use frame_capture with its revision to inspect the rendered result. Coordinates are player feet in Hammer units, Z up; pitch/yaw are degrees and positive pitch looks down. Eye height defaults to 64 units, vertical FOV to 73.7398°. Status and diagnostics expose explicitly labelled CPU timings; null GPU timings mean unavailable, not zero. view_render makes a headless base-map screenshot without launching or changing the visible window. It can reproduce a map-only capture using the same map, camera, image dimensions and render_time_seconds; view_render does not include selected throws or grenade effects. app_stop explicitly closes the owned window. Disconnect leaves an already-ready window open for the user; later MCP sessions do not reconnect to it. No tool builds packs, edits the database, or exports game assets. Use lineups_list to discover throws, video_render to start a headless grenade clip, then video_status or video_cancel to manage it. Live grenade and timeline controls are not yet exposed.";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusResponse {
@@ -37,6 +38,7 @@ pub struct StatusResponse {
 pub struct Capabilities {
     pub window_control: bool,
     pub headless_render: bool,
+    pub headless_video: bool,
     pub headless_content: Vec<String>,
     pub persistent_headless: bool,
     pub map_switch_strategy: String,
@@ -156,6 +158,7 @@ impl From<Snapshot> for StatusResponse {
             capabilities: Capabilities {
                 window_control: true,
                 headless_render: true,
+                headless_video: true,
                 headless_content: vec!["map".into()],
                 persistent_headless: false,
                 map_switch_strategy: "restart".into(),
@@ -239,6 +242,38 @@ pub struct DiagnosticsResponse {
     pub logs: Vec<String>,
     pub log_path: Option<String>,
     pub metric_definitions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineupsParams {
+    pub map: String,
+    /// One of smoke, flash, he, molotov, incendiary, or decoy.
+    pub grenade: Option<String>,
+    /// Case-insensitive destination place substring, e.g. BombsiteA.
+    pub destination: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LineupInfo {
+    pub lineup_id: String,
+    pub throw_id: String,
+    pub grenade: String,
+    pub from: Option<String>,
+    pub destination: Option<String>,
+    pub throws: i64,
+}
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LineupsResponse {
+    pub map: String,
+    pub lineups: Vec<LineupInfo>,
+    /// True when more matches exist than the 300 returned.
+    pub truncated: bool,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VideoJobParams {
+    pub job_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -525,6 +560,112 @@ impl NadesMcp {
         }
     }
 
+    #[tool(description = "Find recorded grenade lineups and their example throw IDs on a map. Filter by grenade and destination place.", output_schema = output_schema::<LineupsResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
+    pub async fn lineups_list(
+        &self,
+        Parameters(params): Parameters<LineupsParams>,
+    ) -> CallToolResult {
+        if let Err(e) = nades_control::validate_map_id(&params.map) {
+            return self.fail(e).await;
+        }
+        let grenade = match params.grenade.as_deref() {
+            Some(name) => match nades_model::Grenade::parse(name) {
+                Some(grenade) => Some(grenade),
+                None => {
+                    return self
+                        .fail(ControlError::new(
+                            "invalid_grenade",
+                            "Use smoke, flash, he, molotov, incendiary, or decoy.",
+                            false,
+                        ))
+                        .await;
+                }
+            },
+            None => None,
+        };
+        let map = params.map;
+        let query_map = map.clone();
+        let destination = params.destination.map(|s| s.to_lowercase());
+        // the same files, read through the same rules, as the app (nades-config: NADES_SANDBOX_DATA, the config file)
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<nades_model::Lineup>> {
+            let source = nades_config::source(&[])?;
+            let map = nades_model::MapName(query_map);
+            let library = nades_model::Library::new(source.map(&map)?, source.places(&map)?);
+            Ok(library.lineups(&nades_model::LineupQuery { grenade, limit: 10_000, ..Default::default() }))
+        })
+        .await;
+        match result {
+            Ok(Ok(rows)) => {
+                let query_limit_reached = rows.len() == 10_000;
+                let mut lineups: Vec<_> = rows
+                    .into_iter()
+                    .filter(|l| {
+                        destination.as_ref().is_none_or(|d| {
+                            l.to.as_ref()
+                                .is_some_and(|p| p.to_lowercase().contains(d))
+                        })
+                    })
+                    .map(|l| LineupInfo {
+                        lineup_id: l.id.to_string(),
+                        throw_id: l.example.0,
+                        grenade: l.grenade.name().to_string(),
+                        from: l.from,
+                        destination: l.to,
+                        throws: i64::from(l.throws),
+                    })
+                    .collect();
+                let truncated = query_limit_reached || lineups.len() > 300;
+                lineups.truncate(300);
+                success(LineupsResponse {
+                    map,
+                    lineups,
+                    truncated,
+                })
+            }
+            Ok(Err(e)) => {
+                self.fail(ControlError::new("data_error", format!("{e:#}"), true))
+                    .await
+            }
+            Err(e) => {
+                self.fail(ControlError::new("data_error", e.to_string(), true))
+                    .await
+            }
+        }
+    }
+
+    #[tool(description = "Start an asynchronous headless grenade video from a recorded throw. Camera keyframe times are seconds from clip start. Poll video_status for progress and local MP4 path.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
+    pub async fn video_render(
+        &self,
+        Parameters(request): Parameters<nades_control::video::VideoRequest>,
+    ) -> CallToolResult {
+        match self.backend.video_start(request).await {
+            Ok(v) => success(v),
+            Err(e) => self.fail(e).await,
+        }
+    }
+
+    #[tool(description = "Inspect a video job's progress, failure, and finished local MP4 path.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = true, open_world_hint = false))]
+    pub async fn video_status(
+        &self,
+        Parameters(params): Parameters<VideoJobParams>,
+    ) -> CallToolResult {
+        match self.backend.video_status(&params.job_id).await {
+            Ok(v) => success(v),
+            Err(e) => self.fail(e).await,
+        }
+    }
+
+    #[tool(description = "Cancel an in-progress video job; poll video_status until it reports cancelled.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    pub async fn video_cancel(
+        &self,
+        Parameters(params): Parameters<VideoJobParams>,
+    ) -> CallToolResult {
+        match self.backend.video_cancel(&params.job_id).await {
+            Ok(v) => success(v),
+            Err(e) => self.fail(e).await,
+        }
+    }
+
     #[tool(description = "Inspect build/GPU information, actual startup stage timings, labelled frame CPU metrics and recent local logs. Default 50 log records, maximum 200. Null GPU timings mean unmeasured, not zero. No base64 image or game assets are returned. Useful after errors and slow launches.", output_schema = output_schema::<DiagnosticsResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
     pub async fn diagnostics_get(
         &self,
@@ -725,7 +866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protocol_discovers_nine_tools_and_validates_status_and_failure_schemas() {
+    async fn protocol_discovers_tools_and_validates_status_and_failure_schemas() {
         let directory = tempfile::tempdir().unwrap();
         let service = NadesMcp::new(Config {
             sandbox_binary: directory.path().join("missing-binary"),
@@ -753,8 +894,12 @@ mod tests {
                 "camera_set",
                 "diagnostics_get",
                 "frame_capture",
+                "lineups_list",
                 "map_open",
                 "maps_list",
+                "video_cancel",
+                "video_render",
+                "video_status",
                 "view_render"
             ]
         );

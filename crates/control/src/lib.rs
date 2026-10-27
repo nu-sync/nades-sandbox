@@ -1,3 +1,5 @@
+pub mod video;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

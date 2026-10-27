@@ -9,7 +9,7 @@ Read [the contract](../../../docs/mcp-spec.md) before changing or verifying MCP 
 Use `just verify-mcp` for the full local acceptance journey and `just check` for the ordinary quality gate.
 The acceptance run must use the real MCP binary and sandbox, not a mocked backend. It owns its child PIDs and
 cleans only those children, including any window deliberately left open by its disconnect test. Never kill by
-process name. A missing GPU, desktop session, de_cache pack, or de_mirage pack is unavailable coverage, not a pass.
+process name. A missing GPU, desktop session, de_cache, de_mirage or de_dust2 pack, FFmpeg/libx264, ffprobe, or a cs2-throws file with the A-site Molotov is unavailable coverage, not a pass.
 The verifier APFS-clones its configured cs2-throws file (the first of `NADES_SANDBOX_DATA`) before starting clients
 and deletes that copy after owned windows exit. `--keep-handoff` retains the copy for the handed-off window; remove it
 only after closing that window. Startup benchmarks also need `NADES_SANDBOX_DATA` on a copy and `NADES_SANDBOX_STATE`
@@ -32,3 +32,6 @@ App readiness and selected-scene readiness are separate: wait for `scene.loading
 scene before testing whether headless rendering preserves its revision. V1 `view_render` renders the base map;
 only compare it with a live scene whose `active_effects` is empty. Copy actual image dimensions, camera, FOV and
 material time. Repeated outputs use the measured tolerance in the specification, not a PNG-hash assumption.
+
+Video acceptance uses the real asynchronous job tools and a private database clone. Probe the completed MP4 with
+`ffprobe`; inspect decoded frames before and after detonation, test cancellation, and confirm partial files are gone.

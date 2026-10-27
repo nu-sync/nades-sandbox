@@ -367,4 +367,5 @@ first frame, both steady-frame benches and peak memory with the load average bes
 
 The local MCP has its own [specification and per-tool acceptance checks](docs/mcp-spec.md). It uses shared application
 commands and camera/state types, and supports map/camera operation, frame capture, diagnostics and headless map
-rendering. Its verification entry point is `just verify-mcp`; M3 throw controls are a separate extension.
+rendering and recorded-throw video. Its verification entry point is `just verify-mcp`; live M3 throw controls are a
+separate extension.

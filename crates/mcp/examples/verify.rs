@@ -17,15 +17,19 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
-const TOOLS: [&str; 9] = [
+const TOOLS: [&str; 13] = [
     "app_start",
     "app_status",
     "app_stop",
     "camera_set",
     "diagnostics_get",
     "frame_capture",
+    "lineups_list",
     "map_open",
     "maps_list",
+    "video_cancel",
+    "video_render",
+    "video_status",
     "view_render",
 ];
 
@@ -264,7 +268,8 @@ struct Client {
 impl Client {
     async fn start(config: &Config, session: &str) -> Result<Self> {
         let stderr = File::create(config.output.join(format!("{session}-server.log")))?;
-        let mut child = Command::new(&config.server)
+        let mut command = Command::new(&config.server);
+        command
             .args([
                 "--sandbox-binary",
                 config.sandbox.to_str().context("sandbox path")?,
@@ -278,7 +283,11 @@ impl Client {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if session == "without-ffmpeg" {
+            command.env("PATH", "");
+        }
+        let mut child = command
             .spawn()
             .context("launch actual nades-mcp executable")?;
         let output = child.stdout.take().context("MCP stdout")?;
@@ -559,6 +568,22 @@ fn owns_process(pid: u32, instance_id: &str) -> bool {
         })
 }
 
+fn find_owned_child(parent: u32, evidence: &Path, marker: &str) -> Option<u32> {
+    let processes = std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,command="])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&processes.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid: u32 = fields.next()?.parse().ok()?;
+            (ppid == parent && line.contains(marker) && line.contains(evidence.to_str()?))
+                .then_some(pid)
+        })
+}
+
 fn find_render_worker(parent: u32, evidence: &Path) -> Option<u32> {
     let processes = std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,command="])
@@ -763,7 +788,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let tools = client.service.list_all_tools().await?;
     let actual: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     evidence.check(
-        "discover exactly nine tools",
+        "discover all thirteen tools",
         tools.len() == TOOLS.len() && actual == BTreeSet::from(TOOLS),
     )?;
     evidence.check(
@@ -796,6 +821,251 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     evidence.check(
         "map discovery includes installed maps",
         map_text.contains("de_cache") && map_text.contains("de_mirage"),
+    )?;
+    client
+        .error(evidence, "lineups_list", json!({"map":"../invalid"}))
+        .await?;
+    client
+        .error(evidence, "video_status", json!({"job_id":"unknown"}))
+        .await?;
+    client
+        .error(evidence, "video_cancel", json!({"job_id":"unknown"}))
+        .await?;
+    client
+        .error(
+            evidence,
+            "video_render",
+            json!({"map":"../invalid","throw_id":"missing","start_seconds":0,"end_seconds":1}),
+        )
+        .await?;
+    let lineups = client
+        .ok(
+            evidence,
+            "lineups_list",
+            json!({"map":"de_dust2","grenade":"molotov","destination":"BombsiteA"}),
+        )
+        .await?;
+    let throw_id = lineups.structured_content.as_ref().unwrap()["lineups"]
+        .as_array()
+        .and_then(|l| l.first())
+        .and_then(|l| l["throw_id"].as_str())
+        .context("Dust II A-site Molotov unavailable in private database")?
+        .to_string();
+    let args = json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":-0.5,"end_seconds":1.5,"width":640,"height":360,"fps":10,"camera_keyframes":[{"at_seconds":0,"camera":{"position":[700,2300,270],"pitch_degrees":18.54,"yaw_degrees":26.565,"eye_height_units":0}},{"at_seconds":2,"camera":{"position":[900,2240,260],"pitch_degrees":17,"yaw_degrees":50,"eye_height_units":0}}]});
+    let started = client.ok(evidence, "video_render", args.clone()).await?;
+    let job = started.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("video job ID")?
+        .to_string();
+    client.error(evidence, "video_render", args.clone()).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let finished = loop {
+        let result = client
+            .ok(evidence, "video_status", json!({"job_id":job}))
+            .await?;
+        let data = result.structured_content.unwrap();
+        if data["state"] != "running" {
+            break data;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "video did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    ensure!(finished["state"] == "completed", "video failed: {finished}");
+    let path = finished["path"].as_str().context("video path")?;
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,width,height,nb_read_frames",
+            "-of",
+            "json",
+            path,
+        ])
+        .output()
+        .context("ffprobe required for video acceptance")?;
+    ensure!(probe.status.success(), "ffprobe failed");
+    let probe: Value = serde_json::from_slice(&probe.stdout)?;
+    let video = &probe["streams"][0];
+    evidence.check(
+        "headless Molotov video decodes as twenty H.264 frames",
+        video["codec_name"] == "h264"
+            && video["width"] == 640
+            && video["height"] == 360
+            && video["nb_read_frames"] == "20",
+    )?;
+    let cancel_args = json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":30,"width":1280,"height":720,"fps":30});
+    let pending = client.ok(evidence, "video_render", cancel_args).await?;
+    let cancelled_id = pending.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("cancellable job ID")?
+        .to_string();
+    let progress_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = client
+            .ok(evidence, "video_status", json!({"job_id":cancelled_id}))
+            .await?
+            .structured_content
+            .unwrap();
+        ensure!(
+            status["state"] == "running",
+            "video ended before cancellation: {status}"
+        );
+        if status["frames_completed"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        ensure!(
+            tokio::time::Instant::now() < progress_deadline,
+            "video never began rendering"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let worker_pid = find_render_worker(client.child.id().context("MCP PID")?, &evidence.output)
+        .context("active video renderer PID")?;
+    let encoder_pid = find_owned_child(
+        client.child.id().context("MCP PID")?,
+        &evidence.output,
+        "partial.mp4",
+    )
+    .context("active video encoder PID")?;
+    client
+        .ok(evidence, "video_cancel", json!({"job_id":cancelled_id}))
+        .await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let cancelled = loop {
+        let result = client
+            .ok(evidence, "video_status", json!({"job_id":cancelled_id}))
+            .await?
+            .structured_content
+            .unwrap();
+        if result["state"] != "running" {
+            break result;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "video cancellation timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    evidence.check(
+        "video cancellation cleans its unfinished job",
+        cancelled["state"] == "cancelled"
+            && cancelled["path"].is_null()
+            && wait_dead(worker_pid).await
+            && wait_dead(encoder_pid).await
+            && !fs::read_dir(&evidence.output)?
+                .filter_map(Result::ok)
+                .any(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        && e.file_name().to_string_lossy().starts_with("video-")
+                }),
+    )?;
+    let no_encoder = Client::start(config, "without-ffmpeg").await?;
+    let without = no_encoder.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":1,"width":320,"height":180,"fps":4})).await?;
+    let no_encoder_id = without.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("no encoder job ID")?
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let failure = loop {
+        let value = no_encoder
+            .ok(evidence, "video_status", json!({"job_id":no_encoder_id}))
+            .await?
+            .structured_content
+            .unwrap();
+        if value["state"] != "running" {
+            break value;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "missing encoder failed to resolve"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    evidence.check(
+        "missing encoder reports actionable failure",
+        failure["state"] == "failed"
+            && failure["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("install ffmpeg")),
+    )?;
+    no_encoder.disconnect().await?;
+    let lost = client.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":"missing-throw","start_seconds":0,"end_seconds":1,"width":320,"height":180,"fps":4})).await?;
+    let lost_id = lost.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("missing throw job ID")?
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
+    let failure = loop {
+        let value = client
+            .ok(evidence, "video_status", json!({"job_id":lost_id}))
+            .await?
+            .structured_content
+            .unwrap();
+        if value["state"] != "running" {
+            break value;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "missing throw failed to resolve"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    evidence.check(
+        "unknown throw reports renderer failure",
+        failure["state"] == "failed"
+            && failure["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("no throw")),
+    )?;
+    let disconnected = Client::start(config, "video-disconnect").await?;
+    let pending = disconnected.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":30,"width":640,"height":360,"fps":30})).await?;
+    let lost_job = pending.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("disconnect job ID")?
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = disconnected
+            .ok(evidence, "video_status", json!({"job_id":lost_job}))
+            .await?
+            .structured_content
+            .unwrap();
+        ensure!(
+            status["state"] == "running",
+            "video ended before disconnect: {status}"
+        );
+        if status["frames_completed"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "disconnect test never began rendering"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let parent = disconnected.child.id().context("disconnect server PID")?;
+    let renderer =
+        find_render_worker(parent, &evidence.output).context("disconnect renderer PID")?;
+    let encoder = find_owned_child(parent, &evidence.output, "partial.mp4")
+        .context("disconnect encoder PID")?;
+    disconnected.disconnect().await?;
+    evidence.check(
+        "disconnect reaps the active video renderer and encoder",
+        wait_dead(renderer).await
+            && wait_dead(encoder).await
+            && !fs::read_dir(&evidence.output)?
+                .filter_map(Result::ok)
+                .any(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        && e.file_name().to_string_lossy().starts_with("video-")
+                }),
     )?;
     let cold_render = client.ok(evidence, "view_render", json!({"map":"de_cache","camera":benchmark_pose(&config.root)?,"width":320,"height":180})).await?;
     let cold_image = evidence.image(&cold_render, "cold-headless-map")?;
@@ -877,6 +1147,51 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
         .error(evidence, "app_start", json!({"map":"de_mirage"}))
         .await?;
     let settled = client.settled_state(evidence).await?;
+    let smoke_list = client
+        .ok(
+            evidence,
+            "lineups_list",
+            json!({"map":"de_dust2","grenade":"smoke"}),
+        )
+        .await?;
+    let smoke_id = smoke_list.structured_content.as_ref().unwrap()["lineups"]
+        .as_array()
+        .and_then(|l| l.first())
+        .and_then(|l| l["throw_id"].as_str())
+        .context("Dust II smoke unavailable")?
+        .to_string();
+    let smoke = client.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":smoke_id,"start_seconds":1,"end_seconds":2,"width":320,"height":180,"fps":4})).await?;
+    let smoke_job = smoke.structured_content.as_ref().unwrap()["job_id"]
+        .as_str()
+        .context("smoke job ID")?
+        .to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let smoke_result = loop {
+        let status = client
+            .ok(evidence, "video_status", json!({"job_id":smoke_job}))
+            .await?
+            .structured_content
+            .unwrap();
+        if status["state"] != "running" {
+            break status;
+        }
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "smoke video timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    ensure!(
+        smoke_result["state"] == "completed",
+        "smoke video failed: {smoke_result}"
+    );
+    let after_smoke = state(&client.ok(evidence, "app_status", json!({})).await?)?;
+    evidence.check(
+        "fixed-camera smoke video preserves the live view",
+        after_smoke.map == settled.map
+            && after_smoke.camera == settled.camera
+            && after_smoke.revision == settled.revision,
+    )?;
     let ui = client
         .ok(
             evidence,
@@ -1228,7 +1543,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     )?;
     later.disconnect().await?;
     evidence.check(
-        "all nine tools have positive and negative scenarios",
+        "all thirteen tools have positive and negative scenarios",
         TOOLS.iter().all(|tool| {
             evidence.calls.get(*tool).is_some_and(|counts| counts.0 > 0)
                 && evidence.negative_cases.contains(*tool)

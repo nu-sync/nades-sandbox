@@ -10,7 +10,7 @@ build:
 mcp: build
     ./target/release/nades-mcp
 
-# Verify all nine MCP tools against real local maps and the application.
+# Verify the MCP tools against real local maps and the application.
 verify-mcp: build
     cargo run --release -p nades-mcp --example verify
 

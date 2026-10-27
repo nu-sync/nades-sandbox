@@ -69,7 +69,8 @@ struct Inner {
     config: Config,
     session: Mutex<Session>,
     mutations: Arc<Mutex<()>>,
-    rendering: Semaphore,
+    rendering: Arc<Semaphore>,
+    videos: crate::video::VideoJobs,
     detached: AtomicBool,
     shutdown: watch::Sender<bool>,
 }
@@ -90,7 +91,8 @@ impl Backend {
                 log_path: None,
             }),
             mutations: Arc::new(Mutex::new(())),
-            rendering: Semaphore::new(1),
+            rendering: Arc::new(Semaphore::new(1)),
+            videos: crate::video::VideoJobs::default(),
             detached: AtomicBool::new(false),
             shutdown,
         }))
@@ -810,6 +812,41 @@ impl Backend {
         })
     }
 
+    pub async fn video_start(
+        &self,
+        request: nades_control::video::VideoRequest,
+    ) -> Result<crate::video::VideoStatus, ControlError> {
+        let request = request.validated()?;
+        if self.0.detached.load(Ordering::Acquire) {
+            return Err(error("disconnected", "MCP session is disconnected.", false));
+        }
+        let pack = self.preflight(&request.map)?;
+        let permit = self
+            .0
+            .rendering
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error("busy", "Another headless render is running.", true))?;
+        self.0
+            .videos
+            .start(
+                request,
+                self.0.config.clone(),
+                pack,
+                permit,
+                self.0.shutdown.subscribe(),
+            )
+            .await
+    }
+
+    pub async fn video_status(&self, id: &str) -> Result<crate::video::VideoStatus, ControlError> {
+        self.0.videos.status(id).await
+    }
+
+    pub async fn video_cancel(&self, id: &str) -> Result<crate::video::VideoStatus, ControlError> {
+        self.0.videos.cancel(id).await
+    }
+
     pub async fn logs(&self, limit: usize) -> Vec<String> {
         let path = self.0.session.lock().await.log_path.clone();
         path.and_then(|path| read_log_tail(&path).ok())
@@ -828,6 +865,7 @@ impl Backend {
         if let Some(live) = live {
             self.release_after_eof(&live).await;
         }
+        self.0.videos.wait_shutdown().await;
     }
 
     async fn release_after_eof(&self, live: &Live) {

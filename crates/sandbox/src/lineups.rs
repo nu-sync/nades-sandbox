@@ -1248,6 +1248,77 @@ impl MapsBench {
     }
 }
 
+/// Render a throw as a stream of PNG frames on stdout, with JSON progress on stderr.
+pub fn render_video(path: &Path) -> Result<()> {
+    use std::io::Write as _;
+    use nades_control::video::VideoRequest;
+    let request: VideoRequest = serde_json::from_slice(&std::fs::read(path)?)?;
+    let request = request.validated().map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
+    let (width, height) = (request.width, request.height);
+    let (pack, scene) = resident::open_cached(&crate::pack_path(Some(&request.map)))?;
+    let gpu = Gpu::new(nades_render::instance(), None)?;
+    if !gpu.capabilities.bindless { bail!("{} has no texture binding arrays", gpu.name()); }
+    if width > gpu.device.limits().max_texture_dimension_2d || height > gpu.device.limits().max_texture_dimension_2d { bail!("video dimensions exceed GPU limit"); }
+    let mut map = Map::new(&gpu.device, &gpu.queue, pack, &scene, crate::OFFSCREEN_FORMAT, &|_| {});
+    let targets = map.targets(&gpu.device, &gpu.queue, width, height);
+    let prepared = prepare(nades_config::source(&[])?.as_ref(), &request.map, &request.throw_id, toward_sun(&map))?;
+    let (noise, _) = nades_scene::noise::smoke_noise();
+    map.composite.set_noise(&gpu.device, &nades_render::smoke::noise_texture(&gpu.device, &gpu.queue, &noise));
+    if let Some(books) = nades_render::throw::Flipbooks::load(&nades_scene::noise::effects_dir()) {
+        map.throw.set_flipbooks(&gpu.device, &books.upload(&gpu.device, &gpu.queue));
+    }
+    show_stage(&gpu, &mut map, Some(&prepared));
+    map.throw.flight_visible = true;
+    let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("video frame"), size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: crate::OFFSCREEN_FORMAT, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let row = crate::row_bytes(width);
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("video readback"), size: u64::from(row * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+    });
+    let stdout = std::io::stdout();
+    let mut stream = stdout.lock();
+    for frame in 0..request.frame_count() {
+        let elapsed = f64::from(frame) / f64::from(request.fps);
+        let t = request.start_seconds + elapsed;
+        let eye = match request.camera_at(elapsed) {
+            Some(camera) => {
+                let mut live_camera = crate::camera::Camera::bench();
+                live_camera.set_pose(&camera);
+                live_camera.view()
+            }
+            None => views::of(&views::camera(ViewMode::Result, &prepared.stage, &prepared.result, None)),
+        };
+        let samples = if prepared.stage.cloud.is_some() && t > 0.0 { nades_render::smoke::ACCUMULATE } else { 1 };
+        for sample in 0..samples {
+            let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video render") });
+            map.throw.set_time(&gpu.device, &gpu.queue, Some(&prepared.stage), t, &eye, (width, height));
+            map.render(&gpu.queue, &mut encoder, &targets, &eye, elapsed as f32, &frame_effects(Some(&prepared.stage), t, sample));
+            gpu.queue.submit([encoder.finish()]);
+        }
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });
+        {
+            let view = output.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("video present"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(crate::CLEAR), store: wgpu::StoreOp::Store } })],
+                ..Default::default()
+            });
+            map.present(&mut pass, &targets);
+        }
+        encoder.copy_texture_to_buffer(output.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
+        gpu.queue.submit([encoder.finish()]);
+        stream.write_all(&crate::encode_png(&gpu, &buffer, width, height, [0, 1, 2])?)?;
+        eprintln!("{}", serde_json::json!({"event":"video_progress", "frames":frame + 1, "total":request.frame_count()}));
+    }
+    stream.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

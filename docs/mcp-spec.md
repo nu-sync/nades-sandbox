@@ -2,7 +2,7 @@
 
 ## Outcome and boundaries
 
-An agent discovers nine typed tools, understands the currently shown map and camera, operates its own window,
+An agent discovers thirteen typed tools, understands the currently shown map and camera, operates its own window,
 checks actual results, and renders scenes headlessly. It can read bounded logs and correctly labelled frame metrics
 without shell automation. The MCP adapter calls the same application commands as the UI. It is not a second renderer.
 
@@ -10,7 +10,7 @@ The server owns one window. Another MCP session and manually opened windows are 
 restart the owned window; this is explicitly reported. A ready window survives MCP disconnect and becomes the user's
 normal window. It cannot be reclaimed by later MCP sessions. Offscreen workers never become retained windows.
 
-M3 throw selection, effects and playback; M4 resident map switching; semantic location navigation, picking, visibility,
+Live M3 throw selection and playback; M4 resident map switching; semantic location navigation, picking, visibility,
 saved views and batch rendering are follow-up capabilities. V1 does not advertise them. Database writes, arbitrary
 SQL, shell execution and raw game/pack exports are excluded. Assets and the database stay local.
 
@@ -97,10 +97,31 @@ from CPU submission samples; actual GPU timing remains explicitly unavailable un
 | `frame_capture` | Instance; include_ui defaults true; optional expected revision. Native physical window or cropped scene rectangle. | Decodable PNG from the reported frame/revision; scene-only copy occurs before UI in the same submission, with UI still presented normally; app stays open. Occlusion/readback failure is explicit. |
 | `view_render` | Base map, camera, width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; repeated fixed-input renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. M3 effects are explicitly unsupported. |
 | `diagnostics_get` | Log limit defaults 50, maximum 200. | Bounded actual startup/frame/error/build/GPU diagnostics; failures remain inspectable; no image blobs, raw assets or fabricated metrics. |
+| `lineups_list` | Map, optional grenade (smoke, flash, he, molotov, incendiary, decoy) and destination substring. | Returns the lineups of the throws in the configured cs2-throws files (`NADES_SANDBOX_DATA` or the config file), with the sandbox's own lineup IDs, the producer's throw IDs, the landing callout and frequency; invalid inputs or unreadable data are explicit. |
+| `video_render` | Recorded throw, map, start/end seconds relative to detonation, fixed camera or keyframes, size and fps. | Returns a job ID immediately; uses one persistent headless renderer and FFmpeg H.264; live state is unchanged. |
+| `video_status` | Job ID from this MCP session. | Reports running/completed/failed/cancelled, rendered frame count, errors and final local MP4 path. |
+| `video_cancel` | Job ID. | Stops and reaps the owned renderer and encoder; polling reaches cancelled and no partial MP4 remains. |
 
 Capture and offscreen comparison use identical dimensions, camera/FOV and material time. Exposure has no temporal
 settling history in M2; animated material masks do vary with time. Record actual render time and reproduce it in
 offscreen requests rather than comparing unrelated frames.
+
+## Headless video
+
+Discover a throw with `lineups_list` (up to 300 matching rows, with truncation reported), then call `video_render` and poll `video_status`. The default is 1280×720 at
+30 fps; dimensions are even and at most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total
+at most 1,800 frames. Times are seconds relative to detonation; negative values include the flight. Frames sample
+from the start at fixed 1/fps intervals before the end; the encoded duration is the frame count divided by fps. Omit camera
+information to use the recorded result camera, provide `camera` for a fixed pose, or supply `camera_keyframes` with
+increasing offsets in seconds from clip start. The first keyframe is at zero; yaw takes the shortest route.
+For example, an agent can call `lineups_list` with `{"map":"de_dust2","grenade":"molotov","destination":"BombsiteA"}`,
+then pass a returned `throw_id` to `video_render` with `{"map":"de_dust2","throw_id":"…","start_seconds":-1,
+"end_seconds":5}`. Poll `video_status` with the returned `job_id`; its completed response includes the local path.
+
+The renderer loads the stage once, emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
+runs directory. It shares the single headless-worker limit with `view_render`. A job belongs to its MCP session;
+disconnect cancels running work, while completed files remain local. FFmpeg is required and a missing encoder is
+reported in the job failure. The output has no audio. Live video recording is not supported.
 
 ## Handoff and failure recovery
 
@@ -113,13 +134,14 @@ begins, failure does not pretend that old state still exists. No graceful final 
 
 ## Verification and completion
 
-Run `just verify-mcp` against the real MCP stdio server and real sandbox. Retain machine-readable verdicts, tool
+Run `just verify-mcp` against the real MCP stdio server and real sandbox. FFmpeg with libx264, ffprobe, the
+de_dust2 pack and a database with a Dust II A-site Molotov are required for video acceptance. Retain machine-readable verdicts, tool
 metadata, sandbox PNGs and build IDs in `.runs/mcp-*`. Every tool has a positive and negative scenario. Missing local
 packs, GPU or desktop are unavailable coverage, not a passing test. Mock protocol tests cannot satisfy local acceptance.
 
 The required journeys are:
 
-1. Negotiate MCP, discover exactly nine tools and their input/output schemas; list maps; inspect stopped state;
+1. Negotiate MCP, discover all thirteen tools and their input/output schemas; list maps; inspect stopped state;
    start de_cache, repeat start, inspect ready state, capture, stop, and start again.
 2. Set distinct known camera poses; independently assert conversion and numerical readback. Capture the actual
    resulting revision and compare scene-only pixels with offscreen output at the same pose, size and material time.
@@ -141,7 +163,7 @@ Alternate baseline/candidate timing runs (n≥5), record load averages/stage mar
 launch. Preserve SPEC §9 targets. Game reference images and derivatives remain in the neighboring project's
 `.verify-runs/`; do not copy them into MCP output or evidence.
 
-V1 is complete only when all nine real-tool criteria and the five journeys have passing evidence, the verifier and
+V1 is complete only when all thirteen real-tool criteria and the five journeys have passing evidence, the verifier and
 verification skill can be rerun by a fresh agent, and unresolved coverage is explicitly reported. No commit or external
 client configuration change is part of this implementation.
 
@@ -173,3 +195,21 @@ client configuration change is part of this implementation.
 
 Evidence stays local and is ignored by Git. Each report identifies its tested build; concurrent M3 changes require
 fresh verification. Saved success is not proof of new code.
+
+## Headless video verification · 2026-10-26
+
+The real MCP verifier passed 54 checks against the local application, including all thirteen tool schemas; a moving
+A-site Molotov MP4, fixed-camera smoke, invalid inputs, missing throw and encoder, busy rejection, cancellation after
+both subprocesses start, disconnect cleanup, and preservation of the live view.
+[Report](../.runs/mcp-1793055808478007000/results.json). The desktop movement check is a separate manual journey and
+is marked pending in that automated report.
+
+A six-second Dust II A-site clip was separately rendered at 1280×720, 30 fps: ffprobe found 180 H.264 frames.
+[Video](../.runs/video-accept/runs/video-1ce27ae2-9818-48de-8dac-0f80f3246824.mp4),
+[metadata](../.runs/video-accept/panorama-result.json). Decoded frames before and after detonation were inspected.
+A fixed-camera smoke video frame was also inspected against a standalone still at the same effect time; the encoded
+frame includes H.264 loss and material animation advances, so exact pixel identity is not assumed.
+Camera comparison matched all four views of 84 throws ([report](../.runs/cameras-20261026-175923/report.md));
+effect comparison ran for twelve throws ([report](../.runs/effects-20261026-180047/report.md)).
+Protected-copy startup was 149.84 ms median over nine runs at the recorded load
+([report](../.runs/startup-20261026-180559/report.md)); this is not a speedup claim.
