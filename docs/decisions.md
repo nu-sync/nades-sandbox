@@ -1110,3 +1110,38 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Contract:** `fire_flames(detonation, normal, collider)` stays, for the molotov. `fire_flames_of(kind, …)` is
   added, because an incendiary's fire is smaller and shorter. `normal` is unused: the fire starts on the floor under
   the detonation, whatever the grenade hit.
+- **The cube on Mirage's stairs** (2026-10-27): a simulated smoke on the T-side stairs drew as a cube 220 units tall
+  in the app. The report: "recorded smokes in open areas are rounded domes".
+  - **What the recorded clouds are.**
+    - Rebuilt by `fill_cloud`, recorded clouds in the open are flat-topped: about 7–8 voxels tall out to 8 voxels from
+      the grenade, then a shoulder to about 12.
+    - Their dome in the view is the renderer's density falling off near open air, and simulated clouds get the same.
+    - Recorded, old and rounded simulated smokes at three open spots (Mirage mid, Nuke, Cache) look alike from the
+      recorded result camera.
+    - The nearest recorded smoke to the stairs, 400 units away in the same walled street, rebuilds into the same block
+      as ours: 1771 voxels against our 1795, the same footprint and taller. A walled street fills that way in the log.
+    - Rounding every top edge (an extra vertical radius of 4–6) costs open-area smokes the most (IoU 0.764 → 0.731,
+      40 a map). Recorded clouds' rims really are square, so the cube's sides follow the data.
+  - **What changed:** `Model.round`, 3 voxels.
+    - Where the cloud's outline is an unsent brick's face in open air (not a wall or a floor), a voxel near two or three
+      such faces at once is no longer sent, outside a ball of that radius.
+    - The kept voxels' neighbours stay sent, so `fill_cloud`'s front leaves exactly the kept voxels.
+    - It takes the square corners off: 36 of 2144 voxels at the stairs. A larger radius rounds whole edges but costs
+      0.02 IoU at 4 voxels and 0.05 at 6.
+  - **Scores** (120 a map, against the table above): whole smoke −0.001 to −0.003 per map; at 2, 4 and 12 s
+    +0.002 to +0.006; solid voxels and fires unchanged.
+
+    | map | IoU whole smoke | 0.5 s | 1 s | 2 s | 4 s | 12 s |
+    |---|---:|---:|---:|---:|---:|---:|
+    | de_ancient | 0.797 | 0.718 | 0.754 | 0.753 | 0.771 | 0.787 |
+    | de_anubis | 0.781 | 0.721 | 0.750 | 0.730 | 0.753 | 0.769 |
+    | de_cache | 0.771 | 0.687 | 0.763 | 0.775 | 0.791 | 0.790 |
+    | de_dust2 | 0.770 | 0.698 | 0.742 | 0.731 | 0.748 | 0.760 |
+    | de_inferno | 0.786 | 0.730 | 0.746 | 0.728 | 0.749 | 0.769 |
+    | de_mirage | 0.743 | 0.729 | 0.744 | 0.706 | 0.724 | 0.735 |
+    | de_nuke | 0.777 | 0.729 | 0.782 | 0.762 | 0.774 | 0.785 |
+  - **Rejected:**
+    - Clouds made only of the flood's first voxels: IoU 0.70–0.72.
+    - A dome limit on the flood cost, a step up costing 2.2–3.5: −0.005 to −0.2 for little visible change.
+  - **Checks:** the stairs site is in the fixture (`shapes`); `tests/fixture.rs` holds its counts, rounded under square.
+    A unit test checks that an open floor's cloud loses only rim voxels and keeps its top's middle.

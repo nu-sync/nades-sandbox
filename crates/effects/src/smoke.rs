@@ -19,6 +19,9 @@ pub struct Model {
     pub spread_frames: f64,
     /// Bricks the server sends at most, the first the cloud comes near.
     pub bricks: usize,
+    /// Radius (voxels) the cloud's edges and corners in open air are rounded to: where its outline is an unsent
+    /// brick's face rather than the map, `fill_cloud` would draw a box.
+    pub round: f64,
     /// Cost of a step up and of a step down, against 1 for a step sideways; a diagonal step costs its length.
     pub up: f64,
     pub down: f64,
@@ -30,7 +33,7 @@ pub struct Model {
 
 impl Default for Model {
     fn default() -> Self {
-        Self { volume: 1800.0, first_volume: 450.0, spread_frames: 15.0, bricks: 78, up: 1.75, down: 0.75, emitters: 44, frames: 202, fading_from: 174 }
+        Self { volume: 1800.0, first_volume: 450.0, spread_frames: 15.0, bricks: 78, round: 3.0, up: 1.75, down: 0.75, emitters: 44, frames: 202, fading_from: 174 }
     }
 }
 
@@ -175,7 +178,61 @@ pub fn grid(solid: &[u8], model: &Model) -> Grid {
             out_solid[c] = solid[c];
         }
     }
+    round_edges(&mut sent, solid, model.round);
     Grid { solid: out_solid, sent, sent_frame, emitters, frames: model.frames, fading_from: model.fading_from }
+}
+
+/// Rounds the cloud's open-air edges and corners to `radius`. For each open sent voxel, how far it lies inside the
+/// cloud along each axis, from the nearest open voxel that was not sent (or the grid's edge), walls not counting; a
+/// voxel near two or three such faces at once, outside the rounding, is no longer sent, and neither is any open voxel
+/// beyond the kept ones' neighbours, so `fill_cloud`'s front leaves exactly the kept voxels.
+fn round_edges(sent: &mut [u8], solid: &[u8], radius: f64) {
+    if radius <= 0.0 {
+        return;
+    }
+    let open_sent = |c: usize| sent[c] == 1 && solid[c] == 0;
+    let depth = |p: [i32; 3], axis: usize| -> Option<i32> {
+        [-1, 1]
+            .into_iter()
+            .filter_map(|dir| {
+                let mut q = p;
+                for k in 1.. {
+                    q[axis] += dir;
+                    match at(q) {
+                        None => return Some(k - 1),
+                        Some(n) if solid[n] == 1 => return None,
+                        Some(n) if sent[n] == 0 => return Some(k - 1),
+                        Some(_) => {}
+                    }
+                }
+                None
+            })
+            .min()
+    };
+    let keep: Vec<bool> = (0..CELLS)
+        .map(|c| {
+            if !open_sent(c) {
+                return false;
+            }
+            let p = coords(c);
+            let outside: f64 = (0..3).filter_map(|a| depth(p, a)).map(|e| (radius - f64::from(e)).max(0.0).powi(2)).sum();
+            outside <= radius * radius
+        })
+        .collect();
+    let mut near = keep.clone();
+    for (c, _) in keep.iter().enumerate().filter(|(_, k)| **k) {
+        let p = coords(c);
+        for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+            if let Some(n) = at([p[0] + d[0], p[1] + d[1], p[2] + d[2]]) {
+                near[n] = true;
+            }
+        }
+    }
+    for (c, s) in sent.iter_mut().enumerate() {
+        if solid[c] == 0 && !near[c] {
+            *s = 0;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +260,23 @@ mod tests {
         assert!(max[0] - min[0] > 2 * (max[2] - min[2]), "wider than tall: {:?}", cloud.bounds);
         assert_eq!(grid.emitters.len(), 44);
         assert!(grid.emitters.iter().all(|e| e.cell[2] >= CENTRE[2] as u8));
+    }
+
+    #[test]
+    fn a_cloud_in_open_air_has_its_corners_rounded_off() {
+        let solid = room(None);
+        let square = fill_cloud(&grid(&solid, &Model { round: 0.0, ..Model::default() }), DVec3::ZERO).unwrap();
+        let rounded = fill_cloud(&grid(&solid, &Model::default()), DVec3::ZERO).unwrap();
+        let removed: Vec<usize> = (0..CELLS).filter(|&c| square.arrival[c] != NEVER && rounded.arrival[c] == NEVER).collect();
+        assert!(!removed.is_empty() && removed.len() * 20 < square.count, "{} of {}", removed.len(), square.count);
+        // only near the rim: each removed voxel has open air outside the square cloud within two voxels
+        let rim = |c: usize| {
+            let p = coords(c);
+            (-2..=2).any(|dz| (-2..=2).any(|dy| (-2..=2).any(|dx| at([p[0] + dx, p[1] + dy, p[2] + dz]).is_some_and(|n| solid[n] == 0 && square.arrival[n] == NEVER))))
+        };
+        assert!(removed.iter().all(|&c| rim(c)));
+        let (lo, hi) = square.bounds;
+        assert!(rounded.arrival[cell((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, hi[2])] != NEVER, "the top's middle stays");
     }
 
     #[test]

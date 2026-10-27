@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run --release -p nades-effects --example effects_check -- <cs2-throws export> [--per-map N] [--twins]
-//!     [--json <report.json>] [--fixture <fixture.json>]
+//!     [--json <report.json>] [--fixture <fixture.json> [--shape <map>:<x>:<y>:<z> ...]]
 //! ```
 //!
 //! The export is a local cs2-throws file (show-me-the-nades' `nades export --cs2-throws`), never committed; the
@@ -18,7 +18,8 @@
 //!
 //! `--fixture` writes the committed fixture (`fixtures/effects.json`) that `tests/fixture.rs` holds the scores with: a
 //! smoke and two fires a map, as derived numbers only (the voxelized geometry around each, the recorded cloud and
-//! flames).
+//! flames). Each `--shape` adds a place a simulated smoke went wrong in the app, with the shape its cloud has now (its
+//! voxel count, unrounded and rounded): the Mirage stairs smoke that drew as a cube.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -59,7 +60,7 @@ fn main() -> Result<()> {
     let twins = args.iter().any(|a| a == "--twins");
     let db = Connection::open(export)?;
     let mut report = Vec::new();
-    let mut fixture = json!({"format": "nades-effects-fixture", "version": 1, "smokes": [], "fires": []});
+    let mut fixture = json!({"format": "nades-effects-fixture", "version": 1, "smokes": [], "fires": [], "shapes": []});
     let mut table = String::new();
     writeln!(table, "map         smokes  IoU full  0.5s  1s    2s    4s    12s   solid | molotov rec/sim (1 s)   incendiary rec/sim (1 s)")?;
     for map in MAPS {
@@ -107,10 +108,21 @@ fn main() -> Result<()> {
     if let Some(path) = flag("--json") {
         std::fs::write(&path, serde_json::to_string_pretty(&report)?)?;
     }
+    for site in args.windows(2).filter(|w| w[0] == "--shape").map(|w| w[1].clone()) {
+        let parts: Vec<&str> = site.split(':').collect();
+        let [map, x, y, z] = parts[..] else { anyhow::bail!("--shape takes <map>:<x>:<y>:<z>") };
+        let det = DVec3::new(x.parse()?, y.parse()?, z.parse()?);
+        let solid = voxels::surface(det - DVec3::splat(HALF_SPAN), &collider(map)?, voxels::SAMPLES, 0.0);
+        let count = |round: f64| fill_cloud(&smoke::grid(&solid, &smoke::Model { round, ..smoke::Model::default() }), det).map_or(0, |c| c.count);
+        fixture["shapes"].as_array_mut().expect("an array").push(json!({
+            "map": map, "det": det.to_array(), "solid": pack(solid.iter().map(|&v| v == 1)),
+            "count": count(smoke::Model::default().round), "square_count": count(0.0),
+        }));
+    }
     if let Some(path) = flag("--fixture") {
         // one smoke or fire a line
         let lines = |key: &str| fixture[key].as_array().expect("an array").iter().map(|v| format!("    {v}")).collect::<Vec<_>>().join(",\n");
-        let text = format!("{{\n  \"format\": \"nades-effects-fixture\",\n  \"version\": 1,\n  \"smokes\": [\n{}\n  ],\n  \"fires\": [\n{}\n  ]\n}}\n", lines("smokes"), lines("fires"));
+        let text = format!("{{\n  \"format\": \"nades-effects-fixture\",\n  \"version\": 1,\n  \"smokes\": [\n{}\n  ],\n  \"fires\": [\n{}\n  ],\n  \"shapes\": [\n{}\n  ]\n}}\n", lines("smokes"), lines("fires"), lines("shapes"));
         std::fs::write(&path, text)?;
         eprintln!("wrote {path}");
     }
