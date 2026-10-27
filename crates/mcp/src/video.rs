@@ -196,6 +196,7 @@ impl VideoJobs {
             .arg("--render-video")
             .arg(&request_path)
             .env("NADES_PACK", pack)
+            .env("NADES_SANDBOX_PACKS", &config.packs_dir)
             .env("NADES_SANDBOX_STATE", temp.path().join("state.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

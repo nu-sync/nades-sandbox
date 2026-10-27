@@ -20,6 +20,11 @@ cargo clippy --release --workspace --all-targets
 python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite     # the format's worked example (the tests read it too)
 cargo run --release -p nades-source-file --example tag_parity -- <export> nades   # groups, techniques, callouts vs a producer's tags
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
+./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
+cargo run --release -p nades-packer --example physics_vs_awpy -- de_cache   # the pack's collider against awpy's mesh
+cargo run --release -p nades-packer --example lump_vs_export -- de_cache    # entities, post, sky, skybox against export_map.py's
+cargo run --release -p nades-packer --example effects_vs_web                # the effects against cs2_effects.py's
+cargo run --release -p nades-packer --example pack_diff -- <a.pack> <b.pack>  # what differs between two packs of a map
 python3 bench/startup.py                                    # first frame (median of 9), steady frames, memory, load averages
 uv run bench/realism.py --nades <checkout> --note "what changed"   # every map rendered beside the game's shots and the web view
 python3 bench/cameras.py --nades <checkout>                 # every view's camera for 84 throws against the web view's choice
@@ -36,7 +41,7 @@ cargo run --release -p nades-render --example upload_memory -- ~/.cache/nades/pa
 ## Working rules
 
 - **Valve's assets stay on this machine.** Map exports (`~/.cache/nades/maps`), the game's files (`~/.cache/nades/cs2`)
-  and anything built from them (packs in `~/.cache/nades/packs`) are never committed, uploaded or shared. Rendered
+  and anything built from them (packs, the effects pack) are never committed, uploaded or shared. Rendered
   images at most. `.gitignore` refuses packs, glbs and `.vtex_c` files; keep it that way.
 - **The data is the user's.** cs2-throws files are read read-only; never experiment on one in place, and never open
   show-me-the-nades' `nades.duckdb`: the benches clone it and read the clone's export. Tests write their own files.

@@ -33,11 +33,18 @@ def load() -> str:
     return subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout.strip()
 
 
+# what the timed benches say when macOS keeps the window hidden or covered (main.rs, BENCH_PATIENCE)
+HIDDEN = "needs the window on screen"
+
+
 def run(args: list[str], timeout: float = 120) -> str | None:
-    """The last line the run printed; None when it timed out (a window macOS never shows draws no frames)."""
+    """The last line the run printed; None when the window was never on screen: the run timed out (a window macOS never
+    shows draws no frames), or a timed bench stopped because macOS kept it hidden or covered."""
     try:
         done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
+        return None
+    if done.returncode != 0 and HIDDEN in done.stderr:
         return None
     if done.returncode != 0:
         raise SystemExit(f"{' '.join(args)} failed ({done.returncode}): {done.stderr[-800:]}")

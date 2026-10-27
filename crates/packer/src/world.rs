@@ -17,6 +17,8 @@ pub fn lightmapped_meshes(cli: &Path, vpk: &Path, prefix: &str) -> Result<HashMa
         .args(["-i"])
         .arg(vpk)
         .args(["-f", &format!("{prefix}/worldnodes/"), "-e", "vmdl_c", "-b", "MDAT"])
+        // the CLI writes exceptions.txt where it runs
+        .current_dir(std::env::temp_dir())
         .output()
         .with_context(|| format!("running {}", cli.display()))?;
     ensure!(output.status.success(), "{} exited {}", cli.display(), output.status);

@@ -13,7 +13,6 @@
 //! Every reply wakes the window's event loop.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -118,18 +117,18 @@ type Slot = Mutex<Option<Option<Arc<Collider>>>>;
 pub struct SharedCollider(Arc<(Slot, Condvar)>);
 
 impl SharedCollider {
-    /// Builds `map`'s collider on its own thread from awpy's mesh in `maps`.
-    pub fn build(maps: PathBuf, map: String, wake: impl Fn() + Send + 'static) -> Self {
+    /// Builds `map`'s collider on its own thread, from its pack.
+    pub fn build(map: String, wake: impl Fn() + Send + 'static) -> Self {
         let shared = Self::default();
         let filled = shared.clone();
         std::thread::Builder::new()
             .name("collider".into())
             .spawn(move || {
                 let started = Instant::now();
-                let collider = Collider::load(&maps.join(format!("{map}.mesh")));
+                let collider = crate::assets::collider(&map);
                 match &collider {
                     Ok(c) => eprintln!("collider: {map}, {} triangles in {:.1} ms", c.triangles(), started.elapsed().as_secs_f64() * 1e3),
-                    Err(e) => eprintln!("collider: {e} (result shots without line of sight, the smoke unlit)"),
+                    Err(e) => eprintln!("collider: {e:#} (result shots without line of sight, the smoke unlit)"),
                 }
                 let (slot, ready) = &*filled.0;
                 *slot.lock().expect("collider slot") = Some(collider.ok().map(Arc::new));

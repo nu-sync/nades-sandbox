@@ -10,7 +10,6 @@ publish.workspace = true
 nades-pack.workspace = true
 nades-scene.workspace = true
 serde_json.workspace = true
-png.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 thiserror.workspace = true

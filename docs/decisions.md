@@ -707,3 +707,67 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   median, load average 8–14). Every map query starts from `demos` with `cross join`: left to itself SQLite scanned all
   430 k throw tags to skip a sort, and de_train's read went from 4 to 35 ms.
 
+||||||| a38394e
+
+## S26 · Maps from the game's files: the collider, the effects and the records, made by the packer
+
+- **Decision:** building a pack reads the game's own files through Source 2 Viewer's CLI, which the packer runs itself
+  (docs/standalone-api.md §7, step 3), and nothing show-me-the-nades' scripts make except the geometry export:
+  - **The collider** (`crates/packer/src/physics.rs`): the CLI's glTF export of `maps/<map>/world_physics.vmdl_c`,
+    reduced exactly as awpy-data's `process_geometry.py` reduces it into the mesh the web view's line of sight reads:
+    meshes named for a non-occluder dropped (`playerclip`, `grenadeclip`, `sky`, `passbullets`, `glass`, `window`), the
+    positions welded by their bits in export order, then clustered on an 8-unit grid (each cell's first vertex stands
+    for it; collapsed and repeated triangles go). It goes into the pack's Collider section in awpy's AWMH layout, and
+    the app reads it from the pack (`crates/sandbox/src/assets.rs`). The export needs no `--gltf_export_materials`: the
+    meshes carry the same names, and the flag makes the master build load the game's shaders, which a depot download
+    of a few maps does not have.
+  - **The effects** (`crates/packer/src/effects.rs`, `nades-pack --effects`): one shared pack,
+    `<packs>/shared/effects.pack` (`SectionKind::Effects`, `nades_pack::effects::Effects`): the smoke noise read from
+    `pak01` (`worley_perlin`, 128³ RGBA8, as R + 0.95 G in f32), and the four fire flipbooks decompiled by the CLI into
+    their sheets and frames and laid out as `cs2_effects.py web` lays them, each frame resized by a port of Pillow's
+    Lanczos filter (premultiplied, 22-bit fixed point, 16-bit frames to their high byte).
+  - **The records** (`crates/packer/src/lump.rs`): the map's and its 3D skybox prefab's entity lumps, the sky
+    materials and the `.vpost` with its lookup table, decompiled per build into a scratch folder; from them the
+    post-processing, sky and skybox records by `export_map.py`'s own rules, ported line for line (its blocks, its
+    `keyvalue`, its number regex, which reads `1e-05` as 1 and −5, kept so the packs stay the same).
+  - **The textures** come from `pak01` alone: the game index finds a base colour by name among `pak01`'s entries that
+    the depot holds, as it found it among `export_map.py`'s unpacked files (`--unpacked` still adds such a folder).
+  - **Settings** (§8, `crates/config`): `--packs`/`NADES_SANDBOX_PACKS`/`[assets] packs` (default `packs/` in the
+    platform's cache), `--game`/`NADES_SANDBOX_GAME`/`[assets] game` (the folder holding `game/csgo`; no default),
+    `--s2v`/`NADES_SANDBOX_S2V`/`[tools] s2v` (no default). This machine's config file names the old folders under
+    `~/.cache/nades`. The MCP server takes its packs folder from the same setting and passes it on.
+- **Why:** a pack for any map the game has, including those awpy does not publish, from one tool anyone can download,
+  with no other project's scripts, folders or Python environment.
+- **Evidence** (2026-10-26, game build 2347770_67499503218971311, Source 2 Viewer 20.1 master):
+  - **Collider:** byte for byte awpy-data's published `<map>.mesh` on all 7 pool maps (`examples/physics_vs_awpy`;
+    e.g. de_cache 1,632,087 exported triangles, 368,176 dropped, 1,263,911 welded, 338,375 kept; de_inferno 547,966 of
+    2,733,603). `bench/cameras.py`: 84 / 84 throws, every view identical to the web view's
+    (`.runs/cameras-20261026-223620`), so no result camera changes.
+  - **Effects:** the noise and all four atlases byte for byte `cs2_effects.py web`'s files (`examples/effects_vs_web`).
+    Source 2 Viewer's release build (`tools/s2v`) decompiles the sheets differently (frames cropped to their alpha,
+    unnamed sequences dropped: 72 frames of fire_small_sim_a against 73), so the master build is the one to use.
+  - **Records:** the entity lumps, `post.json`, `lut.bin`, `sky.json` and `skybox.json` the same as `export_map.py`'s
+    on all 7 maps (`examples/lump_vs_export`); 4 CLI runs a map, 0.8–1.8 s.
+  - **Packs:** every pool map rebuilt from `pak01` without the unpacked folder: the scene, the Geometry and the
+    Textures sections identical to the packs before (`examples/pack_diff`), the Collider section new. 2.4–6.3 s a map
+    (the collider 0.4–2.2 s of it); the effects pack 2.6 s, 32.7 MB.
+- **What remains:** the geometry and materials (`<map>.glb`, `<map>.skybox.glb`): `export_map.py` runs the CLI's glTF
+  export and then compresses it (meshopt, WebP) and adds layer averages; the packer decodes that compressed form. Running
+  the export itself needs the packer to read an uncompressed glTF and compute the averages, the next step. The sky
+  record differs in one point: `export_map.py` wrote it only once the sky texture decompiled to EXR; the packer needs
+  the texture in an archive the depot holds.
+
+## S27 · The timed benches stop when the window is not on screen
+
+- **Decision:** `--bench-frames`, `--bench-maps` and `--bench-switch` end with an error that says the window "needs
+  the window on screen" when it gives no frame to draw into for 5 s, or macOS says it is hidden or covered for 5 s
+  (from launch until it first shows it, too); `--bench-frames` and `--bench-maps` end at once when macOS hides the window
+  while they measure. `--bench-switch` with an empty list (no data, or a filter matching none) is an error as soon as
+  the list arrives. `bench/startup.py` reads that error as it read its 120 s timeout (`timed_out`).
+- **Why:** a hidden window's drawables come from the window server about once a second, so a bench either never ended
+  (`--bench-frames`: 600 frames at 1 Hz) or recorded the wait as a frame (`--bench-maps`: a 1,004 ms frame), and the
+  switch bench waited for a list it would never have (the bench-switch fix's follow-ups, 2026-10-26).
+- **Evidence** (screen locked, so every window hidden; watchdog caps 40 s, 5 GB): the new binary exits 1 after 5.1–5.5 s
+  for `--bench-frames 200`, `--bench-maps de_mirage,de_cache` and `--bench-switch 20`, and after 0.11 s for
+  `--bench-switch 20` on an empty data folder; main's binary ran `--bench-frames` and `--bench-maps` until killed at
+  15 s. Not run tonight: the same benches with a window on screen (the screen stayed locked).

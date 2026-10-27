@@ -1,12 +1,10 @@
-//! The map's look after lighting and its sky, from the files show-me-the-nades' `export_map.py` writes beside the
-//! export (`~/.cache/nades/maps`): `<map>.post.json` (the post-processing volume, its `.vpost`, the fog and sun
-//! entities), `<map>.lut.bin` (the colour lookup table, dim³ RGB bytes), `<map>.sky.json` (the visible env_sky) and
-//! `<map>.skybox.json` (where the 3D skybox sits). Hammer units become the scene's metres here, and Source's z-up
+//! The map's look after lighting and its sky, from the records [`crate::lump`] reads from the map's own files (as
+//! show-me-the-nades' `export_map.py` wrote them beside the export): the post-processing (the post-processing volume,
+//! its `.vpost`, the fog and sun entities), the colour lookup table (dim³ RGB bytes), the visible env_sky and where the
+//! 3D skybox sits. Hammer units become the scene's metres here, and Source's z-up
 //! frame glTF's y-up one: glTF (x, y, z) = Source (y, z, x) × 0.0254.
 
-use std::path::Path;
-
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Result, ensure};
 use nades_pack::scene::{Bloom, BloomMode, CubemapFog, Exposure, GradientFog, Lut, Post, Tonemap};
 use serde::Deserialize;
 
@@ -131,15 +129,6 @@ pub struct SkyboxFile {
     pub gradient_fog: Option<GradientFogFile>,
 }
 
-/// A JSON file beside the export, or none when it is not there.
-pub fn read<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<Option<T>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("reading {}", path.display()))?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
-}
-
 /// env_gradient_fog in the scene's units: distances and heights in metres, its colour linear (Source 2 Viewer reads
 /// entity colours as linear 0..1) times its strength.
 pub fn gradient_fog(f: &GradientFogFile) -> GradientFog {
@@ -220,27 +209,6 @@ pub fn sky_tint(sky: &SkyFile, material: Option<&SkyMaterialFile>) -> [f32; 3] {
     std::array::from_fn(|k| tint.get(k).copied().unwrap_or(255.0) / 255.0 * scale)
 }
 
-/// The sky's cube map, from the sky material Source 2 Viewer decompiled beside the export (its `g_tSkyTexture`),
-/// else the one compiled texture `pak01` holds under the material's name.
-pub fn sky_texture(export_dir: &Path, map: &str, material: &str, pak_paths: &mut dyn Iterator<Item = String>) -> Option<String> {
-    let decompiled = export_dir.join(map).join("sky").join(material);
-    if let Ok(text) = std::fs::read_to_string(&decompiled) {
-        let mut rest = text.as_str();
-        while let Some(at) = rest.find("\"g_tSkyTexture\"") {
-            rest = &rest[at + "\"g_tSkyTexture\"".len()..];
-            let mut quoted = rest.split('"').skip(1);
-            if let Some(path) = quoted.next().filter(|p| p.ends_with(".vtex")) {
-                return Some(path.to_string());
-            }
-        }
-    }
-    let stem = material.strip_suffix(".vmat").unwrap_or(material);
-    let prefix = format!("{stem}_");
-    let mut found: Vec<String> = pak_paths.filter(|p| p.starts_with(&prefix) && p.ends_with(".vtex_c")).collect();
-    found.sort();
-    found.into_iter().next().map(|p| p.trim_end_matches("_c").to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,17 +240,5 @@ mod tests {
         assert!(super::post(&file, Some(&lut[..21])).is_err(), "a table of the wrong size");
         let sky = SkyFile { yaw: 116.0, brightness: 4.0, material: "m".into() };
         assert_eq!(sky_tint(&sky, file.sky.as_ref()), [8.0, 8.0, 8.0]);
-    }
-
-    #[test]
-    fn the_sky_texture_is_the_materials_own_or_the_one_named_after_it() {
-        let dir = std::env::temp_dir().join(format!("nades-post-test-{}", std::process::id()));
-        let vmat = dir.join("de_x/sky/materials/sky/x.vmat");
-        std::fs::create_dir_all(vmat.parent().unwrap()).unwrap();
-        std::fs::write(&vmat, "\"Layer0\"\n{\n\t\"Compiled Textures\"\n\t{\n\t\t\"g_tSkyTexture\"\t\"materials/sky/x_exr_1234.vtex\"\n\t}\n}\n").unwrap();
-        let mut none = std::iter::empty();
-        assert_eq!(sky_texture(&dir, "de_x", "materials/sky/x.vmat", &mut none), Some("materials/sky/x_exr_1234.vtex".into()));
-        let mut pak = ["materials/sky/y_exr_9.vtex_c".to_string(), "materials/sky/y.vmat_c".to_string()].into_iter();
-        assert_eq!(sky_texture(&dir, "de_y", "materials/sky/y.vmat", &mut pak), Some("materials/sky/y_exr_9.vtex".into()));
     }
 }

@@ -12,12 +12,8 @@ impl Config {
         let sandbox_binary = std::env::var_os("NADES_SANDBOX_BINARY")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_exe()?.with_file_name("nades-sandbox"));
-        let packs_dir = std::env::var_os("NADES_PACKS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                    .join(".cache/nades/packs")
-            });
+        // the sandbox's own setting (docs/standalone-api.md §8): NADES_SANDBOX_PACKS, [assets] packs, the platform's cache
+        let packs_dir = nades_config::packs(None)?.path;
         Ok(Self {
             sandbox_binary,
             packs_dir,

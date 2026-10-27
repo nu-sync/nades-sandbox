@@ -1,38 +1,73 @@
-//! `nades-pack <map>`: builds `~/.cache/nades/packs/<map>.pack` (crates/packer has the details) and prints what is in
-//! it. `--export`, `--game`, `--depot`, `--decompiled` and `--out` move the inputs and the pack from their places under
-//! `~/.cache/nades`.
+//! `nades-pack <map>`: builds `<packs>/<map>.pack` (crates/packer has the details) and prints what is in it.
+//! `nades-pack --effects` builds the shared effects pack, `<packs>/shared/effects.pack`. The settings
+//! (docs/standalone-api.md §8): `--packs <dir>`, `--game <dir>` (the folder holding `game/csgo`) and `--s2v <CLI>`, else
+//! `NADES_SANDBOX_PACKS`, `NADES_SANDBOX_GAME`, `NADES_SANDBOX_S2V`, else the config file's `[assets] packs`,
+//! `[assets] game`, `[tools] s2v`. `--export`, `--unpacked` and `--out` move the other inputs and the pack.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 use nades_pack::scene::{AlphaMode, Semantic, TextureFormat, TextureSource};
-use nades_packer::{Inputs, Report, build};
+use nades_packer::{Flags, Inputs, Report, build};
 
-const USAGE: &str = "usage: nades-pack <map> [--export <glb>] [--game <dir>] [--depot <dir>] [--decompiled <dir>] [--cli <Source2Viewer-CLI>] [--out <pack>]";
+const USAGE: &str = "usage: nades-pack <map> | --effects   [--packs <dir>] [--game <dir>] [--s2v <Source2Viewer-CLI>] [--export <glb>] [--unpacked <game/csgo>] [--out <pack>]";
 
 fn main() -> Result<()> {
     let started = Instant::now();
     let mut args = std::env::args().skip(1);
-    let map = match args.next() {
-        Some(map) if !map.starts_with('-') => map,
+    let target = match args.next() {
+        Some(t) if t == "--effects" || !t.starts_with('-') => t,
         _ => bail!("{USAGE}"),
     };
-    let mut inputs = Inputs::for_map(&map)?;
+    let mut flags = Flags::default();
+    let mut moved: Vec<(String, PathBuf)> = Vec::new();
     while let Some(flag) = args.next() {
         let value = PathBuf::from(args.next().with_context(|| format!("{flag} needs a value\n{USAGE}"))?);
         match flag.as_str() {
-            "--export" => inputs.export = value,
-            "--game" => inputs.game = value,
-            "--depot" => inputs.depot = value,
-            "--decompiled" => inputs.decompiled = value,
-            "--cli" => inputs.cli = value,
-            "--out" => inputs.out = value,
+            "--packs" => flags.packs = Some(value),
+            "--game" => flags.game = Some(value),
+            "--s2v" | "--cli" => flags.s2v = Some(value),
+            "--export" | "--unpacked" | "--out" => moved.push((flag, value)),
             _ => bail!("unknown flag {flag}\n{USAGE}"),
+        }
+    }
+    if target == "--effects" {
+        return effects(&flags, moved, started);
+    }
+    let mut inputs = Inputs::with(&target, &flags)?;
+    for (flag, value) in moved {
+        match flag.as_str() {
+            "--export" => inputs.export = value,
+            "--unpacked" => inputs.unpacked = Some(value),
+            _ => inputs.out = value,
         }
     }
     let report = build(&inputs)?;
     print(&inputs, &report, started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `--effects`: the game's smoke noise and fire flipbooks, from `pak01`, into the shared effects pack.
+fn effects(flags: &Flags, moved: Vec<(String, PathBuf)>, started: Instant) -> Result<()> {
+    let inputs = Inputs::with("effects", flags)?;
+    let cli = inputs.cli().with_context(|| nades_packer::no_cli(&inputs))?;
+    let out = match moved.into_iter().find(|(f, _)| f == "--out") {
+        Some((_, out)) => out,
+        None => nades_config::effects_pack(&nades_config::packs(flags.packs.as_deref())?.path),
+    };
+    let effects = nades_packer::effects::build(cli, &inputs.pak(), &std::env::temp_dir())?;
+    let bytes = effects.to_bytes();
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let source = nades_pack::Source { map: "effects".into(), game_build: nades_packer::game_build(&inputs.game), export_hash: format!("{:016x}", nades_packer::fnv1a(&bytes)) };
+    nades_pack::write(&out, source.clone(), &[(nades_pack::SectionKind::Effects, &bytes)]).with_context(|| format!("writing {}", out.display()))?;
+    println!("effects: {} ({}) in {:.2} s, game build {}", out.display(), mb(std::fs::metadata(&out)?.len()), started.elapsed().as_secs_f64(), source.game_build);
+    println!("  smoke noise: 128³ R + 0.95 G from {}", nades_packer::effects::NOISE);
+    for f in &effects.flipbooks {
+        println!("  {}: {} frames in {} sequences, {}×{} cells of {} texels", f.name, f.sequences.iter().map(|s| s.1).sum::<u32>(), f.sequences.len(), f.columns, f.rows, f.cell);
+    }
     Ok(())
 }
 
@@ -128,7 +163,7 @@ fn print(inputs: &Inputs, r: &Report, seconds: f64) {
             "  the game's meshes: {lit} of {all} lightmapped; {} primitives lit by probes that the UV rule would have lightmapped; {} of meshes it does not name",
             st.probe_lit_by_game, st.lightmapped_unknown
         ),
-        None => println!("  the game's meshes: not asked (no Source2Viewer-CLI at {}): lightmapping by the UV rule alone", inputs.cli.display()),
+        None => println!("  the game's meshes: not asked ({}): lightmapping by the UV rule alone", nades_packer::no_cli(inputs)),
     }
     if let Some(p) = &s.probes {
         println!("  light probes: {} volumes; atlas {}, shadows {}", p.volumes.len(), describe(p.irradiance), p.shadows.map_or("none".into(), describe));
@@ -154,6 +189,17 @@ fn print(inputs: &Inputs, r: &Report, seconds: f64) {
         p.fog.is_some(),
         p.gradient_fog.is_some()
     );
+    match &r.collider {
+        Ok(c) => println!(
+            "  collider: {} triangles, {} vertices, from the map's physics ({} exported, {} non-occluders dropped, {} welded)",
+            c.triangles.len(),
+            c.vertices.len(),
+            c.exported,
+            c.dropped,
+            c.welded
+        ),
+        Err(why) => println!("  collider: none ({why}): the app has no line of sight on this map"),
+    }
     let sections: Vec<String> = r.sections.iter().map(|(k, n)| format!("{k:?} {}", if *n < 1_000_000 { format!("{:.1} KB", *n as f64 / 1e3) } else { mb(*n) })).collect();
     println!("  sections: {}", sections.join(", "));
     for fallback in &r.fallbacks {

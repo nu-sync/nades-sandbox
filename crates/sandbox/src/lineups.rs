@@ -5,7 +5,7 @@
 //! list of throws for `--cameras` (bench/cameras.py compares them with the web view's).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,23 +26,7 @@ use crate::shell::Action;
 use crate::views::{self, Orbit};
 use crate::{shell, state};
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-}
-
-/// The maps with packs on this machine.
-pub fn packed_maps() -> Vec<String> {
-    let mut maps: Vec<String> = std::fs::read_dir(home().join(".cache/nades/packs"))
-        .map(|dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.strip_suffix(".pack").map(str::to_string)).collect())
-        .unwrap_or_default();
-    maps.sort();
-    maps
-}
-
-/// Where awpy's collision meshes are (`NADES_MAPS_DIR`, as for show-me-the-nades' web server).
-pub fn maps_dir() -> PathBuf {
-    std::env::var_os("NADES_MAPS_DIR").map_or_else(|| home().join(".cache/nades/maps"), PathBuf::from)
-}
+pub use crate::assets::packed_maps;
 
 fn cs_view((eye, pitch, yaw, fov): state::Camera) -> CsView {
     CsView { eye: DVec3::from_array(eye), pitch, yaw, fov }
@@ -68,7 +52,7 @@ pub fn toward_sun(map: &Map) -> DVec3 {
 /// A throw's facts, tracks and viewpoints, read once, and its stage built against the map's collider.
 pub fn prepare(source: &dyn ThrowSource, map: &str, throw: &str, toward_sun: DVec3) -> Result<Prepared> {
     let library = read_library(source, map)?;
-    let collider = Collider::load(&maps_dir().join(format!("{map}.mesh"))).map_err(|e| eprintln!("{e}")).ok();
+    let collider = crate::assets::collider(map).map_err(|e| eprintln!("collider: {e:#}")).ok();
     Prepared::read(source, &library, &ThrowId(throw.into()), collider.as_ref(), toward_sun)?.with_context(|| format!("no throw {throw} on {map}"))
 }
 
@@ -122,7 +106,7 @@ pub fn print_cameras(source: &dyn ThrowSource, cases: &Path) -> Result<()> {
             }
         };
         let Some(facts) = read_stage(source, &library, &ThrowId(id.into()))? else { continue };
-        let collider = colliders.entry(map.clone()).or_insert_with(|| Collider::load(&maps_dir().join(format!("{map}.mesh"))).ok());
+        let collider = colliders.entry(map.clone()).or_insert_with(|| crate::assets::collider(&map).map_err(|e| eprintln!("collider: {e:#}")).ok());
         let started = Instant::now();
         let stage = build_stage(&facts.throw, &facts.tracks, &facts.derived);
         let viewers: Vec<nades_scene::camera::Viewer> = facts.viewpoints.iter().map(nades_scene::camera::Viewer::from).collect();
@@ -659,8 +643,7 @@ impl Lineups {
         std::thread::Builder::new()
             .name("effects".into())
             .spawn(move || {
-                let books = nades_render::throw::Flipbooks::load(&nades_scene::noise::effects_dir());
-                let (noise, _) = nades_scene::noise::smoke_noise();
+                let (noise, _, books) = crate::assets::effects();
                 let _ = send.send((books, noise));
                 wake();
             })
@@ -683,7 +666,7 @@ impl Lineups {
 
     fn build_collider(&mut self, map: &str) {
         let Some(wake) = self.wake.clone() else { return };
-        self.sandbox.collider = SharedCollider::build(maps_dir(), map.to_string(), move || wake());
+        self.sandbox.collider = SharedCollider::build(map.to_string(), move || wake());
         // stages asked for before the collider existed are asked for again with it
         self.sandbox.prepare_listed();
     }
@@ -739,7 +722,7 @@ impl Lineups {
                     if self.resident.contains(&opened) {
                         let (wake, warming) = (self.wake.clone(), opened.clone());
                         self.sandbox.keep_warm(&opened, sun, move || {
-                            SharedCollider::build(maps_dir(), warming, move || {
+                            SharedCollider::build(warming, move || {
                                 if let Some(wake) = &wake {
                                     wake();
                                 }
@@ -838,6 +821,12 @@ impl Lineups {
 
     /// Whether everything the switch bench needs is in: the game's effects, and the built stages of the `n + 1` lineups
     /// it shows, the selected one and the `n` after it (switching to one not built would ask for its stage then).
+    /// Why the switch bench cannot run: the list came back empty.
+    pub fn nothing_to_switch(&self) -> Option<String> {
+        let s = &self.sandbox;
+        (s.list_ms.is_some() && s.lineups.is_empty()).then(|| s.notice.clone().unwrap_or_else(|| "the list is empty".into()))
+    }
+
     pub fn ready_for(&self, n: usize) -> bool {
         let s = &self.sandbox;
         let at = s.selected.and_then(|id| s.lineups.iter().position(|l| l.id == id)).unwrap_or(0);
@@ -1070,9 +1059,9 @@ pub fn render_throw(source: &dyn ThrowSource, throw: &str, map: Option<&str>, vi
     let mut map = Map::new(&gpu.device, &gpu.queue, pack, &scene, crate::OFFSCREEN_FORMAT, &|_| {});
     let targets = map.targets(&gpu.device, &gpu.queue, width, height);
     let prepared = prepare(source, &map_name, throw, toward_sun(&map))?;
-    let (noise, _) = nades_scene::noise::smoke_noise();
+    let (noise, _, books) = crate::assets::effects();
     map.composite.set_noise(&gpu.device, &nades_render::smoke::noise_texture(&gpu.device, &gpu.queue, &noise));
-    if let Some(books) = nades_render::throw::Flipbooks::load(&nades_scene::noise::effects_dir()) {
+    if let Some(books) = books {
         map.throw.set_flipbooks(&gpu.device, &books.upload(&gpu.device, &gpu.queue));
     }
     show_stage(&gpu, &mut map, Some(&prepared));
@@ -1157,6 +1146,11 @@ impl MapsBench {
             None => plan,
         };
         Self { plan, settle, started: Instant::now(), settled_ms: None, opening: Vec::new(), asked: None, done: Vec::new() }
+    }
+
+    /// The map being picked and timed, if one is.
+    pub fn picking(&self) -> Option<&str> {
+        self.asked.as_ref().map(|a| a.map.as_str())
     }
 
     /// One step, after a frame (`drew`: one was drawn, taking `frame_ms` of the window's time); the report once every
@@ -1262,9 +1256,9 @@ pub fn render_video(path: &Path) -> Result<()> {
     let mut map = Map::new(&gpu.device, &gpu.queue, pack, &scene, crate::OFFSCREEN_FORMAT, &|_| {});
     let targets = map.targets(&gpu.device, &gpu.queue, width, height);
     let prepared = prepare(nades_config::source(&[])?.as_ref(), &request.map, &request.throw_id, toward_sun(&map))?;
-    let (noise, _) = nades_scene::noise::smoke_noise();
+    let (noise, _, books) = crate::assets::effects();
     map.composite.set_noise(&gpu.device, &nades_render::smoke::noise_texture(&gpu.device, &gpu.queue, &noise));
-    if let Some(books) = nades_render::throw::Flipbooks::load(&nades_scene::noise::effects_dir()) {
+    if let Some(books) = books {
         map.throw.set_flipbooks(&gpu.device, &books.upload(&gpu.device, &gpu.queue));
     }
     show_stage(&gpu, &mut map, Some(&prepared));
@@ -1358,8 +1352,8 @@ mod tests {
             let _ = woke.send(());
         });
         let mut s = Sandbox::start("de_mirage", None, library);
-        // no meshes here: the stages are built without a collider
-        s.collider = SharedCollider::build(std::env::temp_dir().join("nades-sandbox-no-meshes"), "de_mirage".into(), || {});
+        // no pack for this map: the stages are built without a collider
+        s.collider = SharedCollider::build("nades-sandbox-test-no-pack".into(), || {});
         s.library.send(Request::List(s.filter.clone()));
         let started = Instant::now();
         while s.prepared.len() < 7 {
@@ -1395,7 +1389,7 @@ mod tests {
             let _ = woke.send(());
         });
         let mut s = Sandbox::start("de_mirage", None, library);
-        s.collider = SharedCollider::build(std::env::temp_dir().join("nades-sandbox-no-meshes"), "de_mirage".into(), || {});
+        s.collider = SharedCollider::build("nades-sandbox-test-no-pack".into(), || {});
         s.library.send(Request::List(s.filter.clone()));
         let started = Instant::now();
         while s.prepared.len() < 7 {
@@ -1412,6 +1406,19 @@ mod tests {
         assert!(lineups.ready_for(2), "the second lineup is not shown, so its stage is not waited for");
         lineups.sandbox.prepared.remove(&examples[0]);
         assert!(!lineups.ready_for(2), "the first is shown after the last");
+    }
+
+    #[test]
+    fn the_switch_bench_says_when_the_list_came_back_empty() {
+        let library = Library::start(Arc::new(nades_model::fixture::Memory::default()), || {});
+        let s = Sandbox::start("de_cache", None, library);
+        let mut lineups = Lineups::new(s, false, egui::Rect::NOTHING);
+        assert_eq!(lineups.nothing_to_switch(), None, "no list yet: wait for it");
+        lineups.sandbox.list_ms = Some(1.0);
+        lineups.sandbox.notice = Some("No lineups match these filters.".into());
+        assert_eq!(lineups.nothing_to_switch().as_deref(), Some("No lineups match these filters."));
+        lineups.sandbox.lineups = vec![lineup(1)];
+        assert_eq!(lineups.nothing_to_switch(), None);
     }
 
     #[test]

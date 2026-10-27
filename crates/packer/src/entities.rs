@@ -1,9 +1,7 @@
-//! The map's entities, from the entity lump Source 2 Viewer decompiled beside the export
-//! (`~/.cache/nades/cs2/export/<map>/sky/maps/<map>/entities/default_ents.vents`): blocks of `key value` lines between
-//! `====N====` lines. The packer reads the sun's baked shadow channel and the light probe volumes from them.
+//! The map's entities, from the entity lump Source 2 Viewer's CLI decompiles from the map's VPK ([`crate::lump`],
+//! `maps/<map>/entities/default_ents.vents`): blocks of `key value` lines between `====N====` lines. The packer reads the sun's baked shadow channel and the light probe volumes from them.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use glam::{Mat4, Vec3};
 use nades_pack::scene::{Bounds, ProbeVolume};
@@ -33,12 +31,6 @@ pub fn parse(text: &str) -> Vec<Entity> {
         })
         .filter(|e: &Entity| e.contains_key("classname"))
         .collect()
-}
-
-/// The map's entities, when Source 2 Viewer's decompiled lump is there.
-pub fn of_map(decompiled: &Path, map: &str) -> Option<Vec<Entity>> {
-    let text = std::fs::read_to_string(decompiled.join(map).join("sky/maps").join(map).join("entities/default_ents.vents")).ok()?;
-    Some(parse(&text))
 }
 
 fn numbers(value: Option<&String>) -> Vec<f32> {

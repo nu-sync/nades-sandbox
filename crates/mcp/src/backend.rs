@@ -205,6 +205,7 @@ impl Backend {
         let spawned = Command::new(&self.0.config.sandbox_binary)
             .args(["--control-stdio", "--instance-id", &id, "--map", map])
             .env("NADES_PACK", &path)
+            .env("NADES_SANDBOX_PACKS", &self.0.config.packs_dir)
             .env(
                 "NADES_SANDBOX_STATE",
                 self.0.config.runs_dir.join(format!("app-{id}-state.json")),
@@ -758,6 +759,7 @@ impl Backend {
                 &format!("{width}x{height}"),
             ])
             .env("NADES_PACK", path)
+            .env("NADES_SANDBOX_PACKS", &self.0.config.packs_dir)
             .env("NADES_SANDBOX_STATE", temp.path().join("state.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

@@ -10,4 +10,3 @@ publish.workspace = true
 nades-model.workspace = true
 glam.workspace = true
 rayon.workspace = true
-thiserror.workspace = true
