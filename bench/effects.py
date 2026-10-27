@@ -6,11 +6,13 @@
 opens on (a smoke settled, a fire at its fullest, a flash or HE as it goes off) and a second before the grenade went
 off, side by side.
 
-    uv run bench/effects.py [--maps de_cache,de_mirage,de_inferno] [--db PATH] [--size 1280x720]
+    uv run bench/effects.py --nades <show-me-the-nades checkout> [--maps de_cache,de_mirage,de_inferno] [--db PATH]
+                            [--data FILE] [--size 1280x720]
 
 - The web view is shot by show-me-the-nades' own tool (its verify-nades-scene skill's effect_shots.ts, read in place),
   through its development server and API on a clone of the database; the sandbox renders the same throws, views and
-  moments offscreen (`nades-sandbox --render --throw`). Both open from the same camera (bench/cameras.py).
+  moments offscreen (`nades-sandbox --render --throw`) from the clone exported as a cs2-throws file (bench/
+  web_compare.py). Both open from the same camera (bench/cameras.py).
 - The maps themselves differ (the sandbox draws CS2's look, S12), so the effect is compared as what it changes: each
   renderer's shot with the effect less its shot before it. Per throw: the share of the frame the effect changes, the
   overlap of the two changed regions (intersection over union), and the effect's mean colour in each.
@@ -33,9 +35,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
+import web_compare
+
 ROOT = Path(__file__).resolve().parent.parent
-NADES = ROOT.parent / "show-me-the-nades"
-SHOTS = NADES / ".agents/skills/verify-nades-scene/scripts/effect_shots.ts"
 BEFORE = -1.0
 # a pixel counts as changed by the effect once its blurred luma moves this much (of 255)
 CHANGED = 6.0
@@ -77,23 +79,28 @@ def effect(after: Path, before: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--nades", type=Path, help="the show-me-the-nades checkout to compare with (else SHOW_ME_THE_NADES)")
     parser.add_argument("--maps", default="de_cache,de_mirage,de_inferno")
-    parser.add_argument("--db", type=Path, default=NADES / "nades.duckdb")
+    parser.add_argument("--db", type=Path, help="the database to clone (default: the checkout's nades.duckdb)")
+    parser.add_argument("--data", type=Path, help="a cs2-throws file exported from that database (default: export the clone)")
     parser.add_argument("--size", default="1280x720")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/nades-sandbox")
     opts = parser.parse_args()
+    nades = web_compare.checkout(opts.nades)
+    shots = nades / ".agents/skills/verify-nades-scene/scripts/effect_shots.ts"
     width, height = map(int, opts.size.split("x"))
     out = ROOT / ".runs" / f"effects-{time.strftime('%Y%m%d-%H%M%S')}"
     (out / "web").mkdir(parents=True)
     (out / "ours").mkdir()
-    clone = out / "nades.duckdb"
-    subprocess.run(["cp", "-c", str(opts.db), str(clone)], check=True)
+    clone = web_compare.clone(opts.db or nades / "nades.duckdb", out)
+    data = web_compare.export(nades, clone, out, opts.data)
+    ids = web_compare.file_ids(data)
     api_port, app_port = free_port(), free_port()
     api, app = f"http://127.0.0.1:{api_port}", f"http://localhost:{app_port}"
     env = {**os.environ, "NADES_DB": str(clone), "NADES_WEB_PORT": str(api_port), "NADES_MAPS_DIR": str(Path.home() / ".cache/nades/maps"), "NADES_API_URL": api}
     procs = [
-        subprocess.Popen(["bun", "src/main.ts"], cwd=NADES / "web/server", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "api.log", "w")),
-        subprocess.Popen(["bun", "--bun", "vite", "dev", "--port", str(app_port), "--strictPort"], cwd=NADES / "web/app", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "app.log", "w")),
+        subprocess.Popen(["bun", "src/main.ts"], cwd=nades / "web/server", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "api.log", "w")),
+        subprocess.Popen(["bun", "--bun", "vite", "dev", "--port", str(app_port), "--strictPort"], cwd=nades / "web/app", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "app.log", "w")),
     ]
     try:
         wait_for(f"{api}/api/maps")
@@ -105,14 +112,14 @@ def main() -> int:
                 if rows and rows[0].get("example_throw_id"):
                     cases.append({"id": f"{m.removeprefix('de_')}-{nade}", "map": m, "throw": rows[0]["example_throw_id"], "nade": nade})
         # the moment each result view opens on, as both compute it
-        (out / "throws.json").write_text(json.dumps([{"throw": c["throw"]} for c in cases]))
-        cameras = subprocess.run([str(opts.binary), "--cameras", str(out / "throws.json")], env=env, capture_output=True, text=True, check=True).stdout
+        (out / "throws.json").write_text(json.dumps([{"throw": ids.get(c["throw"], c["throw"]), "map": c["map"]} for c in cases]))
+        cameras = subprocess.run([str(opts.binary), "--cameras", str(out / "throws.json"), "--data", str(data)], capture_output=True, text=True, check=True).stdout
         opens = {r["throw"]: r["result_time"] for r in map(json.loads, filter(None, cameras.splitlines()))}
         for c in cases:
-            c["times"] = [BEFORE, round(opens[c["throw"]], 2)]
+            c["times"] = [BEFORE, round(opens[ids.get(c["throw"], c["throw"])], 2)]
             c["shots"] = [{"name": "result", "kind": "result"}]
         (out / "cases.json").write_text(json.dumps(cases, indent=1))
-        shot = subprocess.run(["bun", str(SHOTS), "--app", app, "--cases", str(out / "cases.json"), "--out", str(out / "web"), "--width", str(width), "--height", str(height)], cwd=NADES / "web/app", capture_output=True, text=True, timeout=3600)
+        shot = subprocess.run(["bun", str(shots), "--app", app, "--cases", str(out / "cases.json"), "--out", str(out / "web"), "--width", str(width), "--height", str(height)], cwd=nades / "web/app", capture_output=True, text=True, timeout=3600)
         (out / "effect_shots.log").write_text(shot.stdout + shot.stderr)
         if shot.returncode == 2:
             raise SystemExit(f"effect_shots.ts could not run: {shot.stderr[-1500:]}")
@@ -123,9 +130,8 @@ def main() -> int:
             p.wait(timeout=30)
     for c in cases:
         for t in c["times"]:
-            subprocess.run([str(opts.binary), "--render", str(out / "ours" / f"{c['id']}-result-{t:.2f}.png"), "--throw", c["throw"], "--view", "result", "--time", str(t), "--size", f"{width}x{height}"], env=env, capture_output=True, text=True, check=True)
-    for f in out.glob("nades.duckdb*"):
-        f.unlink()
+            subprocess.run([str(opts.binary), "--render", str(out / "ours" / f"{c['id']}-result-{t:.2f}.png"), "--throw", ids.get(c["throw"], c["throw"]), "--map", c["map"], "--view", "result", "--time", str(t), "--size", f"{width}x{height}", "--data", str(data)], capture_output=True, text=True, check=True)
+    web_compare.remove_clone(out)
 
     results, rows = [], []
     for c in cases:

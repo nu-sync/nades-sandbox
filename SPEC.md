@@ -1,8 +1,9 @@
 # nades-sandbox: specification
 
-A native app that shows a CS2 map and the grenades pros throw on it, from the throw's own data, instantly. It is the
-3D half of `show-me-the-nades` (a separate project), which keeps the analytics, guides and replays in its web app.
-Later it plays back whole rounds from demos.
+A native app that shows a CS2 map and the grenades thrown on it, from the throws' own data, instantly. It reads
+`cs2-throws` files, the facts CS2 demos record, which any parser can write (docs/standalone-api.md); `show-me-the-nades`
+(a separate project, which keeps the analytics, guides and replays in its web app) is one producer. Later it plays back
+whole rounds from demos.
 
 Status: **M4 done** (2026-10-26).
 - Every pool map stays on the GPU. Once the first frame is on screen the other six open in the background, one at a
@@ -15,6 +16,9 @@ Status: **M4 done** (2026-10-26).
   frame no longer waits on the GPU (S21).
 - `just bundle` makes a macOS app that runs from Finder (S22). The workspace checks and lints clean for Windows
   (x86_64-pc-windows-msvc, DX12); it has not run on Windows yet (S23).
+- Standalone, step 1 (S24): the throws come from cs2-throws files through a `ThrowSource`, and grouping, technique,
+  practice commands, round time, landing callouts and viewpoints are the sandbox's own rules (`crates/model`); the
+  workspace builds with no sibling checkout. The demo reader (step 2) and maps from the game's files (step 3) are next.
 - M3 made it the lineup sandbox: a map's lineups from the nades database, cut by side, grenade, team, player and phase;
   each seen from the thrower's eye, zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, the
   smoke, fire, flash or HE as the round had it, a time scrubber and the practice command; every view of 84 throws opens
@@ -78,7 +82,7 @@ cannot follow (show-me-the-nades' `docs/research/native-sandbox.md` and the meas
 
 ## 3. Scope
 
-**Now (M1–M4):** the pool maps with their textured exports, the lineups and throws in the nades database, the four
+**Now (M1–M4):** the pool maps with their textured exports, the lineups and throws in cs2-throws files, the four
 views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the practice command, every map resident.
 
 **Later (M5):** demo replay, round by round, with players and every grenade.
@@ -86,7 +90,7 @@ views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the pra
 **Not here:**
 - the analytics, map guides and 2D replay, which stay in the web app;
 - editing data;
-- non-pro demos;
+- reading demos themselves, until the demo reader (docs/standalone-api.md §6, step 2);
 - any distribution of Valve's assets: packs are built on this machine and stay there.
 
 ## 4. Decisions
@@ -101,7 +105,7 @@ The stack, with what each choice rests on. [docs/decisions.md](docs/decisions.md
 | UI | egui, drawn by egui-wgpu into the frame's last pass, input from egui-winit | 0.37 |
 | Engine | none: our own renderer over wgpu | |
 | Shaders | WGSL, checked by naga at build time, composed with naga_oil, a few uber-shaders with overridable constants | naga 30.0.1, naga_oil 0.23 |
-| Database | DuckDB, bundled, the same build nades writes with; read-only, opened per read | duckdb ~1.20000.0 |
+| Data | cs2-throws files: SQLite, bundled, read-only (`crates/source-file`); the config file in TOML, its folder from `directories` | rusqlite 0.41, toml 1, directories 6 |
 | Assets | packs memory-mapped (memmap2), tables in postcard, LZ4 (lz4_flex), our own VTEX reader; meshopt for the export's geometry; Source 2 Viewer's CLI when packing (S9) | 0.9, 1.1, 0.14, 0.7 |
 | Maths, threads | glam, rayon | 0.34, 1.12 |
 | Profiling | start-up marks (JSON), wgpu-profiler (GPU timestamps; built on the same wgpu 30), tracing with Tracy | 0.28, 0.1 |
@@ -130,12 +134,14 @@ crates/render    wgpu device, passes, pipelines, uploads from packs, frame graph
 crates/pack      the per-map pack: format, writer, memory-mapped reader                   (format 2)
 crates/source2   CS2's files: VTEX textures (BC blocks, mips, cubes, volumes), VPK archives; later KV3
 crates/packer    `nades-pack <map>`: builds a map's pack from the export, the game's files and their entities
-crates/data      the nades database, read-only and briefly, with the working tree's views (S14)
+crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
+                 (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
+crates/source-file  the cs2-throws file adapter: version 1 SQLite files, several merged, and `check`
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
 crates/control   app control's protocol, and crates/mcp its MCP server (a separate workstream on the same app)
 crates/replay    (M5) rounds from demos
-../show-me-the-nades   its library (S13): the voxel log's decoder and the track types
+tools/cs2_throws.py  the format's schema and reference writer (Python's standard library only)
 ```
 
 ### Start-up, on two threads, then three more
@@ -151,7 +157,7 @@ stages    each throw's stage on every core (rayon), once the collider is there
 maps      once the window shows: the other packed maps, one at a time, each drawn offscreen; their lists, stages (S19)
 ```
 
-- The first frame needs no database: it is drawn from the camera the last run left on that map (S16). Reading the list
+- The first frame needs no data: it is drawn from the camera the last run left on that map (S16). Reading the list
   before it made the window appear later.
 
 - The window and the map arrive together. Measured on M4's de_cache (medians of 9 from process start, load ≈10,
@@ -263,25 +269,20 @@ panel) has no native counterpart: it exists to work around the browser.
 
 ## 8. Data
 
-- **Reads:** every read opens `nades.duckdb` read-only (DuckDB held to 4 threads), runs its queries and closes it
-  (`crates/data`).
-  - `nades` locks the file while it runs, and an open connection makes it fail, so nothing stays open.
-  - A file held by `nades` is `Busy`: the shell says so, and the read is tried every half second until it is free.
-  - Read-only opens coexist with the web app's API.
-  - Measured: the list (open, views, `lineup_report`, teams, players, close) in 93–114 ms; it is off the first
-    frame's path.
-- **Queries:** show-me-the-nades' macros as its working tree defines them, applied as temp objects on every open, as its
-  web server does (S14):
-  - `lineup_report` for the list, most thrown first (`nades lineups`' order), cut by side, grenade, team, player and
-    phase, each lineup opened by its example throw;
-  - `team_demos` and `slice_players` for the filters;
-  - `throw_scene` for a throw's stance, flight, voxel log, flames and who a flash blinded;
-  - `scene_viewers` for the other side's positions while the effect was up.
-  The DuckDB build must be the one nades writes with, or the file does not open.
-- **Decoding:** show-me-the-nades' library (S13): `tracks::voxel_frames` and `voxels::voxel_frames_with_emitters`
-  decode the voxel log; flights and fires come as its `PathPoint`s and `Flame`s.
-- **The database path:** `NADES_DB`, or show-me-the-nades' `nades.duckdb`. An ingest that changes it is noticed by its
-  modification time (looked at every 5 s), and the list and the stages are read again.
+- **Facts, derivations, tags** (docs/standalone-api.md §2): a source hands over facts only, as `crates/model` names
+  them; everything computed from them is the model's, one implementation for every source; a producer's own labels are
+  tags, shown and filterable, never interpreted.
+- **The source:** `crates/source-file` reads cs2-throws version 1 files read-only. Several files merge into one source,
+  each demo taken from the first file that has it; another major version is refused, naming both; unknown tables and
+  columns are ignored. A file written again (its size or modification time) is opened again, and the source's revision
+  changes: the app looks every 5 s and reads the list and the stages again. A file being written is `Busy`, retried
+  every half second.
+- **The library:** one `nades_model::Library` per map and revision, built on the data thread from the map's facts and
+  its place-labelled samples. A list is that library cut by side, grenade, team, player, round time, plant and tag, in
+  memory; a stage reads the throw's tracks and the samples of its viewpoint window (and, for a flash whose blinded
+  players have no position, the samples around its detonation).
+- **Where the data is:** `--data`, `NADES_SANDBOX_DATA`, the config file's `[data] paths`, then the demo reader's cache
+  (`config.rs`); `nades-sandbox check <file>` reports a file's problems and the features its facts allow.
 
 ## 9. Measured, and the targets
 
@@ -309,7 +310,7 @@ panel) has no native counterpart: it exists to work around the browser.
 | Pipelines at start-up | warm: none waited for (macOS's shader cache); ≈360–440 ms on the first launch after a shader change (M2's pipelines, in parallel), and 497–630 ms on the first launch of a binary at a new path or a new app bundle: the cache is the program's | |
 | Peak memory, de_cache | 2.07–2.19 GB footprint (M4; M3 2.07, M2 2.0; M1's 640 MB pack 0.72–0.75 GB): the textures as Metal allocates them 983 MB, the driver's first submission 119 MB and first render pass ≈200 MB, what drawing the map's triangles holds 170–360 MB, the window ≈150 MB; the upload's staging none (S20) | |
 | Pack build | 1.5–3.9 s a map (M2) | |
-| Database: list | 93–114 ms, open to close, with the working tree's views (M3) | off the first frame's path: met |
+| Database: list | 93–114 ms, open to close, with the working tree's views (M3; replaced by the in-memory library, S24) | off the first frame's path: met |
 
 Timing runs: `nades-sandbox --exit-after-first-frame` prints every stage as JSON. `python3 bench/startup.py` runs the
 first frame, both steady-frame benches and peak memory with the load average beside each, into
@@ -330,9 +331,9 @@ first frame, both steady-frame benches and peak memory with the load average bes
 
 - **Valve's assets stay on this machine.** Packs, exports and the game files live under `~/.cache/nades`. They are
   never committed, uploaded or shared; rendered images at most.
-- **The user's database is read, briefly, never written,** and never experimented on: tests use their own databases,
-  checks use a copy.
-- **Nothing waits for a human:** a missing pack is built, and a locked database is retried.
+- **The user's data is read, never written,** and never experimented on: tests write their own files
+  (`tools/cs2_throws.py fixture`), checks use a copy.
+- **Nothing waits for a human:** a missing pack is built, and a file being written is retried.
 
 ## 12. Risks and unknowns
 
@@ -348,7 +349,7 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | Packing needs Source 2 Viewer's CLI and its decompiled entity lumps | without the CLI the packer falls back to the web view's lightmap rule and says so; without the lumps it packs no light probes and no sky |
 | Smoke at Retina resolution (4× the pixels) | at 1444×1420 a smoke in view costs 1–2 ms a frame (median 5.6–7.1 against 4.9), p95 under 8.9; a smoke filling a 2880×1800 frame is not measured yet: GPU timestamps of the composite at 1× and 2×, and half resolution with a depth-aware upsample if it needs it |
 | The effects' point lights on CS2's baked light: three.js's model (Lambert over π) added to a CS2-style diffuse | `bench/effects.py`: Inferno's flash reaches further up the walls than the web view's (0.21 of the frame against 0.13) |
-| show-me-the-nades' views can outrun its database file | every read applies the working tree's views (S14); a statement the file cannot bind is left to the file's |
+| A producer leaves facts out (show-me-the-nades' export: blinded players' positions, samples' duck amounts) | the sandbox derives what the facts allow (a blinded player stands at their sample nearest the flash, S24) and `check` names the rest |
 | Game updates change the files | packs keyed by game build; rebuild on change |
 | Two front-ends to keep | the web app keeps analytics; the sandbox replaces `/scene` only when M3 matches it |
 

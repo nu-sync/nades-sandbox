@@ -5,8 +5,10 @@
 """How close does the sandbox look to CS2? The same comparison show-me-the-nades' verify-scene-realism skill makes for
 its web view, with the sandbox's offscreen renders.
 
-    uv run bench/realism.py --note "what changed" [--maps cache,mirage] [--binary target/release/nades-sandbox]
-                            [--baseline .runs/realism-<earlier>] [--renders DIR]
+    uv run bench/realism.py --nades <show-me-the-nades checkout> --note "what changed" [--maps cache,mirage]
+                            [--binary target/release/nades-sandbox] [--baseline .runs/realism-<earlier>] [--renders DIR]
+
+The checkout holds the skill, its reference set and the web view's history (`--nades`, else SHOW_ME_THE_NADES).
 
 For every map that has a pack (~/.cache/nades/packs/de_<map>.pack) and a reading in the skill's reference set, the
 sandbox renders the in-game lineup shot's camera (`nades-sandbox --render`, 1138×640 like the web view's renders), and
@@ -43,14 +45,22 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+import web_compare
+
 ROOT = Path(__file__).resolve().parent.parent
-NADES = ROOT.parent / "show-me-the-nades"
-SKILL = NADES / ".agents/skills/verify-scene-realism"
-REFS = NADES / ".verify-runs/jumpthrow-shots-20261025"
-WEB_HISTORY = NADES / ".verify-runs/game-compare-history.jsonl"
+# the show-me-the-nades checkout's skill, reference set and history, once main() is told where it is
+NADES = SKILL = REFS = WEB_HISTORY = Path()
 PACKS = Path.home() / ".cache/nades/packs"
 RUNS = ROOT / ".runs"
 HISTORY = RUNS / "realism-history.jsonl"
+
+
+def locate(nades: Path) -> None:
+    global NADES, SKILL, REFS, WEB_HISTORY
+    NADES = nades
+    SKILL = NADES / ".agents/skills/verify-scene-realism"
+    REFS = NADES / ".verify-runs/jumpthrow-shots-20261025"
+    WEB_HISTORY = NADES / ".verify-runs/game-compare-history.jsonl"
 
 
 def skill_module():
@@ -106,12 +116,14 @@ def render(binary: Path, reading: dict, out: Path) -> tuple[bool, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--nades", type=Path, help="the show-me-the-nades checkout to compare with (else SHOW_ME_THE_NADES)")
     parser.add_argument("--note", default="")
     parser.add_argument("--maps", default="")
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/nades-sandbox")
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--renders", type=Path, help="compare renders made earlier (<map>.png) instead of rendering")
     opts = parser.parse_args()
+    locate(web_compare.checkout(opts.nades))
     if not opts.note:
         print("give --note: the history is only useful if each run says what changed", file=sys.stderr)
         return 2

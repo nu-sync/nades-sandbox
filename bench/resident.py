@@ -10,8 +10,8 @@ finished on the GPU, vsync off), and the process's footprint once it shows. The 
 first frame in the window; later rounds' are not.
 
 The load average (`sysctl -n vm.loadavg`) is recorded before every run. Evidence goes to .runs/resident-<time>/
-(runs.jsonl, results.json, report.md); nothing else is written. Point NADES_DB at a copy of the database and
-NADES_SANDBOX_STATE at a scratch file: the run reads the one and rewrites the other.
+(runs.jsonl, results.json, report.md); nothing else is written. Point NADES_SANDBOX_DATA at a copy of the cs2-throws
+file and NADES_SANDBOX_STATE at a scratch file: the run reads the one and rewrites the other.
 """
 
 from __future__ import annotations

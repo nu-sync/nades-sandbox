@@ -1,8 +1,10 @@
 //! The lineups and their stages, read and built off the window's thread.
 //!
-//! - **The data thread** reads the database (`nades-data`): one map's lineup list with the teams and players its
-//!   filters offer, then the scene and the viewers of each listed lineup's example throw, the selected one first, each
-//!   batch in one brief read-only open. A file `nades` holds is waited out.
+//! - **The data thread** reads the source (a `ThrowSource`: the cs2-throws files, through nades-source-file) and keeps
+//!   one `nades_model::Library` per map, built once per revision of the data: the map's facts with the sandbox's rules
+//!   applied. A list is that library cut by the filters, in memory, with the teams and players they offer. A stage
+//!   reads the throw's tracks and the samples of its viewpoint window, the selected lineup's first. A producer writing
+//!   the data is waited out.
 //! - **The collider** (awpy's mesh and its BVH) is built once per map on a thread of its own.
 //! - **Stages** are built on every core (rayon) once the collider is there: the cloud and its light, the fire, the
 //!   cameras, the result shot through the collider. The window thread only picks a built one up, so a lineup switch
@@ -10,22 +12,25 @@
 //!
 //! Every reply wakes the window's event loop.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use glam::DVec3;
-use nades_data::{DataError, Database, Filter, Lineup, Throw};
+use nades_model::{Demo, Derived, Effect, Library as MapLibrary, Lineup, LineupQuery, MapName, Revision, SourceError, Throw, ThrowId, ThrowSource, Tracks, Viewpoint};
 use nades_scene::camera::{ShotCamera, Viewer};
 use nades_scene::collider::Collider;
 use nades_scene::smoke::{smoke_volume, voxel_light};
 use nades_scene::stage::{Stage, build_stage};
 
-/// A throw ready to show: its stage, its result shot, and its smoke's lit volume.
+/// A throw ready to show: its facts and derivations, its stage, its result shot, and its smoke's lit volume.
 pub struct Prepared {
     pub throw: Throw,
+    pub derived: Derived,
+    /// Its demo, for the shell (the file, the date, the producer's tags).
+    pub demo: Option<Demo>,
     pub viewers: usize,
     pub stage: Stage,
     pub result: ShotCamera,
@@ -38,10 +43,10 @@ pub struct Prepared {
 }
 
 impl Prepared {
-    pub fn new(throw: Throw, viewers: &[nades_data::Viewer], collider: Option<&Collider>, toward_sun: DVec3) -> Self {
+    pub fn new(throw: Throw, derived: Derived, demo: Option<Demo>, tracks: &Tracks, viewpoints: &[Viewpoint], collider: Option<&Collider>, toward_sun: DVec3) -> Self {
         let started = Instant::now();
-        let stage = build_stage(&throw);
-        let viewers: Vec<Viewer> = viewers.iter().map(Viewer::from).collect();
+        let stage = build_stage(&throw, tracks, &derived);
+        let viewers: Vec<Viewer> = viewpoints.iter().map(Viewer::from).collect();
         let result = stage.result_camera(&viewers, collider);
         let lit = Instant::now();
         let volume = stage.cloud.as_ref().map(|cloud| {
@@ -49,8 +54,60 @@ impl Prepared {
             smoke_volume(cloud, light.as_ref())
         });
         let light_ms = if stage.cloud.is_some() { lit.elapsed().as_secs_f64() * 1e3 } else { 0.0 };
-        Self { throw, viewers: viewers.len(), stage, result, volume, build_ms: started.elapsed().as_secs_f64() * 1e3, light_ms }
+        Self { throw, derived, demo, viewers: viewers.len(), stage, result, volume, build_ms: started.elapsed().as_secs_f64() * 1e3, light_ms }
     }
+
+    /// `id`'s stage on `library`'s map, read from `source`; None when the source has no such throw.
+    pub fn read(source: &dyn ThrowSource, library: &MapLibrary, id: &ThrowId, collider: Option<&Collider>, toward_sun: DVec3) -> Result<Option<Self>, SourceError> {
+        Ok(read_stage(source, library, id)?.map(|s| Self::new(s.throw, s.derived, s.demo, &s.tracks, &s.viewpoints, collider, toward_sun)))
+    }
+}
+
+/// What a stage is built from: a throw's facts and derivations, its demo, its tracks and its viewpoints.
+pub struct StageFacts {
+    pub throw: Throw,
+    pub derived: Derived,
+    pub demo: Option<Demo>,
+    pub tracks: Tracks,
+    pub viewpoints: Vec<Viewpoint>,
+}
+
+/// Reads what `id`'s stage needs: its tracks (a flash's blinded players placed from the samples when the facts lack
+/// their positions), and the samples of its viewpoint window.
+pub fn read_stage(source: &dyn ThrowSource, library: &MapLibrary, id: &ThrowId) -> Result<Option<StageFacts>, SourceError> {
+    let (Some(throw), Some(derived)) = (library.throw(id), library.derived(id)) else { return Ok(None) };
+    let Some(mut tracks) = source.tracks(id)? else { return Ok(None) };
+    if let Effect::Flash(blinds) = &mut tracks.effect
+        && blinds.iter().any(|b| b.pos.is_none())
+        && let Some((demo, ticks)) = library.blind_window(id)
+    {
+        nades_model::derive::place_blinds(throw, blinds, &source.samples(&demo, ticks)?);
+    }
+    let samples = match library.viewpoint_window(id) {
+        Some((demo, ticks)) => source.samples(&demo, ticks)?,
+        None => Vec::new(),
+    };
+    let viewpoints = library.viewpoints(id, &samples);
+    Ok(Some(StageFacts { throw: throw.clone(), derived: derived.clone(), demo: library.demo(&throw.demo).cloned(), tracks, viewpoints }))
+}
+
+/// A map's throws cut by the filters: the map, and the sandbox's query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filter {
+    pub map: String,
+    pub query: LineupQuery,
+}
+
+impl Filter {
+    pub fn map(map: &str) -> Self {
+        Self { map: map.to_string(), query: LineupQuery::default() }
+    }
+}
+
+/// One map's library, read and built; the same `Arc` until the data changes.
+pub fn read_library(source: &dyn ThrowSource, map: &str) -> Result<Arc<MapLibrary>, SourceError> {
+    let map = MapName(map.to_string());
+    Ok(Arc::new(MapLibrary::new(source.map(&map)?, source.places(&map)?)))
 }
 
 /// A collider being built: None until the build is done, then the collider (None when the map has no mesh).
@@ -100,12 +157,13 @@ pub enum Request {
     /// A map's lineups for a filter, with the teams and players the filters offer.
     List(Filter),
     /// Stages for these throws (the first first), on `map`, lit with `toward_sun`, against `collider`.
-    Prepare { map: String, throws: Vec<String>, collider: SharedCollider, toward_sun: DVec3 },
+    Prepare { map: String, throws: Vec<ThrowId>, collider: SharedCollider, toward_sun: DVec3 },
     Shutdown,
 }
 
 pub enum Reply {
-    List { filter: Filter, lineups: Vec<Lineup>, teams: Vec<String>, players: Vec<String>, ms: f64 },
+    /// The slice's lineups, with the map's library they come from (for the shell's details).
+    List { filter: Filter, library: Arc<MapLibrary>, lineups: Vec<Lineup>, teams: Vec<String>, players: Vec<String>, ms: f64 },
     Prepared { map: String, prepared: Arc<Prepared> },
     Failed(String),
 }
@@ -114,7 +172,7 @@ pub enum Reply {
 pub struct Library {
     requests: Sender<Work>,
     pub replies: Receiver<Reply>,
-    pub database: Database,
+    pub source: Arc<dyn ThrowSource>,
     worker: Option<std::thread::JoinHandle<()>>,
     shutdown: Arc<Shutdown>,
 }
@@ -157,21 +215,21 @@ impl Shutdown {
     }
 }
 
-/// How long a read waits for `nades` to let go of the file before saying so.
+/// How long a read waits for a producer to finish writing before giving up.
 const PATIENCE: Duration = Duration::from_secs(600);
 
 impl Library {
-    pub fn start(database: Database, wake: impl Fn() + Send + Sync + Clone + 'static) -> Self {
+    pub fn start(source: Arc<dyn ThrowSource>, wake: impl Fn() + Send + Sync + Clone + 'static) -> Self {
         let (requests, inbox) = std::sync::mpsc::channel::<Work>();
         let (outbox, replies) = std::sync::mpsc::channel::<Reply>();
-        let db = database.clone();
         let shutdown = Arc::new(Shutdown::default());
         let stopping = shutdown.clone();
+        let reading = source.clone();
         let worker = std::thread::Builder::new()
             .name("data".into())
-            .spawn(move || serve(db, inbox, outbox, wake, &stopping))
+            .spawn(move || serve(reading.as_ref(), inbox, outbox, wake, &stopping))
             .expect("a data thread");
-        Self { requests, replies, database, worker: Some(worker), shutdown }
+        Self { requests, replies, source, worker: Some(worker), shutdown }
     }
 
     pub fn send(&self, request: Request) {
@@ -201,9 +259,29 @@ impl Drop for Library {
     }
 }
 
+/// The maps' libraries, each with the revision of the data it was built from.
+#[derive(Default)]
+struct Libraries(HashMap<String, (Revision, Arc<MapLibrary>)>);
+
+impl Libraries {
+    /// `map`'s library for the data as it is now: the one built, or one built afresh once the data changed.
+    fn get(&mut self, source: &dyn ThrowSource, map: &str) -> Result<Arc<MapLibrary>, SourceError> {
+        let revision = source.revision()?;
+        if let Some((built, library)) = self.0.get(map)
+            && *built == revision
+        {
+            return Ok(library.clone());
+        }
+        let library = read_library(source, map)?;
+        self.0.insert(map.to_string(), (revision, library.clone()));
+        Ok(library)
+    }
+}
+
 /// The data thread: lists answered as they come, newest wins; stage reads batched, the newest request first.
-fn serve(db: Database, inbox: Receiver<Work>, outbox: Sender<Reply>, wake: impl Fn() + Send + Sync + Clone + 'static, shutdown: &Shutdown) {
+fn serve(source: &dyn ThrowSource, inbox: Receiver<Work>, outbox: Sender<Reply>, wake: impl Fn() + Send + Sync + Clone + 'static, shutdown: &Shutdown) {
     let mut queue: VecDeque<Work> = VecDeque::new();
+    let mut libraries = Libraries::default();
     loop {
         if shutdown.requested() { return; }
         if queue.is_empty() {
@@ -221,16 +299,15 @@ fn serve(db: Database, inbox: Receiver<Work>, outbox: Sender<Reply>, wake: impl 
         match work.request {
             Request::List(filter) => {
                 let started = Instant::now();
-                let read = patiently(&db, &outbox, &wake, shutdown, |c| {
-                    let lineups = nades_data::lineups(c, &filter)?;
-                    let teams = nades_data::teams(c, &filter.map)?;
-                    let players = nades_data::players(c, &filter.map, filter.team.as_deref())?;
-                    Ok((lineups, teams, players))
-                });
+                let read = patiently(&outbox, &wake, shutdown, || libraries.get(source, &filter.map));
                 if shutdown.requested() { return; }
                 let reply = match read {
-                    Ok((lineups, teams, players)) => Reply::List { filter, lineups, teams, players, ms: started.elapsed().as_secs_f64() * 1e3 },
-                    Err(e) => Reply::Failed(failure(&db, e)),
+                    Ok(library) => {
+                        let lineups = library.lineups(&filter.query);
+                        let facets = library.facets(filter.query.team.as_deref());
+                        Reply::List { filter, library, lineups, teams: facets.teams, players: facets.players, ms: started.elapsed().as_secs_f64() * 1e3 }
+                    }
+                    Err(e) => Reply::Failed(failure(e)),
                 };
                 let _ = outbox.send(reply);
                 wake();
@@ -240,14 +317,12 @@ fn serve(db: Database, inbox: Receiver<Work>, outbox: Sender<Reply>, wake: impl 
                 let mut rest = throws;
                 while !rest.is_empty() {
                     if shutdown.requested() { return; }
-                    let slice: Vec<String> = rest.drain(..rest.len().min(8)).collect();
-                    let read = patiently(&db, &outbox, &wake, shutdown, |c| {
+                    let slice: Vec<ThrowId> = rest.drain(..rest.len().min(8)).collect();
+                    let read = patiently(&outbox, &wake, shutdown, || {
+                        let library = libraries.get(source, &map)?;
                         let mut rows = Vec::new();
                         for id in &slice {
-                            if let Some(throw) = nades_data::throw_scene(c, id)? {
-                                let viewers = nades_data::scene_viewers(c, id)?;
-                                rows.push((throw, viewers));
-                            }
+                            rows.extend(read_stage(source, &library, id)?);
                         }
                         Ok(rows)
                     });
@@ -257,17 +332,17 @@ fn serve(db: Database, inbox: Receiver<Work>, outbox: Sender<Reply>, wake: impl 
                             // the stages need the collider; build them on every core, each reply waking the window
                             let collider = collider.wait(shutdown);
                             if shutdown.requested() { return; }
-                            for (throw, viewers) in rows {
+                            for s in rows {
                                 let (outbox, wake, collider, map) = (outbox.clone(), wake.clone(), collider.clone(), map.clone());
                                 rayon::spawn(move || {
-                                    let prepared = Arc::new(Prepared::new(throw, &viewers, collider.as_deref(), toward_sun));
+                                    let prepared = Arc::new(Prepared::new(s.throw, s.derived, s.demo, &s.tracks, &s.viewpoints, collider.as_deref(), toward_sun));
                                     let _ = outbox.send(Reply::Prepared { map, prepared });
                                     wake();
                                 });
                             }
                         }
                         Err(e) => {
-                            let _ = outbox.send(Reply::Failed(failure(&db, e)));
+                            let _ = outbox.send(Reply::Failed(failure(e)));
                             wake();
                             break;
                         }
@@ -298,30 +373,30 @@ fn next(queue: &mut VecDeque<Work>) -> Work {
     queue.remove(at).expect("not empty")
 }
 
-/// A read that says so, once, when `nades` holds the file, then waits for it.
-fn patiently<T>(db: &Database, outbox: &Sender<Reply>, wake: &impl Fn(), shutdown: &Shutdown, mut read: impl FnMut(&nades_data::duckdb::Connection) -> nades_data::duckdb::Result<T>) -> Result<T, DataError> {
+/// A read that says so, once, while a producer is writing the data, then waits for it.
+fn patiently<T>(outbox: &Sender<Reply>, wake: &impl Fn(), shutdown: &Shutdown, mut read: impl FnMut() -> Result<T, SourceError>) -> Result<T, SourceError> {
     let started = Instant::now();
     let mut announced = false;
     loop {
-        if shutdown.requested() { return Err(DataError::Busy); }
-        match db.read(&mut read) {
-            Err(DataError::Busy) => {
+        if shutdown.requested() { return Err(SourceError::Busy); }
+        match read() {
+            Err(SourceError::Busy) => {
                 if !announced {
-                    let _ = outbox.send(Reply::Failed("nades is writing the database (an ingest?): the lineups follow when it is done".into()));
+                    let _ = outbox.send(Reply::Failed("a producer is writing the throws: the lineups follow when it is done".into()));
                     wake();
                     announced = true;
                 }
-                if started.elapsed() >= PATIENCE || shutdown.wait(Duration::from_millis(500)) { return Err(DataError::Busy); }
+                if started.elapsed() >= PATIENCE || shutdown.wait(Duration::from_millis(500)) { return Err(SourceError::Busy); }
             }
             other => return other,
         }
     }
 }
 
-fn failure(db: &Database, e: DataError) -> String {
+fn failure(e: SourceError) -> String {
     match e {
-        DataError::Missing(path) => format!("no database at {} (set NADES_DB)", path.display()),
-        other => format!("{} ({})", other, db.path().display()),
+        SourceError::Missing(path) => format!("no throws at {} (pass --data)", path.display()),
+        other => other.to_string(),
     }
 }
 
@@ -330,24 +405,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dropping_the_library_waits_for_its_native_database_worker() {
+    fn dropping_the_library_waits_for_its_worker() {
         let (requests, _inbox) = std::sync::mpsc::channel();
         let (_outbox, replies) = std::sync::mpsc::channel();
         let (started, active) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let (finished, native_done) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            {
-                let connection = nades_data::duckdb::Connection::open_in_memory().unwrap();
-                started.send(()).unwrap();
-                proceed.recv().unwrap();
-                let actual: i64 = connection.query_row("select 42", [], |row| row.get(0)).unwrap();
-                assert_eq!(actual, 42);
-            }
+            started.send(()).unwrap();
+            proceed.recv().unwrap();
             finished.send(()).unwrap();
         });
         let library = Library {
-            requests, replies, database: Database::stored(":memory:"), worker: Some(worker), shutdown: Arc::new(Shutdown::default()),
+            requests, replies, source: Arc::new(nades_model::fixture::Memory::default()), worker: Some(worker), shutdown: Arc::new(Shutdown::default()),
         };
         active.recv_timeout(Duration::from_secs(5)).unwrap();
         let (dropped, complete) = std::sync::mpsc::channel();
@@ -383,7 +453,7 @@ mod tests {
     #[test]
     fn the_shown_map_goes_first_then_the_warm_maps_then_the_rest_of_its_stages() {
         let list = |map: &str, priority| Work { request: Request::List(Filter::map(map)), priority };
-        let stages = |map: &str, throw: &str, priority| Work { request: Request::Prepare { map: map.into(), throws: vec![throw.into()], collider: SharedCollider::default(), toward_sun: DVec3::Z }, priority };
+        let stages = |map: &str, throw: &str, priority| Work { request: Request::Prepare { map: map.into(), throws: vec![ThrowId(throw.into())], collider: SharedCollider::default(), toward_sun: DVec3::Z }, priority };
         let mut queue: VecDeque<Work> = [
             stages("de_cache", "bulk", Priority::Bulk),
             list("de_mirage", Priority::Warm),
@@ -396,7 +466,7 @@ mod tests {
         let served: Vec<String> = std::iter::from_fn(|| (!queue.is_empty()).then(|| next(&mut queue)))
             .map(|w| match w.request {
                 Request::List(f) => format!("list {}", f.map),
-                Request::Prepare { throws, .. } => throws[0].clone(),
+                Request::Prepare { throws, .. } => throws[0].0.clone(),
                 Request::Shutdown => "shutdown".into(),
             })
             .collect();

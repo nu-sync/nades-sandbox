@@ -274,7 +274,7 @@ impl Client {
                 config.output.to_str().context("output path")?,
             ])
             .current_dir(&config.root)
-            .env("NADES_DB", &config.database)
+            .env("NADES_SANDBOX_DATA", &config.database)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -659,7 +659,7 @@ fn isolate_database(source: &Path, private: &Path) -> Result<Value> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(
-                json!({"status":"missing","source":source,"private_path":private,"method":null,"behavior":"NADES_DB points to this explicit missing private path; map-only MCP verification remains available."}),
+                json!({"status":"missing","source":source,"private_path":private,"method":null,"behavior":"NADES_SANDBOX_DATA points to this explicit missing private path; map-only MCP verification remains available."}),
             );
         }
         Err(error) => {
@@ -1289,9 +1289,10 @@ async fn main() -> Result<()> {
         let sandbox = snapshot_binary(&config.sandbox, &sandbox_snapshot)?;
         config.server = server_snapshot;
         config.sandbox = sandbox_snapshot;
-        let database_source = std::env::var_os("NADES_DB").map(PathBuf::from).unwrap_or_else(|| config.root.parent().expect("workspace parent").join("show-me-the-nades/nades.duckdb"));
+        // the cs2-throws file the app reads (the first of NADES_SANDBOX_DATA), cloned; without one, map-only
+        let database_source = std::env::var_os("NADES_SANDBOX_DATA").and_then(|v| std::env::split_paths(&v).next()).unwrap_or_else(|| evidence.output.join("no-data.sqlite"));
         let database_source = if database_source.is_absolute() { database_source } else { config.root.join(database_source) };
-        config.database = evidence.output.join("private-db/nades.duckdb");
+        config.database = evidence.output.join("private-data/throws.sqlite");
         evidence.private_database = Some(config.database.clone());
         let database = isolate_database(&database_source, &config.database)?;
         fs::write(

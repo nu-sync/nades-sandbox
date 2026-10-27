@@ -1,7 +1,7 @@
 //! A CS2 smoke's cloud, rebuilt from the voxel log its projectile networks, and the volume CS2's smoke shader reads:
 //! ports of show-me-the-nades' `web/app/src/scene/smoke.ts` (the cloud) and `render/volumes.ts` (the volume and the
-//! light the map lets reach each voxel), number for number. The log is decoded by show-me-the-nades itself
-//! (`voxels::voxel_frames_with_emitters` over `tracks::voxel_frames`).
+//! light the map lets reach each voxel), number for number. The log is decoded by nades-model's port of the game's
+//! encoding (`nades_model::smoke`).
 //!
 //! Voxels are 20 units on a 32³ grid whose minimum corner is the detonation point minus 320 on every axis. A brick is
 //! 4³ voxels; its index is a Morton code over the 8³ brick grid and each mask bit a Morton code inside the brick, x
@@ -11,7 +11,7 @@
 
 use glam::DVec3;
 use rayon::prelude::*;
-use show_me_the_nades::voxels::{Emitter, voxel_frames_with_emitters};
+use nades_model::smoke::{Emitter, decode};
 
 use crate::collider::Collider;
 
@@ -73,15 +73,15 @@ pub struct Grid {
 
 /// The grid a log describes, or None when it does not decode.
 pub fn build_grid(log: &[u8]) -> Option<Grid> {
-    let frames = voxel_frames_with_emitters(log).ok()?;
+    let frames = decode(log).ok()?;
     let mut solid = vec![0u8; CELLS];
     let mut sent = vec![0u8; CELLS];
     let mut sent_frame = vec![NEVER; CELLS];
     let mut emitters: Vec<Emitter> = Vec::new();
     let mut fading_from = frames.len();
-    for (i, (frame, frame_emitters)) in frames.iter().enumerate() {
-        if emitters.is_empty() && !frame_emitters.is_empty() {
-            emitters = frame_emitters.clone();
+    for (i, frame) in frames.iter().enumerate() {
+        if emitters.is_empty() && !frame.emitters.is_empty() {
+            emitters = frame.emitters.clone();
         }
         if frame.fading && fading_from == frames.len() {
             fading_from = i;

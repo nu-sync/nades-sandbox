@@ -14,7 +14,7 @@ mcp: build
 verify-mcp: build
     cargo run --release -p nades-mcp --example verify
 
-# Open a packed map in the app.
+# Open a packed map in the app (its throws from --data, NADES_SANDBOX_DATA or the config file).
 run $map='de_cache':
     cargo run --release --bin nades-sandbox -- --map "$map"
 
@@ -74,6 +74,14 @@ realism $note: build
 render $output $setpos $setang $map='de_cache':
     cargo run --release --bin nades-sandbox -- --render "$output" --map "$map" --setpos "$setpos" --setang "$setang"
 
-# Read the top lineups from a database copy.
-lineups $database $map='de_cache':
-    cargo run --release -p nades-data --example lineups -- "$database" "$map"
+# Report a cs2-throws file's problems and the features its facts allow.
+check-data $file: build
+    ./target/release/nades-sandbox check "$file"
+
+# Write the cs2-throws fixture (the format's worked example) to a file.
+fixture $file:
+    python3 tools/cs2_throws.py fixture "$file"
+
+# Compare the sandbox's groups, techniques and callouts with a producer's tags (show-me-the-nades: nades).
+parity $file $ns='nades':
+    cargo run --release -p nades-source-file --example tag_parity -- "$file" --ns "$ns"

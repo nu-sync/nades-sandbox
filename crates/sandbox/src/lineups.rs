@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use glam::DVec3;
 use nades_control::SceneSummary;
-use nades_data::{Database, Filter, Lineup};
+use nades_model::{Grenade, Library as MapLibrary, Lineup, LineupId, LineupQuery, Revision, ThrowId, ThrowSource};
 use nades_render::map::{FrameEffects, Map, PointLight};
 use nades_render::smoke::SmokeFrame;
 use nades_render::Gpu;
@@ -20,7 +20,7 @@ use nades_scene::camera::{Source, View as CsView};
 use nades_scene::collider::Collider;
 use nades_scene::stage::{Stage, ViewMode, build_stage};
 
-use crate::library::{Library, Prepared, Reply, Request, SharedCollider};
+use crate::library::{Filter, Library, Prepared, Reply, Request, SharedCollider, read_library, read_stage};
 use crate::resident::{self, Resident};
 use crate::shell::Action;
 use crate::views::{self, Orbit};
@@ -59,35 +59,22 @@ pub fn view_size(window: (f64, f64), scale: f64) -> (u32, u32) {
     ((w * scale).round() as u32, (h * scale).round() as u32)
 }
 
-/// The database the sandbox reads: `NADES_DB`, else show-me-the-nades' own.
-pub fn database() -> Database {
-    Database::at(Database::default_path())
-}
-
 /// The light the map lends the throw: towards its sun, in Hammer units' axes.
 pub fn toward_sun(map: &Map) -> DVec3 {
     let s = map.toward_sun();
     DVec3::new(s.x.into(), s.y.into(), s.z.into())
 }
 
-/// A throw's scene and viewers, read once, and its stage built against the map's collider.
-pub fn prepare(map: &str, throw: &str, toward_sun: DVec3) -> Result<Prepared> {
-    let db = database();
-    let (scene, viewers) = db
-        .read_when_free(|c| Ok((nades_data::throw_scene(c, throw)?, nades_data::scene_viewers(c, throw)?)), Duration::from_secs(60))
-        .with_context(|| format!("reading {}", db.path().display()))?;
-    let scene = scene.with_context(|| format!("no throw {throw}"))?;
-    if scene.map != map {
-        bail!("throw {throw} is on {}, not {map}", scene.map);
-    }
+/// A throw's facts, tracks and viewpoints, read once, and its stage built against the map's collider.
+pub fn prepare(source: &dyn ThrowSource, map: &str, throw: &str, toward_sun: DVec3) -> Result<Prepared> {
+    let library = read_library(source, map)?;
     let collider = Collider::load(&maps_dir().join(format!("{map}.mesh"))).map_err(|e| eprintln!("{e}")).ok();
-    Ok(Prepared::new(scene, &viewers, collider.as_ref(), toward_sun))
+    Prepared::read(source, &library, &ThrowId(throw.into()), collider.as_ref(), toward_sun)?.with_context(|| format!("no throw {throw} on {map}"))
 }
 
 /// The map a throw is on.
-pub fn map_of(throw: &str) -> Result<String> {
-    let scene = database().read_when_free(|c| nades_data::throw_scene(c, throw), Duration::from_secs(60))?;
-    Ok(scene.with_context(|| format!("no throw {throw}"))?.map)
+pub fn map_of(source: &dyn ThrowSource, throw: &str) -> Result<String> {
+    Ok(source.map_of(&ThrowId(throw.into()))?.with_context(|| format!("no throw {throw}"))?.0)
 }
 
 /// What a frame draws of `stage` at `t`: its smoke (when it shows) and its light on the map.
@@ -111,28 +98,34 @@ pub fn show_stage(gpu: &Gpu, map: &mut Map, prepared: Option<&Prepared>) {
     map.composite.set_cloud(&gpu.queue, cloud);
 }
 
-/// For each `{"throw": id}` in `cases` (a JSON list), the cameras its views open with, one JSON line each.
-pub fn print_cameras(cases: &Path) -> Result<()> {
+/// For each `{"throw": id}` in `cases` (a JSON list, with its `"map"` when known), the cameras its views open with,
+/// one JSON line each.
+pub fn print_cameras(source: &dyn ThrowSource, cases: &Path) -> Result<()> {
     let list: serde_json::Value = serde_json::from_slice(&std::fs::read(cases).with_context(|| format!("reading {}", cases.display()))?)?;
-    let ids: Vec<String> = list.as_array().context("a list of cases")?.iter().filter_map(|c| c.get("throw").and_then(|t| t.as_str()).map(str::to_string)).collect();
-    let rows = database().read_when_free(
-        |c| {
-            let mut rows = Vec::new();
-            for id in &ids {
-                if let Some(scene) = nades_data::throw_scene(c, id)? {
-                    rows.push((scene, nades_data::scene_viewers(c, id)?));
-                }
-            }
-            Ok(rows)
-        },
-        Duration::from_secs(60),
-    )?;
+    let mut libraries: HashMap<String, Arc<MapLibrary>> = HashMap::new();
     let mut colliders: HashMap<String, Option<Collider>> = HashMap::new();
-    for (scene, viewers) in rows {
-        let collider = colliders.entry(scene.map.clone()).or_insert_with(|| Collider::load(&maps_dir().join(format!("{}.mesh", scene.map))).ok());
+    for case in list.as_array().context("a list of cases")? {
+        let Some(id) = case.get("throw").and_then(|t| t.as_str()) else { continue };
+        let map = match case.get("map").and_then(|m| m.as_str()) {
+            Some(map) => map.to_string(),
+            None => match source.map_of(&ThrowId(id.into()))? {
+                Some(map) => map.0,
+                None => continue,
+            },
+        };
+        let library = match libraries.get(&map) {
+            Some(library) => library.clone(),
+            None => {
+                let library = read_library(source, &map)?;
+                libraries.insert(map.clone(), library.clone());
+                library
+            }
+        };
+        let Some(facts) = read_stage(source, &library, &ThrowId(id.into()))? else { continue };
+        let collider = colliders.entry(map.clone()).or_insert_with(|| Collider::load(&maps_dir().join(format!("{map}.mesh"))).ok());
         let started = Instant::now();
-        let stage = build_stage(&scene);
-        let viewers: Vec<nades_scene::camera::Viewer> = viewers.iter().map(nades_scene::camera::Viewer::from).collect();
+        let stage = build_stage(&facts.throw, &facts.tracks, &facts.derived);
+        let viewers: Vec<nades_scene::camera::Viewer> = facts.viewpoints.iter().map(nades_scene::camera::Viewer::from).collect();
         let result = stage.result_camera(&viewers, collider.as_ref());
         let ms = started.elapsed().as_secs_f64() * 1e3;
         let camera = |v: &CsView| serde_json::json!({ "eye": [v.eye.x, v.eye.y, v.eye.z], "pitch": v.pitch, "yaw": v.yaw, "fov": v.fov });
@@ -142,9 +135,9 @@ pub fn print_cameras(cases: &Path) -> Result<()> {
             Source::Overview => ("overview", None, None),
         };
         let line = serde_json::json!({
-            "throw": scene.throw_id,
-            "map": scene.map,
-            "nade": scene.nade,
+            "throw": facts.throw.id.0,
+            "map": map,
+            "nade": facts.throw.grenade.name(),
             "lineup": camera(&stage.lineup),
             "aim": camera(&stage.aim),
             "result": { "eye": [result.eye.x, result.eye.y, result.eye.z], "pitch": result.pitch, "yaw": result.yaw, "fov": nades_scene::camera::vertical_fov(), "kind": kind, "player": player, "tick": tick, "seen": result.seen },
@@ -174,13 +167,17 @@ pub struct Sandbox {
     pub maps: Vec<String>,
     pub filter: Filter,
     pub lineups: Vec<Lineup>,
+    /// The shown map's facts and rules the list came from (the details of its lineups' throws).
+    pub facts: Option<Arc<MapLibrary>>,
     pub teams: Vec<String>,
     pub players: Vec<String>,
     pub search: String,
     /// The selected lineup's id.
-    pub selected: Option<String>,
+    pub selected: Option<LineupId>,
+    /// The throw the last run showed: its lineup is selected when the remembered id is not listed.
+    pub remembered_throw: Option<ThrowId>,
     /// Built stages, by throw id.
-    pub prepared: HashMap<String, Arc<Prepared>>,
+    pub prepared: HashMap<ThrowId, Arc<Prepared>>,
     pub view: ViewMode,
     pub time: f64,
     pub playing: bool,
@@ -188,17 +185,20 @@ pub struct Sandbox {
     pub collider: SharedCollider,
     pub toward_sun: DVec3,
     pub notice: Option<String>,
+    /// Why there is nothing to list, when the data says so (no files, a file that does not open).
+    pub data_notice: Option<String>,
     pub list_ms: Option<f64>,
     /// The throw whose stage is on the GPU.
-    pub shown: Option<String>,
+    pub shown: Option<ThrowId>,
     /// The camera the last run left, until a stage gives one.
     pub remembered: Option<CsView>,
     /// Each map's last camera, as remembered (state.rs).
     pub cameras: std::collections::BTreeMap<String, state::Camera>,
     pub copied_at: Option<Instant>,
     pub first_frame_ms: Option<f64>,
-    pub database_changed: Option<SystemTime>,
-    pub database_checked: Instant,
+    /// The data's revision the lists were read at, and when it was last looked at.
+    pub revision: Option<Revision>,
+    pub data_checked: Instant,
     /// The lineups of the maps kept on the GPU beside the shown one, by map.
     pub kept: HashMap<String, MapLineups>,
 }
@@ -208,10 +208,11 @@ pub struct Sandbox {
 pub struct MapLineups {
     pub filter: Filter,
     pub lineups: Vec<Lineup>,
+    pub facts: Option<Arc<MapLibrary>>,
     pub teams: Vec<String>,
     pub players: Vec<String>,
-    pub selected: Option<String>,
-    pub prepared: HashMap<String, Arc<Prepared>>,
+    pub selected: Option<LineupId>,
+    pub prepared: HashMap<ThrowId, Arc<Prepared>>,
     pub collider: SharedCollider,
     pub toward_sun: DVec3,
     /// When its list for `filter` was read; None while it is being read again.
@@ -220,19 +221,20 @@ pub struct MapLineups {
 
 impl MapLineups {
     pub fn selected_lineup(&self) -> Option<&Lineup> {
-        let id = self.selected.as_deref()?;
-        self.lineups.iter().find(|l| l.lineup_id == id)
+        let id = self.selected?;
+        self.lineups.iter().find(|l| l.id == id)
     }
 
     /// Whether picking the map shows a lineup at once: its list read, its selected lineup's stage built (or no lineups).
     pub fn ready(&self) -> bool {
-        self.list_ms.is_some() && (self.lineups.is_empty() || self.selected_lineup().is_some_and(|l| self.prepared.contains_key(&l.example_throw_id)))
+        self.list_ms.is_some() && (self.lineups.is_empty() || self.selected_lineup().is_some_and(|l| self.prepared.contains_key(&l.example)))
     }
 }
 
-/// The filters a map carries to another: side, grenade, phase and fewest throws, but not its team or player.
+/// The filters a map carries to another: side, grenade, round time, plant, tag and fewest throws, but not its team or
+/// player.
 fn carried(filter: &Filter, to: &str) -> Filter {
-    Filter { map: to.to_string(), team: None, player: None, ..filter.clone() }
+    Filter { map: to.to_string(), query: LineupQuery { team: None, player: None, ..filter.query.clone() } }
 }
 
 impl Sandbox {
@@ -240,16 +242,18 @@ impl Sandbox {
         let view = remembered.as_ref().and_then(|r| r.view.as_deref()).and_then(view_mode).unwrap_or(ViewMode::Lineup);
         let camera = remembered.as_ref().and_then(|r| r.camera_on(map)).map(cs_view);
         let cameras = remembered.as_ref().map(|r| r.cameras.clone()).unwrap_or_default();
-        let database_changed = library.database.modified();
+        let revision = library.source.revision().ok();
         let sandbox = Self {
             library,
             maps: packed_maps(),
             filter: Filter::map(map),
             lineups: Vec::new(),
+            facts: None,
             teams: Vec::new(),
             players: Vec::new(),
             search: String::new(),
-            selected: remembered.as_ref().and_then(|r| r.lineup.clone()),
+            selected: remembered.as_ref().and_then(|r| r.lineup.as_deref()).and_then(LineupId::parse),
+            remembered_throw: remembered.as_ref().and_then(|r| r.throw.clone()).map(ThrowId),
             prepared: HashMap::new(),
             view,
             time: 0.0,
@@ -258,14 +262,15 @@ impl Sandbox {
             collider: SharedCollider::default(),
             toward_sun: DVec3::Z,
             notice: None,
+            data_notice: None,
             list_ms: None,
             shown: None,
             remembered: camera,
             cameras,
             copied_at: None,
             first_frame_ms: None,
-            database_changed,
-            database_checked: Instant::now(),
+            revision,
+            data_checked: Instant::now(),
             kept: HashMap::new(),
         };
         // the list is read once the first frame is on screen (Lineups::after_first_frame): nothing on its way competes
@@ -273,25 +278,25 @@ impl Sandbox {
     }
 
     pub fn selected_lineup(&self) -> Option<&Lineup> {
-        let id = self.selected.as_deref()?;
-        self.lineups.iter().find(|l| l.lineup_id == id)
+        let id = self.selected?;
+        self.lineups.iter().find(|l| l.id == id)
     }
 
     pub fn selected_prepared(&self) -> Option<&Arc<Prepared>> {
-        self.prepared.get(&self.selected_lineup()?.example_throw_id)
+        self.prepared.get(&self.selected_lineup()?.example)
     }
 
     /// The selected stage when it is the one on the GPU.
     pub fn shown_prepared(&self) -> Option<&Arc<Prepared>> {
-        self.selected_prepared().filter(|p| self.shown.as_deref() == Some(p.throw.throw_id.as_str()))
+        self.selected_prepared().filter(|p| self.shown.as_ref() == Some(&p.throw.id))
     }
 
     /// Asks for the listed lineups' stages not built yet, the selected one first, then outward from it.
     pub fn prepare_listed(&self) {
-        let at = self.selected.as_deref().and_then(|id| self.lineups.iter().position(|l| l.lineup_id == id)).unwrap_or(0);
+        let at = self.selected.and_then(|id| self.lineups.iter().position(|l| l.id == id)).unwrap_or(0);
         let mut order: Vec<usize> = (0..self.lineups.len()).collect();
         order.sort_by_key(|&k| k.abs_diff(at));
-        let mut throws: Vec<String> = order.into_iter().map(|k| self.lineups[k].example_throw_id.clone()).filter(|t| !self.prepared.contains_key(t)).collect();
+        let mut throws: Vec<ThrowId> = order.into_iter().map(|k| self.lineups[k].example.clone()).filter(|t| !self.prepared.contains_key(t)).collect();
         // the selected lineup and its neighbours now; the rest after what keeps the other maps warm
         let rest = throws.split_off(throws.len().min(8));
         if !throws.is_empty() {
@@ -332,7 +337,7 @@ impl Sandbox {
             return;
         }
         let wanted = carried(&self.filter, map);
-        let kept = self.kept.entry(map.to_string()).or_insert_with(|| MapLineups { filter: wanted.clone(), lineups: Vec::new(), teams: Vec::new(), players: Vec::new(), selected: None, prepared: HashMap::new(), collider: collider(), toward_sun, list_ms: None });
+        let kept = self.kept.entry(map.to_string()).or_insert_with(|| MapLineups { filter: wanted.clone(), lineups: Vec::new(), facts: None, teams: Vec::new(), players: Vec::new(), selected: None, prepared: HashMap::new(), collider: collider(), toward_sun, list_ms: None });
         kept.toward_sun = toward_sun;
         if kept.list_ms.is_none() || kept.filter != wanted {
             kept.filter = wanted.clone();
@@ -349,6 +354,7 @@ impl Sandbox {
         let mine = MapLineups {
             filter: std::mem::replace(&mut self.filter, wanted.clone()),
             lineups: std::mem::take(&mut self.lineups),
+            facts: self.facts.take(),
             teams: std::mem::take(&mut self.teams),
             players: std::mem::take(&mut self.players),
             selected: self.selected.take(),
@@ -367,7 +373,7 @@ impl Sandbox {
             return false;
         };
         let current = kept.list_ms.is_some() && kept.filter == wanted;
-        (self.lineups, self.teams, self.players, self.selected, self.prepared, self.collider) = (kept.lineups, kept.teams, kept.players, kept.selected, kept.prepared, kept.collider);
+        (self.lineups, self.facts, self.teams, self.players, self.selected, self.prepared, self.collider) = (kept.lineups, kept.facts, kept.teams, kept.players, kept.selected, kept.prepared, kept.collider);
         if current {
             self.list_ms = kept.list_ms;
             self.prepare_listed();
@@ -384,17 +390,17 @@ impl Sandbox {
         while let Ok(reply) = self.library.replies.try_recv() {
             changed = true;
             match reply {
-                Reply::List { filter, lineups, teams, players, ms } => {
+                Reply::List { filter, library, lineups, teams, players, ms } => {
                     if filter != self.filter {
                         // a kept map's: its list, then its selected lineup's stage in the background
                         if let Some(kept) = self.kept.get_mut(&filter.map)
                             && kept.filter == filter
                         {
-                            (kept.lineups, kept.teams, kept.players, kept.list_ms) = (lineups, teams, players, Some(ms));
+                            (kept.lineups, kept.facts, kept.teams, kept.players, kept.list_ms) = (lineups, Some(library), teams, players, Some(ms));
                             if kept.selected_lineup().is_none() {
-                                kept.selected = kept.lineups.first().map(|l| l.lineup_id.clone());
+                                kept.selected = kept.lineups.first().map(|l| l.id);
                             }
-                            if let Some(throw) = kept.selected_lineup().map(|l| l.example_throw_id.clone()).filter(|t| !kept.prepared.contains_key(t)) {
+                            if let Some(throw) = kept.selected_lineup().map(|l| l.example.clone()).filter(|t| !kept.prepared.contains_key(t)) {
                                 self.library.send_background(Request::Prepare { map: filter.map.clone(), throws: vec![throw], collider: kept.collider.clone(), toward_sun: kept.toward_sun });
                             }
                         }
@@ -405,16 +411,19 @@ impl Sandbox {
                     self.players = players;
                     self.list_ms = Some(ms);
                     if self.selected_lineup().is_none() {
-                        self.selected = self.lineups.first().map(|l| l.lineup_id.clone());
+                        // the lineup of the throw the last run showed, if it is listed; else the first
+                        let remembered = self.remembered_throw.take().and_then(|t| library.derived(&t)?.lineup).filter(|id| self.lineups.iter().any(|l| l.id == *id));
+                        self.selected = remembered.or_else(|| self.lineups.first().map(|l| l.id));
                     }
-                    self.notice = self.lineups.is_empty().then(|| "No lineups match these filters.".into());
+                    self.facts = Some(library);
+                    self.notice = self.lineups.is_empty().then(|| self.data_notice.clone().unwrap_or_else(|| "No lineups match these filters.".into()));
                     self.prepare_listed();
                 }
                 Reply::Prepared { map, prepared } => {
                     if map == self.filter.map {
-                        self.prepared.insert(prepared.throw.throw_id.clone(), prepared);
+                        self.prepared.insert(prepared.throw.id.clone(), prepared);
                     } else if let Some(kept) = self.kept.get_mut(&map) {
-                        kept.prepared.insert(prepared.throw.throw_id.clone(), prepared);
+                        kept.prepared.insert(prepared.throw.id.clone(), prepared);
                     }
                 }
                 Reply::Failed(why) => self.notice = Some(why),
@@ -423,16 +432,16 @@ impl Sandbox {
         changed
     }
 
-    pub fn select(&mut self, lineup: String) {
-        if self.selected.as_deref() == Some(lineup.as_str()) {
+    pub fn select(&mut self, lineup: LineupId) {
+        if self.selected == Some(lineup) {
             return;
         }
         self.selected = Some(lineup);
         // not built yet: it goes first
         if let Some(l) = self.selected_lineup()
-            && !self.prepared.contains_key(&l.example_throw_id)
+            && !self.prepared.contains_key(&l.example)
         {
-            self.library.send(Request::Prepare { map: self.filter.map.clone(), throws: vec![l.example_throw_id.clone()], collider: self.collider.clone(), toward_sun: self.toward_sun });
+            self.library.send(Request::Prepare { map: self.filter.map.clone(), throws: vec![l.example.clone()], collider: self.collider.clone(), toward_sun: self.toward_sun });
         }
     }
 
@@ -440,12 +449,12 @@ impl Sandbox {
         if self.lineups.is_empty() {
             return;
         }
-        let at = self.selected.as_deref().and_then(|id| self.lineups.iter().position(|l| l.lineup_id == id));
+        let at = self.selected.and_then(|id| self.lineups.iter().position(|l| l.id == id));
         let next = match at {
             Some(k) => (k as i64 + i64::from(by)).rem_euclid(self.lineups.len() as i64) as usize,
             None => 0,
         };
-        self.select(self.lineups[next].lineup_id.clone());
+        self.select(self.lineups[next].id);
     }
 
     /// The camera now: the view's, from the shown stage; or the one the last run left.
@@ -469,8 +478,8 @@ impl Sandbox {
         let lineup = self.selected_lineup();
         state::save(&state::Remembered {
             map: self.filter.map.clone(),
-            lineup: self.selected.clone(),
-            throw: lineup.map(|l| l.example_throw_id.clone()),
+            lineup: self.selected.map(|id| id.to_string()),
+            throw: lineup.map(|l| l.example.0.clone()),
             view: Some(self.view.name().to_lowercase()),
             camera: self.camera().map(|c| ([c.eye.x, c.eye.y, c.eye.z], c.pitch, c.yaw, c.fov)),
             cameras: self.cameras.clone(),
@@ -481,15 +490,16 @@ impl Sandbox {
     pub fn apply(&mut self, action: Action) -> Option<Effect> {
         match action {
             Action::Map(map) => return Some(Effect::LoadMap(map)),
-            Action::Side(side) => self.refilter(|f| f.side = side),
-            Action::Nade(nade) => self.refilter(|f| f.nade = nade),
+            Action::Side(side) => self.refilter(|f| f.query.side = side),
+            Action::Grenade(grenade) => self.refilter(|f| f.query.grenade = grenade),
             Action::Team(team) => self.refilter(|f| {
-                f.team = team;
-                f.player = None;
+                f.query.team = team;
+                f.query.player = None;
             }),
-            Action::Player(player) => self.refilter(|f| f.player = player),
-            Action::Phase(phase) => self.refilter(|f| f.phase = phase),
-            Action::MinThrows(min) => self.refilter(|f| f.min_throws = min),
+            Action::Player(player) => self.refilter(|f| f.query.player = player),
+            Action::RoundTime(range) => self.refilter(|f| f.query.round_seconds = range),
+            Action::Plant(after) => self.refilter(|f| f.query.after_plant = after),
+            Action::MinThrows(min) => self.refilter(|f| f.query.min_throws = min),
             Action::Select(lineup) => self.select(lineup),
             Action::Step(by) => self.step(by),
             Action::View(view) => {
@@ -553,7 +563,7 @@ impl Sandbox {
                 effects.push("fire".into());
             }
             if p.stage.burst.is_some_and(|b| b.on(t) > 0.0) {
-                effects.push(if p.stage.nade == "flash" { "flash".into() } else { "he".into() });
+                effects.push(if p.stage.grenade == Grenade::Flash { "flash".into() } else { "he".into() });
             }
         }
         SceneSummary {
@@ -562,8 +572,8 @@ impl Sandbox {
             // says why nothing comes)
             loading: loading || (self.notice.is_none() && (self.list_ms.is_none() || (self.selected.is_some() && shown.is_none()))),
             notice: self.notice.clone(),
-            lineup_id: self.selected.clone(),
-            throw_id: shown.map(|p| p.throw.throw_id.clone()),
+            lineup_id: self.selected.map(|id| id.to_string()),
+            throw_id: shown.map(|p| p.throw.id.0.clone()),
             timeline_seconds: shown.map(|_| self.time),
             playing: self.playing,
             active_effects: effects,
@@ -575,15 +585,15 @@ impl Sandbox {
         self.playing || self.copied_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
 
-    /// Notices an ingest (the database's modification time): the list and the stages are read again.
-    pub fn check_database(&mut self) {
-        if self.database_checked.elapsed() < Duration::from_secs(5) {
+    /// Notices new data (the source's revision: a file written again): the list and the stages are read again.
+    pub fn check_data(&mut self) {
+        if self.data_checked.elapsed() < Duration::from_secs(5) {
             return;
         }
-        self.database_checked = Instant::now();
-        let modified = self.library.database.modified();
-        if modified != self.database_changed {
-            self.database_changed = modified;
+        self.data_checked = Instant::now();
+        let revision = self.library.source.revision().ok();
+        if revision != self.revision {
+            self.revision = revision;
             self.prepared.clear();
             self.shown = None;
             self.refilter(|_| {});
@@ -765,7 +775,7 @@ impl Lineups {
         }
         for name in self.resident.names() {
             let Some(kept) = self.sandbox.kept.get(&name).filter(|_| !self.warmed.contains(&name)) else { continue };
-            let Some(prepared) = kept.selected_lineup().and_then(|l| kept.prepared.get(&l.example_throw_id)).cloned() else { continue };
+            let Some(prepared) = kept.selected_lineup().and_then(|l| kept.prepared.get(&l.example)).cloned() else { continue };
             let Some(map) = self.resident.get_mut(&name) else { continue };
             if let Some((noise, books)) = &self.effects {
                 map.composite.set_noise(&gpu.device, noise);
@@ -829,7 +839,7 @@ impl Lineups {
     /// Whether everything the switch bench needs is in: the game's effects and `n + 1` built stages.
     pub fn ready_for(&self, n: usize) -> bool {
         let s = &self.sandbox;
-        self.effects_files.is_none() && self.wake.is_some() && !s.lineups.is_empty() && s.lineups.iter().take(n + 1).all(|l| s.prepared.contains_key(&l.example_throw_id))
+        self.effects_files.is_none() && self.wake.is_some() && !s.lineups.is_empty() && s.lineups.iter().take(n + 1).all(|l| s.prepared.contains_key(&l.example))
     }
 
     /// Picks `name`: shown in this frame when it is on the GPU; else shown when its background open arrives, or loaded
@@ -876,17 +886,13 @@ impl Lineups {
         let status = shell::Status {
             map: &map,
             maps: &s.maps,
-            side: s.filter.side,
-            nade: s.filter.nade,
-            team: s.filter.team.as_deref(),
-            player: s.filter.player.as_deref(),
-            phase: s.filter.phase,
-            min_throws: s.filter.min_throws,
+            query: &s.filter.query,
             teams: &s.teams,
             players: &s.players,
             lineups: &s.lineups,
+            facts: s.facts.as_deref(),
             search: &mut s.search,
-            selected: s.selected.as_deref(),
+            selected: s.selected,
             prepared: shown.as_deref(),
             view: s.view,
             time: s.time,
@@ -927,7 +933,7 @@ impl Lineups {
             return false;
         }
         let prepared = self.sandbox.selected_prepared().cloned();
-        let id = prepared.as_ref().map(|p| p.throw.throw_id.clone());
+        let id = prepared.as_ref().map(|p| p.throw.id.clone());
         // a lineup picked but not built yet keeps the last stage up until it is
         if id == self.sandbox.shown || (prepared.is_none() && self.sandbox.shown.is_some() && self.sandbox.selected.is_some()) {
             return false;
@@ -964,7 +970,7 @@ impl Lineups {
         map.throw.flight_visible = matches!(s.view, ViewMode::Result | ViewMode::Orbit);
         // a still picture averages its smoke's jittered frames; anything that moves starts it over
         let q = eye.rotation;
-        let key = [eye.eye.x.to_bits(), eye.eye.y.to_bits(), eye.eye.z.to_bits(), q.x.to_bits(), q.y.to_bits(), q.z.to_bits(), eye.fov_y.to_bits(), (t as f32).to_bits(), size.0 ^ (size.1 << 16) ^ s.shown.as_ref().map_or(0, |id| id.len() as u32 * 7919)];
+        let key = [eye.eye.x.to_bits(), eye.eye.y.to_bits(), eye.eye.z.to_bits(), q.x.to_bits(), q.y.to_bits(), q.z.to_bits(), eye.fov_y.to_bits(), (t as f32).to_bits(), size.0 ^ (size.1 << 16) ^ s.shown.as_ref().map_or(0, |id| id.0.len() as u32 * 7919)];
         if self.last_key == Some(key) {
             self.accumulated = (self.accumulated + 1).min(nades_render::smoke::ACCUMULATE);
         } else {
@@ -1049,10 +1055,10 @@ pub fn pose_of(v: &CsView) -> nades_control::CameraPose {
 
 /// One throw's view offscreen, as the sandbox shows it, written as a PNG: `view` (the result by default) at `time` (the
 /// moment the view opens at by default), its smoke averaged over the jittered frames a still view takes.
-pub fn render_throw(throw: &str, map: Option<&str>, view: Option<ViewMode>, time: Option<f64>, (width, height): (u32, u32), out: &Path) -> Result<()> {
+pub fn render_throw(source: &dyn ThrowSource, throw: &str, map: Option<&str>, view: Option<ViewMode>, time: Option<f64>, (width, height): (u32, u32), out: &Path) -> Result<()> {
     let map_name = match map {
         Some(map) => map.to_string(),
-        None => map_of(throw)?,
+        None => map_of(source, throw)?,
     };
     let (pack, scene) = resident::open_cached(&crate::pack_path(Some(&map_name)))?;
     let gpu = Gpu::new(nades_render::instance(), None)?;
@@ -1061,7 +1067,7 @@ pub fn render_throw(throw: &str, map: Option<&str>, view: Option<ViewMode>, time
     }
     let mut map = Map::new(&gpu.device, &gpu.queue, pack, &scene, crate::OFFSCREEN_FORMAT, &|_| {});
     let targets = map.targets(&gpu.device, &gpu.queue, width, height);
-    let prepared = prepare(&map_name, throw, toward_sun(&map))?;
+    let prepared = prepare(source, &map_name, throw, toward_sun(&map))?;
     let (noise, _) = nades_scene::noise::smoke_noise();
     map.composite.set_noise(&gpu.device, &nades_render::smoke::noise_texture(&gpu.device, &gpu.queue, &noise));
     if let Some(books) = nades_render::throw::Flipbooks::load(&nades_scene::noise::effects_dir()) {
@@ -1197,8 +1203,8 @@ impl MapsBench {
                 "frame_ms": asked.frame_ms,
                 "parts": asked.parts.iter().map(|(part, ms)| serde_json::json!([part, (ms * 100.0).round() / 100.0])).collect::<Vec<_>>(),
                 "resident": asked.resident,
-                "lineup": s.selected,
-                "throw": s.shown,
+                "lineup": s.selected.map(|id| id.to_string()),
+                "throw": s.shown.as_ref().map(|t| t.0.clone()),
                 "camera": camera,
                 "lineups": s.lineups.len(),
                 "held_mb": nades_render::memory::mb(held),
@@ -1244,48 +1250,90 @@ impl MapsBench {
 mod tests {
     use super::*;
 
-    fn lineup(map: &str, id: &str) -> Lineup {
+    fn lineup(id: u32) -> Lineup {
         Lineup {
-            lineup_id: id.into(),
-            map: map.into(),
-            nade: "smoke".into(),
-            side: Some("T".into()),
+            id: LineupId(id),
+            grenade: Grenade::Smoke,
+            side: Some(nades_model::Side::T),
             throws: 3,
-            matches: 2,
-            from_place: None,
-            to_place: None,
+            demos: 2,
+            from: None,
+            to: None,
             technique: None,
-            team_list: None,
-            player_list: None,
-            example_throw_id: format!("{id}-throw"),
-            example_player: None,
-            example_team: None,
-            example_technique: None,
-            practice_cmd: None,
-            practice_ready: false,
+            teams: Vec::new(),
+            players: Vec::new(),
+            example: ThrowId(format!("{id}-throw")),
         }
+    }
+
+    /// The fixture `tools/cs2_throws.py` writes, through the file adapter.
+    fn fixture_source() -> Arc<dyn ThrowSource> {
+        let dir = std::env::temp_dir().join(format!("nades-sandbox-lineups-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.sqlite");
+        let tool = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/cs2_throws.py");
+        let ran = ["python3", "python"].iter().find_map(|p| std::process::Command::new(p).arg("-I").arg(&tool).arg("fixture").arg(&path).output().ok()).expect("python3 on PATH");
+        assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+        Arc::new(nades_source_file::FileSource::open(&[path]).unwrap())
+    }
+
+    #[test]
+    fn a_cs2_throws_files_lineups_are_listed_and_their_throws_prepared() {
+        let (woke, wakes) = std::sync::mpsc::channel();
+        let library = Library::start(fixture_source(), move || {
+            let _ = woke.send(());
+        });
+        let mut s = Sandbox::start("de_mirage", None, library);
+        // no meshes here: the stages are built without a collider
+        s.collider = SharedCollider::build(std::env::temp_dir().join("nades-sandbox-no-meshes"), "de_mirage".into(), || {});
+        s.library.send(Request::List(s.filter.clone()));
+        let started = Instant::now();
+        while s.prepared.len() < 7 {
+            assert!(started.elapsed() < Duration::from_secs(20), "listed {}, prepared {}, notice {:?}", s.lineups.len(), s.prepared.len(), s.notice);
+            let _ = wakes.recv_timeout(Duration::from_millis(200));
+            s.receive();
+        }
+        assert_eq!(s.lineups.iter().map(|l| (l.id.0, l.throws)).collect::<Vec<_>>(), [(1, 2), (3, 2), (2, 1), (4, 1), (5, 1), (6, 1), (7, 1)]);
+        assert_eq!((s.selected, s.teams.as_slice(), s.notice.as_deref()), (Some(LineupId(1)), &["MOUZ".to_string(), "Vitality".to_string()][..], None));
+        let window = s.selected_prepared().unwrap();
+        assert_eq!((window.throw.id.as_str(), window.viewers, window.stage.flight.is_some()), ("m1-window-a", 66, true));
+        assert_eq!(window.demo.as_ref().and_then(|d| d.file_name.as_deref()), Some("fixture-1.dem"));
+        // the flash's blinded players were placed from the samples nearest it
+        let flash = &s.prepared[&ThrowId("m1-flash".into())];
+        assert_eq!(flash.stage.blinded.len(), 2);
+        assert_eq!(flash.result.source, nades_scene::camera::Source::Victim { seconds: f64::from(2.4f32) });
+        // a filter is applied in memory, and the summary names the sandbox's own ids
+        s.apply(Action::Grenade(Some(Grenade::Incendiary)));
+        let started = Instant::now();
+        while s.lineups.len() != 1 {
+            assert!(started.elapsed() < Duration::from_secs(10));
+            let _ = wakes.recv_timeout(Duration::from_millis(200));
+            s.receive();
+        }
+        assert_eq!(s.lineups[0].id, LineupId(3));
+        assert_eq!(s.summary(false, false).lineup_id.as_deref(), Some("3"), "a selection no longer listed gives way to the first listed");
     }
 
     #[test]
     fn a_map_left_keeps_its_lineups_for_when_it_is_picked_again() {
-        let library = Library::start(Database::at(std::env::temp_dir().join("nades-sandbox-no-such.duckdb")), || {});
+        let library = Library::start(Arc::new(nades_model::fixture::Memory::default()), || {});
         let mut s = Sandbox::start("de_cache", None, library);
-        s.filter.team = Some("Vitality".into());
-        s.filter.side = Some(nades_data::Side::T);
-        s.lineups = vec![lineup("de_cache", "cache-1"), lineup("de_cache", "cache-2")];
-        s.selected = Some("cache-2".into());
+        s.filter.query.team = Some("Vitality".into());
+        s.filter.query.side = Some(nades_model::Side::T);
+        s.lineups = vec![lineup(1), lineup(2)];
+        s.selected = Some(LineupId(2));
         s.list_ms = Some(90.0);
         // a map not kept: read afresh, with the side carried over and the team left behind
         assert!(!s.switch_map("de_mirage", DVec3::Z));
-        assert_eq!((s.filter.map.as_str(), s.filter.side, s.filter.team.as_deref()), ("de_mirage", Some(nades_data::Side::T), None));
+        assert_eq!((s.filter.map.as_str(), s.filter.query.side, s.filter.query.team.as_deref()), ("de_mirage", Some(nades_model::Side::T), None));
         assert!(s.lineups.is_empty() && s.selected.is_none() && s.list_ms.is_none());
         let kept = &s.kept["de_cache"];
-        assert_eq!((kept.lineups.len(), kept.selected.as_deref()), (2, Some("cache-2")));
+        assert_eq!((kept.lineups.len(), kept.selected), (2, Some(LineupId(2))));
         // back again: as it was left, its team filter reset, so its list is read again
-        s.lineups = vec![lineup("de_mirage", "mirage-1")];
+        s.lineups = vec![lineup(1)];
         s.list_ms = Some(80.0);
         assert!(s.switch_map("de_cache", DVec3::X));
-        assert_eq!((s.lineups.len(), s.selected.as_deref(), s.toward_sun), (2, Some("cache-2"), DVec3::X));
+        assert_eq!((s.lineups.len(), s.selected, s.toward_sun), (2, Some(LineupId(2)), DVec3::X));
         assert!(s.list_ms.is_none(), "its filter changed (no team), so it is read again");
         assert_eq!(s.kept["de_mirage"].lineups.len(), 1);
         // a kept map whose filter is the one shown opens with its list as it is

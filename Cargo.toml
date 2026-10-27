@@ -16,11 +16,10 @@ nades-control = { path = "crates/control" }
 nades-render = { path = "crates/render" }
 nades-pack = { path = "crates/pack" }
 nades-source2 = { path = "crates/source2" }
-nades-data = { path = "crates/data" }
+nades-model = { path = "crates/model" }
+nades-source-file = { path = "crates/source-file" }
 nades-packer = { path = "crates/packer" }
 nades-scene = { path = "crates/scene" }
-# the 3D tracks and the voxel log's decoder, from show-me-the-nades itself (its library builds without the CLI's crates)
-show-me-the-nades = { path = "../show-me-the-nades", default-features = false }
 
 # GPU and window: one wgpu for the renderer and egui (egui-wgpu 0.37 is built on wgpu 30)
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "metal", "dx12"] }
@@ -37,7 +36,11 @@ block2 = "0.6.2"
 objc2 = "0.6.5"
 
 # data and assets
-duckdb = { version = "~1.20000.0", features = ["bundled"] } # the same DuckDB as nades, or its database will not open
+# the cs2-throws files (crates/source-file): SQLite, bundled
+rusqlite = { version = "0.41", features = ["bundled"] }
+# the platform's config and cache folders (docs/standalone-api.md §8) and the config file
+directories = "6"
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 memmap2 = "0.9.12"
 postcard = { version = "1.1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }

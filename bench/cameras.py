@@ -2,10 +2,13 @@
 (Lineup, Aim, Result, Orbit's first pose) as `nades-sandbox --cameras` chooses it, beside the web view's own choice
 (bench/cameras.ts: show-me-the-nades' stage.ts fed by its API and awpy's mesh).
 
-    python3 bench/cameras.py [--per 3] [--maps de_cache,de_dust2] [--db PATH] [--port 8899]
+    python3 bench/cameras.py --nades <show-me-the-nades checkout> [--per 3] [--maps de_cache,de_dust2] [--db PATH]
+                             [--data FILE] [--port 8899]
 
-- The database is cloned (APFS copy-on-write) into the run's folder, the web server reads the clone, and the sandbox
-  reads the same clone: nothing touches nades.duckdb itself. --db names another file to clone.
+- The database is cloned (APFS copy-on-write) into the run's folder and the web server reads the clone; the sandbox
+  reads the clone's facts, exported as a cs2-throws file by the checkout's `nades export --cs2-throws` (bench/
+  web_compare.py), so both read the same throws: nothing touches nades.duckdb itself. --db names another file to
+  clone, --data a cs2-throws file already exported from it.
 - The throws are the web's own Lineups list, most thrown first: --per of each grenade (smoke, flash, HE, molotov) a map.
 - A camera matches when its eye is within 1 unit and its angles within 0.1° (and the result shot is the same player's
   view at the same tick, or both fall back the same way).
@@ -27,8 +30,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+import web_compare
+
 ROOT = Path(__file__).resolve().parent.parent
-NADES = ROOT.parent / "show-me-the-nades"
 EYE_UNITS = 1.0
 ANGLE_DEGREES = 0.1
 VIEWS = ("lineup", "aim", "result", "orbit")
@@ -74,18 +78,22 @@ def compare(web: dict, ours: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--nades", type=Path, help="the show-me-the-nades checkout to compare with (else SHOW_ME_THE_NADES)")
     parser.add_argument("--per", type=int, default=3)
     parser.add_argument("--maps", default="")
-    parser.add_argument("--db", type=Path, default=NADES / "nades.duckdb")
+    parser.add_argument("--db", type=Path, help="the database to clone (default: the checkout's nades.duckdb)")
+    parser.add_argument("--data", type=Path, help="a cs2-throws file exported from that database (default: export the clone)")
     parser.add_argument("--port", type=int, default=8899)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/nades-sandbox")
     opts = parser.parse_args()
+    nades = web_compare.checkout(opts.nades)
     out = ROOT / ".runs" / f"cameras-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True)
-    clone = out / "nades.duckdb"
-    subprocess.run(["cp", "-c", str(opts.db), str(clone)], check=True)
+    clone = web_compare.clone(opts.db or nades / "nades.duckdb", out)
+    data = web_compare.export(nades, clone, out, opts.data)
+    ids = web_compare.file_ids(data)
     env = {**os.environ, "NADES_DB": str(clone), "NADES_WEB_PORT": str(opts.port)}
-    server = subprocess.Popen(["bun", str(NADES / "web/server/src/main.ts")], cwd=NADES / "web/server", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "server.log", "w"))
+    server = subprocess.Popen(["bun", str(nades / "web/server/src/main.ts")], cwd=nades / "web/server", env=env, stdout=subprocess.DEVNULL, stderr=open(out / "server.log", "w"))
     try:
         api = f"http://localhost:{opts.port}"
         wait_for(f"{api}/api/maps")
@@ -96,23 +104,24 @@ def main() -> int:
                 rows = get(f"{api}/api/lineups?map={m}&nade={nade}&rank=frequent&limit={opts.per}")["rows"]
                 cases += [{"throw": r["example_throw_id"], "map": m, "nade": nade, "lineup": r["lineup_id"]} for r in rows if r.get("example_throw_id")]
         (out / "cases.json").write_text(json.dumps(cases, indent=1))
-        web = subprocess.run(["bun", str(ROOT / "bench/cameras.ts"), "--web", str(NADES / "web/app"), "--api", api, "--cases", str(out / "cases.json")], cwd=NADES / "web/app", capture_output=True, text=True, timeout=1800)
+        web = subprocess.run(["bun", str(ROOT / "bench/cameras.ts"), "--web", str(nades / "web/app"), "--api", api, "--cases", str(out / "cases.json")], cwd=nades / "web/app", capture_output=True, text=True, timeout=1800)
         (out / "web.jsonl").write_text(web.stdout)
         if web.returncode != 0:
             raise SystemExit(f"cameras.ts failed: {web.stderr[-2000:]}")
     finally:
         server.terminate()
         server.wait(timeout=30)
-    ours = subprocess.run([str(opts.binary), "--cameras", str(out / "cases.json")], env=env, capture_output=True, text=True, timeout=1800)
+    # the same throws in the file's ids
+    (out / "cases-file.json").write_text(json.dumps([{**c, "throw": ids.get(c["throw"], c["throw"])} for c in cases], indent=1))
+    ours = subprocess.run([str(opts.binary), "--cameras", str(out / "cases-file.json"), "--data", str(data)], capture_output=True, text=True, timeout=1800)
     (out / "sandbox.jsonl").write_text(ours.stdout)
     if ours.returncode != 0:
         raise SystemExit(f"nades-sandbox --cameras failed: {ours.stderr[-2000:]}")
-    clone.unlink()
-    for wal in out.glob("nades.duckdb*"):
-        wal.unlink()
+    web_compare.remove_clone(out)
 
     web_rows = {r["throw"]: r for r in map(json.loads, filter(None, web.stdout.splitlines()))}
-    our_rows = {r["throw"]: r for r in map(json.loads, filter(None, ours.stdout.splitlines()))}
+    web_id = {file_id: web for web, file_id in ids.items()}
+    our_rows = {web_id.get(r["throw"], r["throw"]): r for r in map(json.loads, filter(None, ours.stdout.splitlines()))}
     results = []
     for c in cases:
         w, o = web_rows.get(c["throw"]), our_rows.get(c["throw"])

@@ -1,7 +1,8 @@
-//! nades-sandbox, M3: the lineup sandbox. A map in CS2's look with its pro lineups from the nades database: pick one and
-//! see it from the thrower's eye (Lineup), zoomed on the aim point (Aim), from an opponent's eye (Result) or from anywhere
-//! around it (Orbit), with the flight, the smoke, fire, flash or HE as the round had it, a time scrubber, and the practice
-//! command to copy (`lineups.rs`, `shell.rs`).
+//! nades-sandbox, M3: the lineup sandbox. A map in CS2's look with the lineups of the throws in cs2-throws files: pick one
+//! and see it from the thrower's eye (Lineup), zoomed on the aim point (Aim), from an opponent's eye (Result) or from
+//! anywhere around it (Orbit), with the flight, the smoke, fire, flash or HE as the round had it, a time scrubber, and the
+//! practice command to copy (`lineups.rs`, `shell.rs`). The throws are facts read through a `ThrowSource`; grouping,
+//! technique, callouts and viewpoints are nades-model's rules.
 //!
 //! Start-up runs on threads from `main`: this one has AppKit make the window (≈76 ms), while the loader maps the pack,
 //! brings up the GPU, puts the map on it and draws one frame offscreen, and the data thread reads the lineup list
@@ -9,6 +10,9 @@
 //! (`state.rs`), and the throw's effects follow when they are built. The collider and the game's flipbooks and smoke
 //! noise are read after it.
 //!
+//! - `--data <file or folder>` (repeatable) names the cs2-throws files to read; else `NADES_SANDBOX_DATA`, else
+//!   `[data] paths` in the config file, else the demo adapter's cache (`config.rs`).
+//! - `check <file>...` prints each cs2-throws file's problems and which features its facts allow (`check.rs`).
 //! - `--map <name>` draws `~/.cache/nades/packs/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file).
 //! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
 //!   averaged over 16 jittered frames. `--cameras <cases.json>` prints the cameras each `{"throw": id}`'s views open
@@ -28,7 +32,9 @@
 //!   no window can be shown.
 
 mod camera;
+mod check;
 mod clock;
+mod config;
 mod control;
 mod library;
 mod lineups;
@@ -95,6 +101,7 @@ struct Args {
     cameras: Option<PathBuf>,
     bench_maps: Option<Vec<String>>,
     budget_mb: Option<u64>,
+    data: Vec<PathBuf>,
 }
 
 /// Numbers separated by commas: `1,2,3`.
@@ -109,6 +116,7 @@ fn args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--data" => args.data.push(it.next().context("--data needs a cs2-throws file or a folder of them")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
             "--render-time" => args.render_time = Some(numbers::<1>(it.next(), "--render-time")?[0]),
@@ -160,6 +168,10 @@ fn pack_path(map: Option<&str>) -> PathBuf {
 fn main() {
     clock::init();
     clock::mark("main");
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    if words.first().map(String::as_str) == Some("check") {
+        std::process::exit(if check::run(&words[1..]) { 0 } else { 1 });
+    }
     if let Err(failure) = run() {
         eprintln!("nades-sandbox: {failure:#}");
         std::process::exit(1);
@@ -168,14 +180,23 @@ fn main() {
     std::process::exit(0);
 }
 
+/// The data source for a run that reads throws without a window: one that does not open is an error.
+fn cli_source(args: &Args) -> Result<Arc<dyn nades_model::ThrowSource>> {
+    let data = config::data(&args.data)?;
+    match config::open(&data) {
+        (_, Some(notice)) => bail!("{notice}"),
+        (source, None) => Ok(source),
+    }
+}
+
 fn run() -> Result<()> {
     let args = args()?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(cases) = &args.cameras {
-        return lineups::print_cameras(cases);
+        return lineups::print_cameras(cli_source(&args)?.as_ref(), cases);
     }
     if let (Some(out), Some(throw)) = (&args.render, &args.throw) {
-        return lineups::render_throw(throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
+        return lineups::render_throw(cli_source(&args)?.as_ref(), throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
     }
     if let Some(out) = &args.render {
         return render_offscreen(&args, out);
@@ -208,11 +229,16 @@ fn run() -> Result<()> {
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = proxy.send_event(UserEvent::Wake);
     });
+    let (source, notice) = config::open(&config::data(&args.data)?);
+    if let Some(notice) = &notice {
+        eprintln!("data: {notice}");
+    }
     let library = {
         let wake = wake.clone();
-        library::Library::start(lineups::database(), move || wake())
+        library::Library::start(source, move || wake())
     };
-    let sandbox = lineups::Sandbox::start(&map, remembered, library);
+    let mut sandbox = lineups::Sandbox::start(&map, remembered, library);
+    sandbox.data_notice = notice;
     let mut lineups = lineups::Lineups::new(sandbox, bench, egui::Rect::NOTHING);
     // the other maps open in the background after the first frame, except in runs that time one map
     // (NADES_SANDBOX_PRELOAD: 0 never, 1 always)
@@ -781,7 +807,7 @@ impl ApplicationHandler<UserEvent> for App {
                 view.window.request_redraw();
             }
             // an idle window still notices an ingest, and reads the lineups again
-            view.lineups.sandbox.check_database();
+            view.lineups.sandbox.check_data();
             if self.args.bench_frames.is_none() && self.args.bench_switch.is_none() {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)));
             }

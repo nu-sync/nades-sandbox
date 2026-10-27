@@ -29,8 +29,8 @@ pub enum FireKind {
 }
 
 impl FireKind {
-    pub fn of(weapon: Option<&str>) -> Self {
-        if weapon == Some("incendiary") { FireKind::Incendiary } else { FireKind::Molotov }
+    pub fn of(grenade: nades_model::Grenade) -> Self {
+        if grenade == nades_model::Grenade::Incendiary { FireKind::Incendiary } else { FireKind::Molotov }
     }
 }
 
@@ -160,16 +160,16 @@ fn burns(kind: FireKind) -> f64 {
     }
 }
 
-/// The flames of `throw_scene`, in seconds after `detonate_tick`.
-pub fn flames_of(rows: &[nades_data::Flame], detonate_tick: i32) -> Vec<Flame> {
+/// A fire's flames as the facts record them, in seconds after `detonate_tick`.
+pub fn flames_of(rows: &[nades_model::Flame], detonate_tick: i32) -> Vec<Flame> {
     rows.iter()
         .map(|f| {
             let n = f.normal.map_or([0.0, 0.0, 1.0], |n| n.map(f64::from));
             Flame {
                 pos: f.pos.map(f64::from),
                 normal: normalize(n),
-                start: f64::from(f.first_tick - detonate_tick) * TICK,
-                end: f64::from(f.last_tick + 1 - detonate_tick) * TICK,
+                start: f64::from(f.first.0 - detonate_tick) * TICK,
+                end: f64::from(f.last.0 + 1 - detonate_tick) * TICK,
             }
         })
         .collect()
@@ -961,7 +961,7 @@ mod tests {
 
     #[test]
     fn flames_take_their_ticks_from_the_detonation() {
-        let rows = [nades_data::Flame { index: 0, pos: [1.0, 2.0, 3.0], normal: None, first_tick: 3100, last_tick: 3163 }];
+        let rows = [nades_model::Flame { slot: 0, pos: [1.0, 2.0, 3.0], normal: None, first: nades_model::Tick(3100), last: nades_model::Tick(3163) }];
         let flames = flames_of(&rows, 3100);
         assert_eq!(flames[0], Flame { pos: [1.0, 2.0, 3.0], normal: [0.0, 0.0, 1.0], start: 0.0, end: 1.0 });
     }

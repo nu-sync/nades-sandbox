@@ -1,0 +1,10 @@
+[package]
+name = "nades-model"
+description = "The sandbox's vocabulary and rules: CS2 throws as the game records them, the port a data source implements, and what the sandbox derives from them"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true

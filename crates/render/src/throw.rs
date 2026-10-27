@@ -602,7 +602,7 @@ impl ThrowLayer {
         let mut tube = Meshes::default();
         let mut overlay = Meshes::default();
         if let Some(flight) = &stage.flight {
-            let color = nade_color(&stage.nade);
+            let color = nade_color(stage.grenade);
             let curve = catmull_rom(&flight.points, (flight.points.len() * 6).min(600));
             tube.tube(&curve, 1.6, 8, rgba(color, 0.9), [0.0, 1.0]);
             // the same tube, faint, where walls hide it, so the arc still reads
@@ -677,7 +677,7 @@ impl ThrowLayer {
         if self.flight_visible
             && let Some((at, spin)) = stage.and_then(|s| s.flight.as_ref()).and_then(|f| f.grenade_at(t))
         {
-            let color = nade_color(stage.map_or("", |s| s.nade.as_str()));
+            let color = stage.map_or([1.0; 3], |s| nade_color(s.grenade));
             let turn = Mat4::from_quat(glam::Quat::from_xyzw(spin.x as f32, spin.y as f32, spin.z as f32, spin.w as f32));
             moving.ellipsoid(v3(at), 1.7, 2.2, turn, rgba(color, 1.0), [1.0, 0.0]);
         }

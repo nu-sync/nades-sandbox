@@ -23,7 +23,10 @@ glam.workspace = true
 serde_json.workspace = true
 png.workspace = true
 nades-control = { path = "../control" }
-nades-data.workspace = true
+nades-model.workspace = true
+nades-source-file.workspace = true
+directories.workspace = true
+toml.workspace = true
 nades-scene.workspace = true
 serde.workspace = true
 rayon.workspace = true

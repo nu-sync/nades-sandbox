@@ -8,18 +8,24 @@ baked lighting, sky, fog and post-processing, with a fly camera and offscreen re
 ## Status
 
 **M4 (version 0.1.0).** Tested on Apple Silicon macOS. The renderer is working. Since M3 the window
-is a lineup sandbox: a map's pro lineups from the `show-me-the-nades` database, each seen from the thrower's eye,
-zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, smoke, fire, flash or HE, a time
-scrubber and the practice command to copy. Since M4 every pool map stays on the GPU within a memory budget, so
-picking another map shows it in the next frame, and `just bundle` makes a macOS app. The workspace type-checks for
-Windows (`just check-windows`) but has not been run there; Linux is not verified.
+is a lineup sandbox: the lineups of the throws in your data, each seen from the thrower's eye, zoomed on the aim
+point, from an opponent's eye or orbiting it, with the flight, smoke, fire, flash or HE, a time scrubber and the
+practice command to copy. Since M4 every pool map stays on the GPU within a memory budget, so picking another map
+shows it in the next frame, and `just bundle` makes a macOS app. The workspace type-checks for Windows
+(`just check-windows`) but has not been run there; Linux is not verified.
 
-The project is the native 3D companion to `show-me-the-nades`, a separate project for CS2 demo analytics and
-lineups. The map viewer runs without its database; the lineups read it (`NADES_DB`, read-only).
+The throws come from **`cs2-throws` files**: one SQLite file of what CS2 demos record about grenade throws, named
+after the game's own properties and events ([the format](docs/standalone-api.md#3-the-facts-cs2-throws-version-1)).
+Any parser can write one: `tools/cs2_throws.py` is a reference writer that needs only Python's standard library, and
+`show-me-the-nades` (a separate project for CS2 demo analytics) exports its database with
+`nades export --cs2-throws`. Everything computed from those facts (lineup grouping, technique, practice commands,
+round time, landing callouts, the opponent's viewpoints) is the sandbox's own rule, the same for every file
+(`crates/model`). A producer's own labels travel as tags, shown and filterable but never interpreted.
 
-This preview requires locally prepared CS2 assets. It contains no game files or map packs. The preparation
-pipeline currently lives in the separate, unpublished `show-me-the-nades` project, so a fresh clone alone does
-not provide the inputs needed to render a map. [Asset setup](docs/setup.md) describes the required layout and overrides.
+This preview requires locally prepared CS2 assets. It contains no game files or map packs. The map preparation
+pipeline currently lives in the separate, unpublished `show-me-the-nades` project, so a fresh clone builds and tests
+on its own but does not provide the inputs needed to render a map. [Asset setup](docs/setup.md) describes the required
+layout and overrides.
 
 [The specification](SPEC.md) records the milestones and historical performance measurements;
 [the decision log](docs/decisions.md) records the architecture and rendering evidence.
@@ -27,13 +33,8 @@ not provide the inputs needed to render a map. [Asset setup](docs/setup.md) desc
 ## Build and run
 
 Install Rust 1.95 or newer and the Xcode Command Line Tools on macOS. [just](https://just.systems/) is optional;
-Python 3 is needed for startup benchmarks, and [uv](https://docs.astral.sh/uv/) for the rendering comparison script.
-The first build compiles bundled DuckDB. Its version matches the database writer in `show-me-the-nades`.
-
-**Building needs a checkout of `show-me-the-nades` beside this one** (`../show-me-the-nades`). Since M3 the
-workspace takes that project's 3D track types and smoke voxel-log decoder from its library (`show-me-the-nades =
-{ path = "../show-me-the-nades", default-features = false }`), and Cargo resolves path dependencies even when
-unused. That project is not published, so a fresh clone of this repository alone does not build yet.
+Python 3 is needed for the tests' fixture writer and the startup benchmarks, and [uv](https://docs.astral.sh/uv/) for
+the rendering comparison script. The first build compiles bundled SQLite. The repository builds on its own.
 
 ```sh
 cargo build --release
@@ -42,7 +43,17 @@ cargo clippy --release --workspace --all-targets
 
 # After preparing the local inputs described in docs/setup.md:
 ./target/release/nades-pack de_cache
-./target/release/nades-sandbox --map de_cache
+./target/release/nades-sandbox --map de_cache --data throws.sqlite
+```
+
+`--data` names a cs2-throws file or a folder of them (repeatable; a demo in two files is taken once). Without it the
+sandbox reads `NADES_SANDBOX_DATA`, then `[data] paths` in `config.toml` in the platform's config folder
+(`~/Library/Application Support/io.github.nu-sync.nades-sandbox/` on macOS), then the demo reader's cache folder,
+which stays empty until that reader lands. Check what a file allows before opening it:
+
+```sh
+./target/release/nades-sandbox check throws.sqlite    # the file's problems, and each feature: on, off, or what fact it lacks
+python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite   # a small worked example of the format
 ```
 
 Pick a lineup on the left; the arrow keys step through them, 1–4 pick the Lineup, Aim, Result and Orbit views, space
@@ -69,20 +80,22 @@ Render one frame from a CS2 console camera or a throw's view, or print the start
 
 ```sh
 ./target/release/nades-sandbox --render shot.png --map de_dust2 --setpos 1,2,3 --setang 0,90
-./target/release/nades-sandbox --render smoke.png --throw <throw id> --view result --time 4
+./target/release/nades-sandbox --render smoke.png --throw <throw id> --view result --time 4 --data throws.sqlite
 ./target/release/nades-sandbox --exit-after-first-frame
 ```
 
-Check the views and the effects against show-me-the-nades' web view (both read a clone of the database):
+Check the views and the effects against show-me-the-nades' web view. Both read a clone of its database, the sandbox
+through the clone's cs2-throws export; the checkout is named, never assumed:
 
 ```sh
-python3 bench/cameras.py          # every view's camera for 84 throws, against the web view's own choice
-uv run bench/effects.py           # result shots of chosen throws beside the web view's
+python3 bench/cameras.py --nades <show-me-the-nades checkout>   # every view's camera for 84 throws, against the web view's own choice
+uv run bench/effects.py --nades <show-me-the-nades checkout>    # result shots of chosen throws beside the web view's
+cargo run --release -p nades-source-file --example tag_parity -- <export> nades   # the sandbox's groups, techniques and callouts against the file's nades.* tags
 ```
 
 `python3 bench/startup.py` records load averages and stage marks, discards the first launch, and reports the
 median of nine measured launches. Performance depends on the machine, system load and prepared assets.
-`uv run bench/realism.py --note "what changed"` additionally requires the sibling project's private local
+`uv run bench/realism.py --nades <checkout> --note "what changed"` additionally requires that project's private local
 reference set and web-view runs. Those reference images and generated comparison outputs are not published.
 
 ## Agent control
@@ -115,8 +128,10 @@ The [MCP specification](docs/mcp-spec.md) defines each tool and its success crit
 | `crates/pack` | per-map pack format, writer and memory-mapped reader |
 | `crates/source2` | VTEX textures and VPK archives |
 | `crates/packer` | builds a map pack from local exports and game files |
-| `crates/data` | brief, read-only access to the nades database, with show-me-the-nades' working-tree views |
+| `crates/model` | the sandbox's vocabulary and rules: CS2's facts, the `ThrowSource` port, grouping, technique, practice commands, round time, callouts, viewpoints, the smoke's voxel-log decoder, and `Library` |
+| `crates/source-file` | the `cs2-throws` file adapter: version 1 SQLite files, several merged into one source, and `check` |
 | `crates/scene` | a throw as a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud and light, the fire |
+| `tools/cs2_throws.py` | the format's schema and a reference writer, Python's standard library only |
 | `bench/` | benchmark camera, startup timing and rendering comparisons |
 | `SPEC.md`, `docs/` | plan, setup and design evidence |
 
@@ -126,5 +141,5 @@ included in this preview. The production workspace contains the chosen implement
 ## License
 
 The project's source code is [MIT licensed](LICENSE). CS2 game assets are not included or covered by that
-license. Game files, exports, packs and user databases stay local. The screenshot above is rendered output
+license. Game files, exports, packs and data files stay local. The screenshot above is rendered output
 from this application. This is an independent project, unaffiliated with Valve.

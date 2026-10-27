@@ -7,8 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-nades-data.workspace = true
-show-me-the-nades.workspace = true
+nades-model.workspace = true
 glam.workspace = true
 rayon.workspace = true
 thiserror.workspace = true

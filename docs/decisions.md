@@ -594,3 +594,48 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   - the packer's synthetic test is for Unix only (its stand-in CLI is a shell script).
 - **Evidence:** from a fresh target directory both pass with no warnings (Clippy with `-D warnings`).
 - **Not done:** a build that links (the Windows SDK, or the GNU target with MinGW), and a run.
+
+## S24 · A generic contract: cs2-throws facts, the sandbox's own rules, producer tags
+
+- **Decision:** the sandbox reads throws as facts through a port, `ThrowSource` (`crates/model`), from `cs2-throws`
+  version 1 files (`crates/source-file`, SQLite through rusqlite, bundled), and derives everything else itself, in
+  `crates/model` with tests: times and landing; the eye; technique (CS2's release model, ported from show-me-the-nades'
+  `physics.rs` with its tests); the practice command; lineup grouping; round time and after-plant; landing callouts;
+  viewpoints; the voxel log's decoder (ported from its `tracks.rs` and `voxels.rs` with their tests). A producer's own
+  labels are tags: shown, filterable, never interpreted. `crates/data`, DuckDB and the `show-me-the-nades` path
+  dependency are gone, and `crates/sandbox/tests/standalone.rs` checks that no path dependency leaves the workspace and
+  that nothing names a sibling checkout. `--data` (then `NADES_SANDBOX_DATA`, the config file, the default) names the
+  files; `nades-sandbox check` reports a file's problems and the features its facts allow; `tools/cs2_throws.py` writes
+  the schema and a fixture with Python's standard library, which the tests read.
+- **Why:** the reviewed proposal (docs/standalone-api.md, revision 2): anyone's demos, from any producer, on any map.
+  Revision 1's "facts with the producer's labels" let one producer define what every filter means.
+- **Refinements to §4, found while porting** (the proposal's text is updated to match):
+  - **Throws outside play are not grouped.** In a demo with rounds, a throw in the warm-up or after its round ended
+    starts no group and joins none. show-me-the-nades gives lineups to live throws only; grouping warm-up throws would let
+    them anchor groups and split live ones. A demo without rounds (a practice server's) is all play.
+  - **A fire is one kind for grouping:** a T molotov and a CT incendiary from the same spot are one lineup, as
+    show-me-the-nades' `nade = 'molotov'` has them. The grenade filter still tells them apart.
+  - **Viewpoints end at the recorded expiry, or 5 s after the detonation without one** (show-me-the-nades'
+    `scene_viewers`), not at the nominal duration, and stay inside the throw's round when its ticks are known.
+  - **A flash's blinded player without a recorded position stands at their sample nearest the detonation, within
+    0.5 s**, matched by Steam id, else by name. show-me-the-nades' `throw_scene` placed them so from its samples; its
+    export leaves the blinds' positions empty, since they are not facts the demo records for the event.
+  - **The walking flag is carried, not used:** the verified classifier tells a walk from a run by speed (140 u/s), and
+    the flag would change techniques against the results it was verified on.
+  - **No initial velocity from the flight yet:** technique needs `m_vInitialVelocity` until that estimate is checked
+    against the throws that record both, as §4 asks.
+  - **The round-time filter is half-open** (`from ≤ s < to`), so the presets 0–20, 20–60 and 60+ share no boundary.
+- **API beyond §5:** `ThrowSource::map_of` (a throw's map, for `--render --throw` and `--cameras`); `Throw::flight_end`
+  (the flight's last point, which lands a throw that never went off without reading its flight); `Demo::file_name`;
+  `Derived::effect_recorded` and `release`; `Viewpoint::origin` (the result camera judges from the standing eye, as the
+  web view does); `SmokeVoxels::origin` optional; `Library::viewpoint_window` and `blind_window` (which samples to ask
+  the source for); `Derived::of` (one throw without its map).
+- **Evidence:**
+  - Tests: model 30 (the ports' own included), the file adapter 7 (5 read the Python fixture: facts, tracks, `check`,
+    merging and refusing version 2, a file written again), the app's 22 (one lists the fixture and builds every stage
+    through the data thread) and its 2 standalone checks, the scene's 21; Clippy clean.
+  - The fixture through the binary: `check` reports no problems and its feature table; `--cameras` and
+    `--render --throw` read it.
+- **Not done:** the demo adapter (§6, step 2) and maps from the game's files (§7, step 3); labelled stand-ins for a smoke
+  without voxels or a fire without flames (§2: today such a stage says what is missing); players across name changes
+  by Steam id; the MCP `lineups_list`, which exists only in uncommitted work at the time of writing.

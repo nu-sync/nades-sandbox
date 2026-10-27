@@ -6,6 +6,11 @@
 *.vtex_c
 *.duckdb
 *.duckdb.wal
+# cs2-throws files are the user's data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 /.runs/
 
 # Historical experiments are kept locally; the public preview is the production workspace.

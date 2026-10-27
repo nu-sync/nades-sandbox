@@ -5,9 +5,8 @@ files. Neither game assets nor prepared packs are distributed with this reposito
 
 ## Building
 
-The workspace depends on the `show-me-the-nades` library by path (`../show-me-the-nades`, without its CLI
-features) for the 3D track types and the smoke voxel-log decoder. Check out both projects side by side before
-`cargo build`. That project is not published yet, so this repository does not build on its own.
+The workspace builds on its own (`cargo build --release`): no path dependency leaves it, and a test says so
+(`crates/sandbox/tests/standalone.rs`). Its tests need `python3` for the fixture `tools/cs2_throws.py` writes.
 
 ## Preparation pipeline
 
@@ -75,13 +74,28 @@ them the map still opens, with no lineups or with the stand-ins named below):
 
 | Input | Default | What reads it |
 |---|---|---|
-| the nades database | `../show-me-the-nades/nades.duckdb`, or `NADES_DB` | the lineups and each throw's flight, smoke, fire and viewers, read-only and briefly |
-| show-me-the-nades' views | `../show-me-the-nades/sql/views.sql`, or `NADES_VIEWS_SQL` | applied as temp macros on every read; without the file, the database's own serve |
+| the throws: cs2-throws files | `--data <file or folder>` (repeatable), else `NADES_SANDBOX_DATA` (paths separated as in PATH), else `[data] paths` in `config.toml` in the platform's config folder, else the demo reader's cache (`throws/` in the platform's cache folder) | the lineups and each throw's flight, smoke, fire and viewpoints, read-only; a file written again is read again |
 | awpy's collision mesh | `~/.cache/nades/maps/<map>.mesh` (show-me-the-nades' `just map-meshes`), or `NADES_MAPS_DIR` | the result shot's line of sight and the smoke's light; without it, an overview and an unlit smoke |
 | the game's smoke noise and fire flipbooks | `~/.cache/nades/cs2/effects/web` (its `uv run scripts/cs2_effects.py web`), or `NADES_CS2_EFFECTS_DIR` | the smoke and the fire; without them, the web view's stand-ins |
 | the remembered view | `~/.cache/nades/sandbox/state.json`, or `NADES_SANDBOX_STATE` | each map's last lineup, view and camera, written on exit |
 
-The crate `show-me-the-nades` (its library: the voxel log's decoder) is a path dependency on the sibling checkout.
+A flag beats the environment, which beats the config file, which beats the default. On macOS the config file is
+`~/Library/Application Support/io.github.nu-sync.nades-sandbox/config.toml`:
+
+```toml
+[data]
+paths = ["~/cs2/pro.sqlite", "throws"]   # a relative path is the config folder's
+```
+
+The packs, the collider and the effects keep their `~/.cache/nades` paths until the sandbox reads maps from the game's
+own files (docs/standalone-api.md §7).
+
+### Writing cs2-throws files
+
+`tools/cs2_throws.py` holds the schema (docs/standalone-api.md §3) and a `Writer` that needs only Python's standard
+library; its `fixture` command is a worked example that fills every table. show-me-the-nades writes its database as one
+file with `nades export --cs2-throws <file>`. Either way, `nades-sandbox check <file>` names the file's problems and,
+feature by feature, what its facts allow and which fact a feature lacks.
 
 ## The macOS app (M4)
 
@@ -90,25 +104,29 @@ just bundle      # target/release/bundle/macos/Nades Sandbox.app, signed for thi
 ```
 
 The app reads the same inputs as the binary: the packs, maps, effects and remembered view under `~/.cache/nades`, and
-the database and views of the show-me-the-nades checkout the build was made beside. Opened from Finder it takes no
-environment of its own; `open --env NADES_DB=/path/to/copy.duckdb "target/release/bundle/macos/Nades Sandbox.app"`
-points it elsewhere, as the variables above do for the binary. Its first launch compiles the shaders (about half a
+the throws its config file names. Opened from Finder it takes no environment of its own;
+`open --env NADES_SANDBOX_DATA=/path/to/throws.sqlite "target/release/bundle/macos/Nades Sandbox.app"` points it
+elsewhere, as the variables above do for the binary. Its first launch compiles the shaders (about half a
 second): macOS keeps their cache per app. It keeps the other packed maps on the GPU within a budget of 8 GiB, or half
 of what the GPU recommends where that is less; `NADES_SANDBOX_BUDGET_MB` or `--budget-mb` sets it.
 
-## Database and verification inputs
-
-To exercise the data crate on its own, use a copy of a database produced by `show-me-the-nades`, never the live
-file:
+## Data and verification inputs
 
 ```sh
-cargo run --release -p nades-data --example lineups -- /path/to/copy.duckdb de_cache
+./target/release/nades-sandbox check /path/to/throws.sqlite
+cargo run --release -p nades-source-file --example tag_parity -- /path/to/throws.sqlite nades
 ```
 
-`bench/cameras.py` and `bench/effects.py` clone the database (copy-on-write) into their run folder and start
-show-me-the-nades' web server (and, for the effects, its development server) on the clone: they need Bun and the
-sibling checkout's installed `web/` packages.
+The second compares the sandbox's groups, techniques and landing callouts with a producer's own labels for them (here
+show-me-the-nades' `nades.lineup`, `nades.technique` and `nades.land_place` tags) and counts every difference.
 
-`cargo test --release --workspace` uses synthetic fixtures. The ignored tests require local game files,
-exports and packs. `bench/realism.py` also requires the sibling checkout's `verify-scene-realism` skill,
-reference shots and latest web rendering run; it reads those in place. Its generated comparisons stay local.
+`bench/cameras.py` and `bench/effects.py` compare the sandbox with show-me-the-nades' web view. They take that
+checkout as `--nades <dir>` (or `SHOW_ME_THE_NADES`), clone its database (copy-on-write) into their run folder, start
+its web server (and, for the effects, its development server) on the clone, and export the clone with its
+`nades export --cs2-throws` for the sandbox (`--data` takes an export made earlier instead). They need Bun and that
+checkout's installed `web/` packages. Never point them at the live `nades.duckdb` without the clone.
+
+`cargo test --release --workspace` uses synthetic fixtures, among them the one `tools/cs2_throws.py` writes. The
+ignored tests require local game files, exports and packs. `bench/realism.py --nades <dir>` also requires that
+checkout's `verify-scene-realism` skill, reference shots and latest web rendering run; it reads those in place. Its
+generated comparisons stay local.
