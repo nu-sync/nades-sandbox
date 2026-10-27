@@ -772,7 +772,41 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   `--bench-switch 20` on an empty data folder; main's binary ran `--bench-frames` and `--bench-maps` until killed at
   15 s. Not run tonight: the same benches with a window on screen (the screen stayed locked).
 
-## S28 · The geometry export, made by the packer
+## S28 · The demo reader: awpy into the cache, one file per demo
+
+- **Decision:** `crates/source-demo` reads a CS2 `.dem` with awpy 3.1 and writes one cs2-throws 2.0 file per demo into
+  the cache (`throws/<sha256>.sqlite` in the platform's cache folder), which the file adapter then reads. It is a port
+  of show-me-the-nades' `extract.rs` and `tracks.rs` with only the facts kept (no kills, damage, physics or labels): one
+  filtered entity pass for projectiles (`m_vInitialPosition`, `m_vInitialVelocity`, `m_hThrower`, `m_bIsIncGrenade`),
+  the thrower's pawn at the projectile's first tick (origin, eye angles, velocity, ground, duck, walking, place, and the
+  last origin on the ground as the take-off point), the flight every 2 ticks while it moves, the smoke's voxel log, the
+  inferno's flames, team names and samples every 32 ticks; then awpy's rounds, bomb and blind events, smoke and fire
+  windows and detonate events. Fires are matched to their molotov by place and time (within 250 units, starting at
+  most 32 ticks after the projectile went). The writer is the file adapter's own `SCHEMA` (a test keeps it equal to §3
+  and `tools/cs2_throws.py`). Ids are §3's recommendation; `played_at` is the `.dem` file's modification time, which
+  archive tools keep. `meta.producer` names the reader's revision, and a cached file from another revision is parsed
+  again; the same revision never parses a demo twice (its SHA-256 names the file).
+- **The app:** `--data` takes demos and folders of them (`nades_config::import_demos`, before the source opens);
+  dropping a demo, a cs2-throws file or a folder onto the window imports it on a thread of its own
+  (`crates/sandbox/src/imports.rs`), shows "Reading x.dem… 45%" in the right panel and adds the file to the open source
+  (`FileSource::add`), whose revision change makes the window read its lists again at once.
+- **Evidence** (`.runs/demo-parity-20261026-2310`): the two ESL Pro League S24 archives from `~/.cache/nades/hltv`,
+  unpacked into a temp folder (the archives' SHA-256 unchanged after), six demos. The reference is show-me-the-nades main
+  `87e338a` in a temp clone, ingesting the archives into a throwaway database and exporting it.
+  - **Row for row, keys resolved to values:** demos 6, rounds 130, throws 2,709 (every column, flights byte for byte),
+    smoke voxel logs 811, flames 9,954, blinds 1,481, player samples 194,981: all present on both sides, equal except
+    two columns the reference never stores. Blinds' positions: ours are awpy's `victim_x/y/z` (1,378), null for the
+    103 victims on no side (spectators, whom awpy puts at the world's origin); they lie a median 11 units (at most 74)
+    from the victim's own sample within 16 ticks. Samples' duck amount: ours is `m_flDuckAmount` (0 in 87%, 1 in 8%).
+  - `nades-sandbox check`: no problems on each file. The Result view of a Cache smoke rendered with `--data <the .dem>`
+    is the same image as from the reference export (`--render --throw … --view result`; repeated renders of one input
+    differ in 11 of 2.2 M bytes, GPU noise).
+  - **Cost:** 3.6–5.2 s a demo (six in 25.5 s, one at a time, load average ≈13), 668 MB peak; a demo already in the
+    cache 0.5 s (its SHA-256). 3.4–4.0 MB a file. Two imports from scratch give the same bytes.
+- **Not checked:** dragging a demo onto the window by hand (the screen was locked; `imports.rs`'s test drives the same
+  path without a window). Demos other than HLTV's pro matches (Premier, FACEIT) are untested.
+
+## S29 · The geometry export, made by the packer
 
 - **Decision:** `nades-pack <map>` makes the map's geometry export itself (`crates/packer/src/export.rs`), step for
   step as show-me-the-nades' `export_map.py` made it, and `nades-pack setup <map>` fetches a map's files
@@ -812,3 +846,4 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
     and it renders offscreen (`--render` from both spawns).
   - `bench/realism.py --note "geometry export made by nades-pack (U3b)"` on the rebuilt packs: headline 5.3 / 10.3 /
     6.2, as before; 5 of 7 renders byte for byte the last run's (`.runs/realism-20261026-232937`).
+||||||| dd73944

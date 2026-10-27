@@ -44,7 +44,7 @@ From the game folder the packer reads `game/csgo/maps/<map>.vpk` (and the 3D sky
 its own. The geometry export (`<map>.glb`, `<map>.skybox.glb`) is made in `exports/` in the platform's cache folder
 (`--work` moves it; `--export <map>.glb` takes one made elsewhere instead). Use Source 2 Viewer's master build
 (`s2v-master`, as `export_map.py` did): its decompiled flipbook frames are the ones the web view's fire was made from
-(decisions S26), and the exports it makes are byte for byte `export_map.py`'s (S28).
+(decisions S26), and the exports it makes are byte for byte `export_map.py`'s (S29).
 
 Return to this checkout, then build the packs and open a map:
 
@@ -80,7 +80,7 @@ them the map still opens, with no lineups or with the stand-ins named below):
 
 | Input | Default | What reads it |
 |---|---|---|
-| the throws: cs2-throws files | `--data <file or folder>` (repeatable), else `NADES_SANDBOX_DATA` (paths separated as in PATH), else `[data] paths` in `config.toml` in the platform's config folder, else the demo reader's cache (`throws/` in the platform's cache folder) | the lineups and each throw's flight, smoke, fire and viewpoints, read-only; a file written again is read again |
+| the throws: cs2-throws files or CS2 demos | `--data <file or folder>` (repeatable; a demo is read once into the cache), else `NADES_SANDBOX_DATA` (paths separated as in PATH), else `[data] paths` in `config.toml` in the platform's config folder, else the demo reader's cache (`throws/` in the platform's cache folder) | the lineups and each throw's flight, smoke, fire and viewpoints, read-only; a file written again is read again |
 | the collider | the map pack's Collider section (`nades-pack <map>` with the CLI) | the result shot's line of sight and the smoke's light; without it, an overview and an unlit smoke |
 | the game's smoke noise and fire flipbooks | `<packs>/shared/effects.pack` (`nades-pack --effects`) | the smoke and the fire; without them, the web view's stand-ins |
 | the remembered view | `~/.cache/nades/sandbox/state.json`, or `NADES_SANDBOX_STATE` | each map's last lineup, view and camera, written on exit |

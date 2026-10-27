@@ -2,7 +2,7 @@
 
 Proposal, revision 2, 2026-10-26. Step 1 (the core, the file adapter and the switch away from show-me-the-nades'
 database) is implemented; docs/decisions.md S24 records it and the refinements to §4 it needed. §3 is at version 2.0
-(S25): integer keys inside the file, a third of version 1's size.
+(S25): integer keys inside the file, a third of version 1's size. Step 2, the demo adapter, is implemented (S28).
 
 **The goal.** Anyone with CS2 demos sees their throws in 3D on any CS2 map. Nothing the sandbox exposes depends on
 how show-me-the-nades, or any other tool, stores or labels its data.
@@ -367,7 +367,7 @@ in memory: about 6,500 throws a map for 100 pro demos, where today every filter 
 | Adapter | Crate | Reads | Notes |
 |---|---|---|---|
 | **The file** (default) | `crates/source-file` | `cs2-throws` files | several files merge into one source; a demo in two files (the same `demo_id`) is taken once |
-| **Demos** (next) | `crates/source-demo` | `.dem` files and folders, parsed with awpy 3.1 (MIT, crates.io) | writes one `cs2-throws` file per demo into the sandbox's cache, then reads it with the file adapter; drag a demo onto the window |
+| **Demos** | `crates/source-demo` | `.dem` files and folders, parsed with awpy 3.1 (MIT, crates.io) | writes one `cs2-throws` file per demo into the sandbox's cache (`<sha256>.sqlite`), then reads it with the file adapter; a demo already there is not parsed again; drag a demo onto the window |
 | Fixtures | `nades_model::fixture` | memory | for tests |
 
 The demo adapter makes the sandbox the format's first producer. Its own reader is then never a second-class path.
@@ -400,7 +400,7 @@ Workshop maps use the same VPK layout, so they work once the packer reads VPKs d
 **Status (step 3, decisions S26):** the collider (byte for byte awpy's mesh, from the map's physics), the shared
 effects pack, the entity lumps, the sky and post-processing records and the textures now come from the game's files,
 with Source 2 Viewer's CLI run by the packer; the §8 settings for packs, CS2's files and the CLI are in. The geometry
-export (`<map>.glb`, `<map>.skybox.glb`) is the packer's own too (S28): Source 2 Viewer's export from a staged game
+export (`<map>.glb`, `<map>.skybox.glb`) is the packer's own too (S29): Source 2 Viewer's export from a staged game
 folder, `export_map.py`'s layer step ported, glTF-Transform 4.5.1; `nades-pack setup <map>` fetches a map's files with
 DepotDownloader. Every pool map's pack rebuilds byte for byte, and de_vertigo, never exported before, packs. Reading
 the meshes from the VPKs directly, without the CLI and Bun, is what remains.

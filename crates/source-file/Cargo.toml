@@ -1,6 +1,6 @@
 [package]
 name = "nades-source-file"
-description = "The cs2-throws file adapter: reads cs2-throws v1 SQLite files, several merged into one source"
+description = "The cs2-throws file adapter: reads cs2-throws 2.x SQLite files, several merged into one source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

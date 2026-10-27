@@ -574,6 +574,11 @@ impl Sandbox {
         if self.data_checked.elapsed() < Duration::from_secs(5) {
             return;
         }
+        self.reread();
+    }
+
+    /// Reads the lists again if the data changed: now, not at the next look.
+    pub fn reread(&mut self) {
         self.data_checked = Instant::now();
         let revision = self.library.source.revision().ok();
         if revision != self.revision {
@@ -626,11 +631,13 @@ pub struct Lineups {
     /// The camera was taken by hand (the fly keys) or by app control: no lineup view overrides it until one is picked.
     pub free: bool,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Demos dropped onto the window, read on a thread of their own.
+    pub imports: Option<crate::imports::Imports>,
 }
 
 impl Lineups {
     pub fn new(sandbox: Sandbox, bench: bool, rect: egui::Rect) -> Self {
-        Self { sandbox, rect, actions: Vec::new(), effects: None, effects_files: None, resident: Resident::new(0), preload: !bench, shown_bytes: 0, picked: None, frame_parts: Vec::new(), warmed: Default::default(), loading: None, pending: None, last_key: None, accumulated: 0, dragging: None, bench, free: false, wake: None }
+        Self { sandbox, rect, actions: Vec::new(), effects: None, effects_files: None, resident: Resident::new(0), preload: !bench, shown_bytes: 0, picked: None, frame_parts: Vec::new(), warmed: Default::default(), loading: None, pending: None, last_key: None, accumulated: 0, dragging: None, bench, free: false, wake: None, imports: None }
     }
 
     /// After the first frame: the map's collider, and the game's flipbooks and smoke noise, on threads of their own.
@@ -674,6 +681,14 @@ impl Lineups {
     /// Takes what the threads have finished; true when the picture may change.
     pub fn receive(&mut self, gpu: &Gpu, map: &mut Map, name: &mut String) -> bool {
         let mut changed = self.sandbox.receive();
+        if let Some(imports) = &self.imports {
+            if imports.take_added() {
+                self.sandbox.data_notice = None;
+                self.sandbox.reread();
+            }
+            // the progress line moves
+            changed |= imports.line().is_some();
+        }
         self.warm_kept(gpu);
         if let Some(files) = &self.effects_files
             && let Ok((books, noise)) = files.try_recv()
@@ -894,6 +909,7 @@ impl Lineups {
             loading_map: loading.as_deref(),
             copied,
             free: self.free,
+            import: self.imports.as_ref().and_then(crate::imports::Imports::line),
         };
         let (actions, rect) = shell::show(ui, status);
         self.actions.extend(actions);

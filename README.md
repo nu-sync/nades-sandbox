@@ -46,10 +46,13 @@ cargo clippy --release --workspace --all-targets
 ./target/release/nades-sandbox --map de_cache --data throws.sqlite
 ```
 
-`--data` names a cs2-throws file or a folder of them (repeatable; a demo in two files is taken once). Without it the
-sandbox reads `NADES_SANDBOX_DATA`, then `[data] paths` in `config.toml` in the platform's config folder
-(`~/Library/Application Support/io.github.nu-sync.nades-sandbox/` on macOS), then the demo reader's cache folder,
-which stays empty until that reader lands. Check what a file allows before opening it:
+`--data` names a CS2 demo, a cs2-throws file, or a folder of either (repeatable; a demo in two files is taken once).
+A demo is read once with awpy into the cache (`throws/<sha256>.sqlite` in the platform's cache folder, about 4 s and
+3.5 MB for a pro match) and from there afterwards; a demo dropped onto the window is read the same way, on a thread of
+its own, with its progress in the right panel. Without `--data` the sandbox reads `NADES_SANDBOX_DATA`, then
+`[data] paths` in `config.toml` in the platform's config folder
+(`~/Library/Application Support/io.github.nu-sync.nades-sandbox/` on macOS), then that cache. Check what a file allows
+before opening it:
 
 ```sh
 ./target/release/nades-sandbox check throws.sqlite    # the file's problems, and each feature: on, off, or what fact it lacks
@@ -131,6 +134,7 @@ The [MCP specification](docs/mcp-spec.md) defines each tool and its success crit
 | `crates/packer` | builds a map pack from local exports and game files |
 | `crates/model` | the sandbox's vocabulary and rules: CS2's facts, the `ThrowSource` port, grouping, technique, practice commands, round time, callouts, viewpoints, the smoke's voxel-log decoder, and `Library` |
 | `crates/source-file` | the `cs2-throws` file adapter: version 2 SQLite files, several merged into one source, and `check` |
+| `crates/source-demo` | the demo adapter: a CS2 `.dem` file, read with awpy, becomes a cs2-throws file in the cache |
 | `crates/config` | where the settings come from: `--data`, `NADES_SANDBOX_DATA`, the config file, the default |
 | `crates/scene` | a throw as a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud and light, the fire |
 | `tools/cs2_throws.py` | the format's schema and a reference writer, Python's standard library only |

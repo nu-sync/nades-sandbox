@@ -2,6 +2,8 @@
 //! `--data <file or folder>` (repeatable), else `NADES_SANDBOX_DATA` (paths separated as the platform separates PATH),
 //! else `[data] paths` in `config.toml` in the platform's config folder, else the demo adapter's cache folder. A flag
 //! beats the environment, which beats the file, which beats the default. No default names another project's folder.
+//! A data path may be a CS2 demo, or a folder with demos in it: each is imported into the cache first (§6) and read
+//! from there.
 //!
 //! The assets' settings take one path each, with the same precedence ([`Asset`]): the packs (`--packs`,
 //! `NADES_SANDBOX_PACKS`, `[assets] packs`, else `packs/` in the platform's cache folder), CS2's files (`--game`,
@@ -13,6 +15,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use nades_model::ThrowSource;
@@ -208,7 +211,7 @@ pub fn config_file() -> Option<PathBuf> {
     Some(dirs()?.config_dir().join("config.toml"))
 }
 
-/// The demo adapter's cache: one cs2-throws file per demo it has read (that adapter comes next; until then, empty).
+/// The demo adapter's cache: one cs2-throws file per demo it has read.
 pub fn default_data() -> PathBuf {
     dirs().map_or_else(|| PathBuf::from("throws"), |d| d.cache_dir().join("throws"))
 }
@@ -250,14 +253,44 @@ pub fn data(flags: &[PathBuf]) -> Result<Data> {
     resolve(flags, std::env::var_os("NADES_SANDBOX_DATA"), read_config(), default_data())
 }
 
-/// The source the data settings name, and what to tell the person when it holds nothing: a missing default folder is
-/// an empty source with a hint, any other failure an empty source with the error.
-pub fn open(data: &Data) -> (Arc<dyn ThrowSource>, Option<String>) {
-    let empty = || -> Arc<dyn ThrowSource> { Arc::new(FileSource::open(&[]).expect("no files to open")) };
-    if data.origin == Origin::Default && data.paths.iter().all(|p| !p.exists()) {
-        return (empty(), Some("No throws to show: pass --data <cs2-throws file or folder> (see docs/setup.md).".into()));
+/// `paths` with their demos brought into `cache`: a demo stands for its cache file, and a folder's demos follow the
+/// folder. `report` hears each import as it ends.
+pub fn import_demos(paths: &[PathBuf], cache: &Path, report: &mut dyn FnMut(&nades_source_demo::Imported, Duration)) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for path in paths {
+        let demos = nades_source_demo::demos_in(path)?;
+        if path.is_dir() || demos.is_empty() {
+            out.push(path.clone());
+        }
+        for demo in demos {
+            let started = Instant::now();
+            let done = nades_source_demo::import(&demo, cache, &mut |_| {}).with_context(|| format!("reading the demo {}", demo.display()))?;
+            report(&done, started.elapsed());
+            if !out.contains(&done.file) {
+                out.push(done.file);
+            }
+        }
     }
-    match FileSource::open(&data.paths) {
+    Ok(out)
+}
+
+/// The source the data settings name, and what to tell the person when it holds nothing: a missing default folder is
+/// an empty source with a hint, any other failure an empty source with the error. Demos among the paths are imported
+/// into the cache first, each reported on stderr.
+pub fn open(data: &Data) -> (Arc<FileSource>, Option<String>) {
+    let empty = || Arc::new(FileSource::open(&[]).expect("no files to open"));
+    if data.origin == Origin::Default && data.paths.iter().all(|p| !p.exists()) {
+        return (empty(), Some("No throws to show: pass --data <demo, cs2-throws file or folder> (see docs/setup.md).".into()));
+    }
+    let report = &mut |done: &nades_source_demo::Imported, took: Duration| {
+        let how = if done.parsed { format!("read in {:.1} s", took.as_secs_f64()) } else { "already in the cache".into() };
+        eprintln!("data: {}: {} throws, {how}", done.demo.display(), done.throws);
+    };
+    let files = match import_demos(&data.paths, &default_data(), report) {
+        Ok(paths) => paths,
+        Err(e) => return (empty(), Some(format!("{e:#} ({})", from(&data.origin)))),
+    };
+    match FileSource::open(&files) {
         Ok(source) if source.files().is_empty() => (Arc::new(source), Some(format!("No cs2-throws files in {}.", paths(&data.paths)))),
         Ok(source) => (Arc::new(source), None),
         Err(e) => (empty(), Some(format!("{e} ({})", from(&data.origin)))),
@@ -290,6 +323,22 @@ pub fn from(origin: &Origin) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demos_among_the_paths_are_read_into_the_cache_and_the_rest_pass_through() {
+        let dir = std::env::temp_dir().join(format!("nades-config-demos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        let file = dir.join("throws.sqlite");
+        let cache = dir.join("cache");
+        let mut heard = 0;
+        let paths = import_demos(&[file.clone(), dir.join("folder")], &cache, &mut |_, _| heard += 1).unwrap();
+        assert_eq!((paths, heard), (vec![file, dir.join("folder")], 0));
+        // a demo that does not parse names itself
+        std::fs::write(dir.join("folder/broken.dem"), b"PBDEMS2\0 and nothing else").unwrap();
+        let err = import_demos(&[dir.join("folder")], &cache, &mut |_, _| {}).unwrap_err();
+        assert!(format!("{err:#}").contains("reading the demo") && format!("{err:#}").contains("broken.dem"), "{err:#}");
+    }
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
