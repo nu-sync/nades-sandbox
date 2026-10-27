@@ -21,6 +21,10 @@
 //! - `--render <file.png> --setpos x,y,z --setang pitch,yaw [--eye 64] [--size 1138x640]` draws one frame offscreen,
 //!   with no window, from a CS2 console position (the player's feet) and angles, and writes it as a PNG: the in-game
 //!   lineup shots' cameras, for the realism check (bench/realism.py).
+//! - `--scene <file.json> --time <s> --render <file.png> [--view orbit|follow|thrower] [--throw k] [--no-arcs]` draws a
+//!   moment of a scene file offscreen (or from `--setpos`/`--setang` in place of a view), its smokes averaged over 16
+//!   jittered frames, and prints what each throw did as JSON lines (offscreen.rs). `--render-video <request.json>`
+//!   streams a scene's clip as PNG frames on stdout, for the MCP server.
 //! - `--bench-offscreen <n> [--size 2880x1800]` draws n frames offscreen from the bench camera, each finished on the GPU
 //!   before the next, and prints the median and 95th percentile per frame after the first 30: the steady frame where
 //!   no window can be shown.
@@ -30,10 +34,13 @@ mod assets;
 mod bench;
 mod camera;
 mod clock;
+mod offscreen;
 mod collider;
 mod control;
 mod resident;
+mod scene;
 mod shell;
+mod sim;
 mod state;
 mod views;
 
@@ -90,6 +97,11 @@ struct Args {
     control_stdio: bool,
     instance_id: Option<String>,
     video_request: Option<PathBuf>,
+    scene: Option<PathBuf>,
+    time: Option<f64>,
+    view: Option<nades_control::scene::ViewName>,
+    throw: Option<usize>,
+    no_arcs: bool,
     render_time: Option<f32>,
     fov: Option<f32>,
     bench_maps: Option<Vec<String>>,
@@ -110,6 +122,11 @@ fn args() -> Result<Args> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--packs" => args.packs = Some(it.next().context("--packs needs a folder")?.into()),
+            "--scene" => args.scene = Some(it.next().context("--scene needs a scene file")?.into()),
+            "--time" => args.time = Some(it.next().and_then(|t| t.parse().ok()).filter(|t: &f64| t.is_finite() && *t >= 0.0).context("--time needs seconds on the scene's clock")?),
+            "--view" => args.view = Some(it.next().as_deref().and_then(nades_control::scene::ViewName::parse).context("--view needs free, thrower, follow or orbit")?),
+            "--throw" => args.throw = Some(it.next().and_then(|n| n.parse().ok()).context("--throw needs a throw's index in the scene")?),
+            "--no-arcs" => args.no_arcs = true,
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
@@ -163,6 +180,13 @@ fn run() -> Result<()> {
     let args = args()?;
     assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
+    if let Some(request) = &args.video_request {
+        return offscreen::render_video(request);
+    }
+    if let (Some(out), Some(scene)) = (&args.render, &args.scene) {
+        let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
+        return offscreen::render(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: !args.no_arcs, size: args.size.unwrap_or((1138, 640)), out });
+    }
     if let Some(out) = &args.render {
         return render_offscreen(&args, out);
     }
@@ -613,6 +637,27 @@ impl App {
                     Err(error) => Err(ControlError::new("render_failed", error.to_string(), true)),
                 }
             }
+            AppCommand::GetScene => Ok(ControlOutput::Scene { state: view.snapshot(instance), scene: view.app.scene() }),
+            AppCommand::SetScene { scene, expected_revision } => {
+                view.check_revision(expected_revision)?;
+                view.app.set_scene(scene.validated()?);
+                view.changed(instance)
+            }
+            AppCommand::SetTime { seconds, playing } => {
+                if seconds.is_some_and(|t| !t.is_finite() || t < 0.0) {
+                    return Err(ControlError::new("invalid_time", "Seconds must be finite and nonnegative.", false));
+                }
+                view.app.set_time(seconds, playing);
+                view.changed(instance)
+            }
+            AppCommand::SetView { view: shown, throw } => {
+                let throws = view.app.scene.scene.throws.len();
+                if shown != nades_control::scene::ViewName::Free && throw.map_or(throws == 0, |k| k >= throws) {
+                    return Err(ControlError::new("invalid_throw", format!("The scene has {throws} throws; name one by its index."), false));
+                }
+                view.app.set_view(shown, throw);
+                view.changed(instance)
+            }
             AppCommand::Capture { include_ui, expected_revision } => {
                 view.check_revision(expected_revision)?;
                 view.capture_include_ui = include_ui;
@@ -681,6 +726,10 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(view) = self.view.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => {
+                view.app.open_file(&path);
+                view.window.request_redraw();
+            }
             WindowEvent::KeyboardInput { event: ref key, .. } if view.modifiers.super_key() && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => {
                 view.modifiers = modifiers.state();
@@ -884,6 +933,16 @@ impl View {
         clock::mark("egui");
         let targets_map = map.id;
         Ok(Self { window, surface, config, targets, gpu, map, name, started: Instant::now(), egui, painter, camera: Camera::bench(), fly: Fly::default(), modifiers: Default::default(), frames: 0, last_frame: Instant::now(), readback: None, readback_size: (0, 0), capture_include_ui: true, revision: 0, rendered_revision: 0, rendered_time: 0.0, frame_cpu_ms: VecDeque::new(), window_visible: false, collect_metrics: args.control_stdio, observed: None, targets_map, app, finish_frames: args.bench_maps.is_some() })
+    }
+
+    /// After an app-control change: the change drawn (the next frame applies the shell's queue), and the state.
+    fn changed(&mut self, instance: &str) -> std::result::Result<ControlOutput, ControlError> {
+        self.revision += 1;
+        self.window.request_redraw();
+        match self.draw(false) {
+            Ok(_) => Ok(ControlOutput::State { state: self.snapshot(instance) }),
+            Err(error) => Err(ControlError::new("render_failed", error.to_string(), true)),
+        }
     }
 
     fn check_revision(&self, expected: Option<u64>) -> std::result::Result<(), ControlError> {

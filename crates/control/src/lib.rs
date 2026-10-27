@@ -1,3 +1,4 @@
+pub mod scene;
 pub mod video;
 
 use schemars::JsonSchema;
@@ -116,13 +117,21 @@ pub struct AppState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SceneSummary {
+    /// free, thrower, follow or orbit.
     pub camera_mode: String,
+    /// A map on its way, or throws still being simulated.
     pub loading: bool,
     pub notice: Option<String>,
-    pub lineup_id: Option<String>,
-    pub throw_id: Option<String>,
-    pub timeline_seconds: Option<f64>,
+    /// Throws placed in the scene.
+    pub throws: usize,
+    /// The selected throw's index.
+    pub selected_throw: Option<usize>,
+    /// Seconds on the scene's clock.
+    pub timeline_seconds: f64,
+    /// Where the clock runs to: the last effect's end.
+    pub timeline_end_seconds: f64,
     pub playing: bool,
+    /// What shows now: "flight", "smoke", "fire", "flash", "he", each once.
     pub active_effects: Vec<String>,
 }
 
@@ -137,12 +146,13 @@ pub struct ViewportRect {
 impl Default for SceneSummary {
     fn default() -> Self {
         Self {
-            camera_mode: "fly".into(),
+            camera_mode: "free".into(),
             loading: false,
             notice: None,
-            lineup_id: None,
-            throw_id: None,
-            timeline_seconds: None,
+            throws: 0,
+            selected_throw: None,
+            timeline_seconds: 0.0,
+            timeline_end_seconds: 0.0,
             playing: false,
             active_effects: Vec::new(),
         }
@@ -193,6 +203,23 @@ pub enum AppCommand {
         include_ui: bool,
         expected_revision: Option<u64>,
     },
+    /// The scene shown: its map and throws.
+    GetScene,
+    /// Shows `scene`, switching to its map when it is another; its throws are simulated in the background.
+    SetScene {
+        scene: scene::Scene,
+        expected_revision: Option<u64>,
+    },
+    /// Moves the scene's clock, and plays or pauses it.
+    SetTime {
+        seconds: Option<f64>,
+        playing: Option<bool>,
+    },
+    /// Shows a view of a throw (the selected one when none is named), or the free camera.
+    SetView {
+        view: scene::ViewName,
+        throw: Option<usize>,
+    },
     Shutdown,
     Cancel {
         request_id: u64,
@@ -211,6 +238,10 @@ pub enum ControlOutput {
         include_ui: bool,
         width: u32,
         height: u32,
+    },
+    Scene {
+        state: AppState,
+        scene: scene::Scene,
     },
     Stopped,
 }

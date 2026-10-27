@@ -1,7 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CameraPose, ControlError, validate_map_id};
+use crate::scene::{Scene, ViewName};
+use crate::{CameraPose, ControlError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -14,9 +15,9 @@ pub struct CameraKeyframe {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VideoRequest {
-    pub map: String,
-    pub throw_id: String,
-    /// Seconds relative to grenade detonation; negative values show flight.
+    /// The scene to play: its map and throws.
+    pub scene: Scene,
+    /// Seconds on the scene's clock (each throw begins at its own start).
     pub start_seconds: f64,
     pub end_seconds: f64,
     #[serde(default = "width")]
@@ -25,12 +26,18 @@ pub struct VideoRequest {
     pub height: u32,
     #[serde(default = "fps")]
     pub fps: u32,
-    /// A fixed camera; omit to use the recorded throw’s result camera.
+    /// A fixed camera; omit to follow `view` of `throw`.
     #[serde(default)]
     pub camera: Option<CameraPose>,
     /// Ordered poses for a moving camera; mutually exclusive with camera.
     #[serde(default)]
     pub camera_keyframes: Vec<CameraKeyframe>,
+    /// Without a camera: thrower, follow (the default) or orbit, of `throw`.
+    #[serde(default)]
+    pub view: Option<ViewName>,
+    /// The throw the view is of (its index; the first by default).
+    #[serde(default)]
+    pub throw: Option<usize>,
 }
 fn width() -> u32 {
     1280
@@ -45,18 +52,18 @@ fn fps() -> u32 {
 impl VideoRequest {
     pub fn validated(mut self) -> Result<Self, ControlError> {
         let invalid = |message: &str| ControlError::new("invalid_video", message, false);
-        validate_map_id(&self.map)?;
-        if self.throw_id.is_empty() || self.throw_id.len() > 200 {
-            return Err(invalid("A recorded throw ID is required."));
+        self.scene = self.scene.validated()?;
+        if self.throw.is_some_and(|k| k >= self.scene.throws.len()) || (self.camera.is_none() && self.camera_keyframes.is_empty() && self.scene.throws.is_empty()) {
+            return Err(invalid("Name a throw of the scene for the view, or give a camera."));
         }
         let duration = self.end_seconds - self.start_seconds;
-        if !self.start_seconds.is_finite()
+        if !self.start_seconds.is_finite() || self.start_seconds < 0.0
             || !self.end_seconds.is_finite()
             || duration <= 0.0
             || duration > 60.0
         {
             return Err(invalid(
-                "Clip duration must be positive and no more than 60 seconds.",
+                "Start at 0 s or later; the clip's duration must be positive and no more than 60 seconds.",
             ));
         }
         if self.width == 0
@@ -157,10 +164,9 @@ mod tests {
             vertical_fov_degrees: 73.0,
         };
         let request = VideoRequest {
-            map: "de_dust2".into(),
-            throw_id: "throw".into(),
-            start_seconds: -1.0,
-            end_seconds: 1.0,
+            scene: Scene::new("de_dust2"),
+            start_seconds: 1.0,
+            end_seconds: 3.0,
             width: 1280,
             height: 720,
             fps: 30,
@@ -175,6 +181,8 @@ mod tests {
                     camera: pose(-170.0),
                 },
             ],
+            view: None,
+            throw: None,
         }
         .validated()
         .unwrap();
@@ -183,13 +191,13 @@ mod tests {
     }
     #[test]
     fn rejects_invalid_clip_sizes_and_ambiguous_camera_inputs() {
-        let json = serde_json::json!({"map":"de_dust2","throw_id":"t","start_seconds":-1.0,"end_seconds":1.0,"width":1279});
+        let json = serde_json::json!({"scene":{"map":"de_dust2","throws":[{"grenade":"smoke","feet":[0,0,0],"pitch":0,"yaw":0}]},"start_seconds":0.0,"end_seconds":2.0,"width":1279});
         let error = serde_json::from_value::<VideoRequest>(json)
             .unwrap()
             .validated()
             .unwrap_err();
         assert_eq!(error.code, "invalid_video");
-        let json = serde_json::json!({"map":"de_dust2","throw_id":"t","start_seconds":-1.0,"end_seconds":1.0,"camera":{"position":[0,0,0],"pitch_degrees":0,"yaw_degrees":0},"camera_keyframes":[{"at_seconds":0,"camera":{"position":[1,0,0],"pitch_degrees":0,"yaw_degrees":0}}]});
+        let json = serde_json::json!({"scene":{"map":"de_dust2","throws":[{"grenade":"smoke","feet":[0,0,0],"pitch":0,"yaw":0}]},"start_seconds":0.0,"end_seconds":2.0,"camera":{"position":[0,0,0],"pitch_degrees":0,"yaw_degrees":0},"camera_keyframes":[{"at_seconds":0,"camera":{"position":[1,0,0],"pitch_degrees":0,"yaw_degrees":0}}]});
         let error = serde_json::from_value::<VideoRequest>(json)
             .unwrap()
             .validated()
@@ -198,8 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn absent_camera_selects_the_recorded_result_view() {
-        let json = serde_json::json!({"map":"de_dust2","throw_id":"t","start_seconds":-1.0,"end_seconds":1.0});
+    fn absent_camera_follows_a_throw_of_the_scene() {
+        let json = serde_json::json!({"scene":{"map":"de_dust2","throws":[{"grenade":"smoke","feet":[0,0,0],"pitch":0,"yaw":0}]},"start_seconds":0.0,"end_seconds":2.0});
         let request = serde_json::from_value::<VideoRequest>(json)
             .unwrap()
             .validated()
@@ -214,5 +222,10 @@ mod tests {
             (1280, 720, 30, 60)
         );
         assert!(request.camera_at(0.5).is_none());
+        // a view needs a throw to be of, and one the scene has
+        let json = serde_json::json!({"scene":{"map":"de_dust2"},"start_seconds":0.0,"end_seconds":2.0});
+        assert_eq!(serde_json::from_value::<VideoRequest>(json).unwrap().validated().unwrap_err().code, "invalid_video");
+        let json = serde_json::json!({"scene":{"map":"de_dust2","throws":[{"grenade":"he","feet":[0,0,0],"pitch":0,"yaw":0}]},"start_seconds":0.0,"end_seconds":2.0,"throw":1});
+        assert_eq!(serde_json::from_value::<VideoRequest>(json).unwrap().validated().unwrap_err().code, "invalid_video");
     }
 }

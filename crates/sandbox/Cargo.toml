@@ -25,6 +25,8 @@ png.workspace = true
 nades-control = { path = "../control" }
 nades-config.workspace = true
 nades-scene.workspace = true
+nades-physics.workspace = true
+nades-effects.workspace = true
 serde.workspace = true
 rayon.workspace = true
 base64 = "0.23"

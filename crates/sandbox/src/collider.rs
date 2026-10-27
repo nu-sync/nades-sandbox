@@ -36,7 +36,8 @@ impl SharedCollider {
         shared
     }
 
-    /// A collider already built (offscreen runs, tests).
+    /// A collider already built.
+    #[cfg(test)]
     pub fn ready(collider: Option<Collider>) -> Self {
         let shared = Self::default();
         *shared.0.0.lock().expect("collider slot") = Some(collider.map(Arc::new));

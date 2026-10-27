@@ -17,20 +17,26 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
-const TOOLS: [&str; 13] = [
+const TOOLS: [&str; 19] = [
     "app_start",
     "app_status",
     "app_stop",
     "camera_set",
     "diagnostics_get",
     "frame_capture",
-    "lineups_list",
     "map_open",
     "maps_list",
+    "scene_get",
+    "scene_set",
+    "throw_add",
+    "throw_remove",
+    "throw_update",
+    "time_set",
     "video_cancel",
     "video_render",
     "video_status",
     "view_render",
+    "view_set",
 ];
 
 #[derive(Clone)]
@@ -41,7 +47,6 @@ struct Config {
     packs: PathBuf,
     output: PathBuf,
     keep_handoff: bool,
-    database: PathBuf,
 }
 
 impl Config {
@@ -59,7 +64,6 @@ impl Config {
             packs: nades_config::packs(None)?.path,
             output: root.join(format!(".runs/mcp-{unique}")),
             keep_handoff: false,
-            database: PathBuf::new(),
             root,
         };
         let mut args = std::env::args().skip(1);
@@ -93,7 +97,6 @@ struct Evidence {
     calls: BTreeMap<String, (usize, usize)>,
     negative_cases: BTreeSet<String>,
     manual_handoff: Option<(u32, String)>,
-    private_database: Option<PathBuf>,
 }
 
 impl Evidence {
@@ -110,7 +113,6 @@ impl Evidence {
             calls: BTreeMap::new(),
             negative_cases: BTreeSet::new(),
             manual_handoff: None,
-            private_database: None,
         })
     }
 
@@ -225,23 +227,8 @@ impl Evidence {
                 .owned_pids
                 .iter()
                 .any(|(pid, instance)| owns_process(*pid, instance)),
-            "test-owned windows remain alive; private database retained"
+            "test-owned windows remain alive"
         );
-        if let Some(database) = &self.private_database {
-            let retained = self.manual_handoff.is_some();
-            if !retained {
-                let directory = database.parent().context("private database directory")?;
-                if directory.exists() {
-                    fs::remove_dir_all(directory)?;
-                }
-            }
-            fs::write(
-                self.output.join("database-cleanup.json"),
-                serde_json::to_vec_pretty(
-                    &json!({"private_database":database,"status":if retained {"retained_for_manual_handoff"} else {"removed"},"retained_instance":self.manual_handoff}),
-                )?,
-            )?;
-        }
         Ok(())
     }
 }
@@ -274,7 +261,6 @@ impl Client {
                 config.output.to_str().context("output path")?,
             ])
             .current_dir(&config.root)
-            .env("NADES_SANDBOX_DATA", &config.database)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -432,9 +418,7 @@ impl Client {
         let mut previous: Option<AppState> = None;
         loop {
             let current = state(&self.ok(evidence, "app_status", json!({})).await?)?;
-            let content_ready = !current.scene.loading
-                && !current.scene.playing
-                && (current.scene.lineup_id.is_none() || current.scene.throw_id.is_some());
+            let content_ready = !current.scene.loading && !current.scene.playing;
             if content_ready
                 && previous.as_ref().is_some_and(|old| {
                     old.instance_id == current.instance_id
@@ -673,44 +657,45 @@ fn snapshot_binary(source: &Path, destination: &Path) -> Result<Value> {
     Ok(json!({"source":source,"snapshot":destination,"sha256":sha256}))
 }
 
-fn isolate_database(source: &Path, private: &Path) -> Result<Value> {
-    fs::create_dir(private.parent().context("private database parent")?)?;
-    let source_metadata = match fs::metadata(source) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(
-                json!({"status":"missing","source":source,"private_path":private,"method":null,"behavior":"NADES_SANDBOX_DATA points to this explicit missing private path; map-only MCP verification remains available."}),
-            );
-        }
-        Err(error) => {
-            return Err(error)
-                .context("unavailable: cannot inspect source database for private copy");
-        }
-    };
-    ensure!(
-        source_metadata.is_file(),
-        "unavailable: database source is not a file: {}",
-        source.display()
-    );
-    let copied = std::process::Command::new("cp")
-        .arg("-c")
-        .arg(source)
-        .arg(private)
-        .output()
-        .context("unavailable: create APFS database clone with cp -c")?;
-    ensure!(
-        copied.status.success(),
-        "unavailable: APFS database clone failed: {}",
-        String::from_utf8_lossy(&copied.stderr).trim()
-    );
-    let private_metadata = fs::metadata(private)?;
-    ensure!(
-        private_metadata.len() == source_metadata.len(),
-        "unavailable: database source changed size during private clone"
-    );
-    Ok(
-        json!({"status":"cloned","source":source,"private_path":private,"method":"APFS cp -c","source_bytes":source_metadata.len(),"private_bytes":private_metadata.len(),"source_opened_with_duckdb":false}),
-    )
+/// The scene tools on the live window: throws placed, changed and removed, the clock moved onto a smoke, a throw's
+/// views, and the scene emptied again.
+async fn scene_journey(client: &Client, evidence: &mut Evidence, instance: &str) -> Result<()> {
+    let empty = client.ok(evidence, "scene_get", json!({"instance_id":instance})).await?;
+    let data = empty.structured_content.clone().unwrap();
+    evidence.check("the window starts with its map's scene", data["scene"]["map"] == "de_cache" && data["scene"]["format"] == "nades-sandbox-scene")?;
+    let smoke = json!({"grenade":"smoke","feet":[0.0,0.0,1612.0],"pitch":-20.0,"yaw":0.0});
+    let added = client.ok(evidence, "throw_add", json!({"instance_id":instance,"throw":smoke})).await?;
+    let throws = |result: &CallToolResult| result.structured_content.as_ref().unwrap()["scene"]["throws"].as_array().map_or(0, Vec::len);
+    evidence.check("throw_add places a throw", throws(&added) == 1)?;
+    let flash = json!({"grenade":"flash","feet":[0.0,0.0,1612.0],"pitch":-30.0,"yaw":45.0,"start":1.0});
+    let two = client.ok(evidence, "throw_add", json!({"instance_id":instance,"throw":flash})).await?;
+    let mut crouched = flash.clone();
+    crouched["crouch"] = json!(true);
+    let updated = client.ok(evidence, "throw_update", json!({"instance_id":instance,"index":1,"throw":crouched})).await?;
+    evidence.check("throw_update changes a throw in place", throws(&two) == 2 && updated.structured_content.as_ref().unwrap()["scene"]["throws"][1]["crouch"] == true)?;
+    client.error(evidence, "throw_update", json!({"instance_id":instance,"index":5,"throw":smoke})).await?;
+    client.error(evidence, "throw_add", json!({"instance_id":instance,"throw":{"grenade":"smoke","feet":[0,0,0],"pitch":120,"yaw":0}})).await?;
+    let removed = client.ok(evidence, "throw_remove", json!({"instance_id":instance,"index":1})).await?;
+    evidence.check("throw_remove takes a throw out", throws(&removed) == 1)?;
+    let simulated = client.settled_state(evidence).await?;
+    evidence.check("the throw is simulated", simulated.scene.throws == 1 && !simulated.scene.loading && simulated.scene.timeline_end_seconds > 5.0)?;
+    let rendered = client.ok(evidence, "view_render", json!({"map":"de_cache","width":320,"height":180,"scene":{"scene":{"map":"de_cache","throws":[smoke]},"time_seconds":0.0}})).await?;
+    let went_off = rendered.structured_content.as_ref().unwrap()["throws"][0]["detonation"]["at"].as_f64().context("the render reports the detonation")?;
+    let moment = went_off + 3.0;
+    let timed = state(&client.ok(evidence, "time_set", json!({"instance_id":instance,"seconds":moment})).await?)?;
+    evidence.check("time_set moves the clock onto the smoke", (timed.scene.timeline_seconds - moment).abs() < 1e-6 && timed.scene.active_effects.contains(&"smoke".to_string()))?;
+    let orbit = state(&client.ok(evidence, "view_set", json!({"instance_id":instance,"view":"orbit","throw":0})).await?)?;
+    evidence.check("view_set shows the orbit over what the throw left", orbit.scene.camera_mode == "orbit" && orbit.scene.selected_throw == Some(0))?;
+    let capture = client.ok(evidence, "frame_capture", json!({"instance_id":instance,"include_ui":false})).await?;
+    evidence.image(&capture, "scene-orbit")?;
+    let headless = client.ok(evidence, "view_render", json!({"map":"de_cache","width":640,"height":360,"scene":{"scene":{"map":"de_cache","throws":[smoke]},"time_seconds":moment,"view":"orbit"}})).await?;
+    evidence.image(&headless, "scene-orbit-headless")?;
+    client.error(evidence, "view_set", json!({"instance_id":instance,"view":"follow","throw":3})).await?;
+    client.ok(evidence, "view_set", json!({"instance_id":instance,"view":"free"})).await?;
+    let cleared = client.ok(evidence, "scene_set", json!({"instance_id":instance,"scene":{"map":"de_cache","throws":[]}})).await?;
+    evidence.check("scene_set replaces the scene", throws(&cleared) == 0)?;
+    client.settled_state(evidence).await?;
+    Ok(())
 }
 
 async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
@@ -818,9 +803,6 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
         map_text.contains("de_cache") && map_text.contains("de_mirage"),
     )?;
     client
-        .error(evidence, "lineups_list", json!({"map":"../invalid"}))
-        .await?;
-    client
         .error(evidence, "video_status", json!({"job_id":"unknown"}))
         .await?;
     client
@@ -830,23 +812,12 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
         .error(
             evidence,
             "video_render",
-            json!({"map":"../invalid","throw_id":"missing","start_seconds":0,"end_seconds":1}),
+            json!({"scene":{"map":"../invalid"},"start_seconds":0,"end_seconds":1}),
         )
         .await?;
-    let lineups = client
-        .ok(
-            evidence,
-            "lineups_list",
-            json!({"map":"de_dust2","grenade":"molotov","destination":"BombsiteA"}),
-        )
-        .await?;
-    let throw_id = lineups.structured_content.as_ref().unwrap()["lineups"]
-        .as_array()
-        .and_then(|l| l.first())
-        .and_then(|l| l["throw_id"].as_str())
-        .context("Dust II A-site Molotov unavailable in private database")?
-        .to_string();
-    let args = json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":-0.5,"end_seconds":1.5,"width":640,"height":360,"fps":10,"camera_keyframes":[{"at_seconds":0,"camera":{"position":[700,2300,270],"pitch_degrees":18.54,"yaw_degrees":26.565,"eye_height_units":0}},{"at_seconds":2,"camera":{"position":[900,2240,260],"pitch_degrees":17,"yaw_degrees":50,"eye_height_units":0}}]});
+    // a molotov on Dust II, seen along the way it flies and burns
+    let molotov = dust2_scene("molotov");
+    let args = json!({"scene":molotov,"start_seconds":0.0,"end_seconds":2.0,"width":640,"height":360,"fps":10,"camera_keyframes":[{"at_seconds":0,"camera":{"position":[-700,850,90],"pitch_degrees":10,"yaw_degrees":40,"eye_height_units":0}},{"at_seconds":2,"camera":{"position":[-650,700,90],"pitch_degrees":10,"yaw_degrees":60,"eye_height_units":0}}]});
     let started = client.ok(evidence, "video_render", args.clone()).await?;
     let job = started.structured_content.as_ref().unwrap()["job_id"]
         .as_str()
@@ -889,13 +860,13 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let probe: Value = serde_json::from_slice(&probe.stdout)?;
     let video = &probe["streams"][0];
     evidence.check(
-        "headless Molotov video decodes as twenty H.264 frames",
+        "headless video of a simulated molotov decodes as twenty H.264 frames",
         video["codec_name"] == "h264"
             && video["width"] == 640
             && video["height"] == 360
             && video["nb_read_frames"] == "20",
     )?;
-    let cancel_args = json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":30,"width":1280,"height":720,"fps":30});
+    let cancel_args = json!({"scene":molotov,"start_seconds":0,"end_seconds":30,"width":1280,"height":720,"fps":30});
     let pending = client.ok(evidence, "video_render", cancel_args).await?;
     let cancelled_id = pending.structured_content.as_ref().unwrap()["job_id"]
         .as_str()
@@ -962,7 +933,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
                 }),
     )?;
     let no_encoder = Client::start(config, "without-ffmpeg").await?;
-    let without = no_encoder.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":1,"width":320,"height":180,"fps":4})).await?;
+    let without = no_encoder.ok(evidence, "video_render", json!({"scene":molotov,"start_seconds":0,"end_seconds":1,"width":320,"height":180,"fps":4})).await?;
     let no_encoder_id = without.structured_content.as_ref().unwrap()["job_id"]
         .as_str()
         .context("no encoder job ID")?
@@ -991,36 +962,14 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
                 .is_some_and(|s| s.contains("install ffmpeg")),
     )?;
     no_encoder.disconnect().await?;
-    let lost = client.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":"missing-throw","start_seconds":0,"end_seconds":1,"width":320,"height":180,"fps":4})).await?;
-    let lost_id = lost.structured_content.as_ref().unwrap()["job_id"]
-        .as_str()
-        .context("missing throw job ID")?
-        .to_string();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(70);
-    let failure = loop {
-        let value = client
-            .ok(evidence, "video_status", json!({"job_id":lost_id}))
-            .await?
-            .structured_content
-            .unwrap();
-        if value["state"] != "running" {
-            break value;
-        }
-        ensure!(
-            tokio::time::Instant::now() < deadline,
-            "missing throw failed to resolve"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    evidence.check(
-        "unknown throw reports renderer failure",
-        failure["state"] == "failed"
-            && failure["error"]
-                .as_str()
-                .is_some_and(|s| s.contains("no throw")),
-    )?;
+    client
+        .error(evidence, "video_render", json!({"scene":{"map":"de_dust2","throws":[]},"start_seconds":0,"end_seconds":1}))
+        .await?;
+    client
+        .error(evidence, "video_render", json!({"scene":{"map":"de_dust2","throws":[{"grenade":"smoke","feet":[0,0,0],"pitch":95,"yaw":0}]},"start_seconds":0,"end_seconds":1}))
+        .await?;
     let disconnected = Client::start(config, "video-disconnect").await?;
-    let pending = disconnected.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":throw_id,"start_seconds":0,"end_seconds":30,"width":640,"height":360,"fps":30})).await?;
+    let pending = disconnected.ok(evidence, "video_render", json!({"scene":molotov,"start_seconds":0,"end_seconds":30,"width":640,"height":360,"fps":30})).await?;
     let lost_job = pending.structured_content.as_ref().unwrap()["job_id"]
         .as_str()
         .context("disconnect job ID")?
@@ -1142,20 +1091,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
         .error(evidence, "app_start", json!({"map":"de_mirage"}))
         .await?;
     let settled = client.settled_state(evidence).await?;
-    let smoke_list = client
-        .ok(
-            evidence,
-            "lineups_list",
-            json!({"map":"de_dust2","grenade":"smoke"}),
-        )
-        .await?;
-    let smoke_id = smoke_list.structured_content.as_ref().unwrap()["lineups"]
-        .as_array()
-        .and_then(|l| l.first())
-        .and_then(|l| l["throw_id"].as_str())
-        .context("Dust II smoke unavailable")?
-        .to_string();
-    let smoke = client.ok(evidence, "video_render", json!({"map":"de_dust2","throw_id":smoke_id,"start_seconds":1,"end_seconds":2,"width":320,"height":180,"fps":4})).await?;
+    let smoke = client.ok(evidence, "video_render", json!({"scene":dust2_scene("smoke"),"start_seconds":2,"end_seconds":3,"width":320,"height":180,"fps":4,"view":"orbit"})).await?;
     let smoke_job = smoke.structured_content.as_ref().unwrap()["job_id"]
         .as_str()
         .context("smoke job ID")?
@@ -1182,7 +1118,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     );
     let after_smoke = state(&client.ok(evidence, "app_status", json!({})).await?)?;
     evidence.check(
-        "fixed-camera smoke video preserves the live view",
+        "a headless smoke video preserves the live view",
         after_smoke.map == settled.map
             && after_smoke.camera == settled.camera
             && after_smoke.revision == settled.revision,
@@ -1417,6 +1353,8 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
                 .is_some_and(|ms| ms.is_finite() && ms >= 0.0),
     )?;
 
+    scene_journey(&client, evidence, &initial.instance_id).await?;
+
     let switched = client
         .ok(
             evidence,
@@ -1599,16 +1537,10 @@ async fn main() -> Result<()> {
         let sandbox = snapshot_binary(&config.sandbox, &sandbox_snapshot)?;
         config.server = server_snapshot;
         config.sandbox = sandbox_snapshot;
-        // the cs2-throws file the app reads (the first of NADES_SANDBOX_DATA), cloned; without one, map-only
-        let database_source = std::env::var_os("NADES_SANDBOX_DATA").and_then(|v| std::env::split_paths(&v).next()).unwrap_or_else(|| evidence.output.join("no-data.sqlite"));
-        let database_source = if database_source.is_absolute() { database_source } else { config.root.join(database_source) };
-        config.database = evidence.output.join("private-data/throws.sqlite");
-        evidence.private_database = Some(config.database.clone());
-        let database = isolate_database(&database_source, &config.database)?;
         fs::write(
             evidence.output.join("environment.json"),
             serde_json::to_vec_pretty(
-                &json!({"server":server,"sandbox":sandbox,"database":database,"packs":config.packs,"platform":std::env::consts::OS,"load_average":std::process::Command::new("sysctl").args(["-n","vm.loadavg"]).output().ok().map(|v| String::from_utf8_lossy(&v.stdout).trim().to_owned())}),
+                &json!({"server":server,"sandbox":sandbox,"packs":config.packs,"platform":std::env::consts::OS,"load_average":std::process::Command::new("sysctl").args(["-n","vm.loadavg"]).output().ok().map(|v| String::from_utf8_lossy(&v.stdout).trim().to_owned())}),
             )?,
         )?;
         verify(&config, &mut evidence).await
@@ -1628,40 +1560,20 @@ async fn main() -> Result<()> {
     }
 }
 
+/// A scene on Dust II with one `grenade` thrown up mid from its lower end.
+fn dust2_scene(grenade: &str) -> Value {
+    json!({"format":"nades-sandbox-scene","version":1,"map":"de_dust2","throws":[{"grenade":grenade,"feet":[-400.0,1000.0,-57.8],"pitch":-12.0,"yaw":60.0}]})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn apfs_database_clone_has_independent_contents() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source.duckdb");
-        let private = directory.path().join("private/nades.duckdb");
-        fs::write(&source, b"synthetic database copy fixture").unwrap();
-        let provenance = isolate_database(&source, &private).unwrap();
-        assert_eq!(provenance["status"], "cloned");
-        assert_eq!(
-            fs::read(&private).unwrap(),
-            b"synthetic database copy fixture"
-        );
-        fs::write(&private, b"changed only in the private clone").unwrap();
-        assert_eq!(
-            fs::read(&source).unwrap(),
-            b"synthetic database copy fixture"
-        );
-    }
-
-    #[test]
-    fn absent_database_uses_an_explicit_missing_private_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("absent.duckdb");
-        let private = directory.path().join("private/nades.duckdb");
-        let provenance = isolate_database(&source, &private).unwrap();
-        assert_eq!(provenance["status"], "missing");
-        assert_eq!(
-            provenance["private_path"],
-            serde_json::to_value(&private).unwrap()
-        );
-        assert!(!private.exists());
+    fn the_scenes_the_check_throws_are_scene_files() {
+        for grenade in ["smoke", "molotov"] {
+            let scene = nades_control::scene::Scene::parse(&dust2_scene(grenade).to_string()).unwrap();
+            assert_eq!((scene.map.as_str(), scene.throws.len()), ("de_dust2", 1));
+        }
     }
 }

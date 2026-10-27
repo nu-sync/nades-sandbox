@@ -1,4 +1,4 @@
-//! What the sandbox reopens on: the map and camera last shown, and each map's last camera, in
+//! What the sandbox reopens on: the map and camera last shown, each map's last camera and its scene, in
 //! `~/.cache/nades/sandbox/state.json` (`NADES_SANDBOX_STATE` names another file). The camera is kept so the first frame
 //! opens where the last run left off.
 
@@ -15,6 +15,9 @@ pub struct Remembered {
     /// Each map's last camera, so any map opened before opens where it was left.
     #[serde(default)]
     pub cameras: BTreeMap<String, Camera>,
+    /// Each map's scene, when it has throws.
+    #[serde(default)]
+    pub scenes: Vec<nades_control::scene::Scene>,
 }
 
 /// A CS2 camera: eye (Hammer units), pitch, yaw, vertical field of view (degrees).
@@ -60,7 +63,9 @@ mod tests {
     #[test]
     fn the_state_reads_back_as_written() {
         let cameras = BTreeMap::from([("de_cache".to_string(), ([9.0, 8.0, 7.0], 1.0, 2.0, 73.7))]);
-        let state = Remembered { map: "de_inferno".into(), camera: Some(([1.0, 2.0, 3.0], 4.0, 5.0, 73.7)), cameras };
+        let mut scene = nades_control::scene::Scene::new("de_inferno");
+        scene.throws.push(nades_control::scene::SceneThrow::new(nades_control::scene::Grenade::Molotov, [1.0, 2.0, 3.0], 10.0, 20.0));
+        let state = Remembered { map: "de_inferno".into(), camera: Some(([1.0, 2.0, 3.0], 4.0, 5.0, 73.7)), cameras, scenes: vec![scene] };
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<Remembered>(&json).unwrap(), state);
         // each map opens where it was left

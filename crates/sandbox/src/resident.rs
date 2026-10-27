@@ -193,11 +193,6 @@ impl Resident {
         self.loading.is_none() && self.queue.is_empty()
     }
 
-    /// `name`'s map, kept.
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut Map> {
-        self.kept.iter_mut().find(|k| k.name == name).map(|k| &mut k.map)
-    }
-
     /// Takes `name`'s map out to show it.
     pub fn take(&mut self, name: &str) -> Option<Map> {
         let at = self.kept.iter().position(|k| k.name == name)?;
