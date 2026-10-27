@@ -939,3 +939,68 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   the first frame. Offscreen renders of every grenade kind on de_mirage, de_dust2 and de_inferno, the window driven
   over app control through every view with the shell in the capture, and the MCP tools' tests. How right a flight or an
   effect is belongs to S32 (physics) and S33 (effects).
+
+
+## S32 · The grenade's physics, measured from recorded flights
+
+- **Decision:** `nades-physics` simulates CS2's throw tick by tick at 64 ticks a second, every rule measured from
+  recorded throws (show-me-the-nades' 247 demos, 116 k throws, through `nades export --cs2-throws`; never committed).
+  The bench is `cargo run --release -p nades-physics --example flight_check -- --throws <file>`; it replays each
+  recorded release through the map's collider and reports the landing error, the detonation time error, why each
+  flight that lands off parts from the game's, and the release from the recorded setup. `Model::CS2` holds the rules;
+  `fly_with` takes another `Model` (the bench's `--set key=value`), `fly` is `fly_with(Model::CS2)`.
+- **The release** (`release`): `v0 = forward(throw_pitch(pitch), yaw) · 675 · lerp(0.3, 1, strength) + 1.25 · v_player`,
+  let go at the eye (64 standing, 46 crouched) + 16 · forward − 12 · (1 − strength). The networked start
+  (`m_vInitialPosition`) is the step before the projectile's first tick: the first point is the start plus one tick's
+  move (median 0.012 units over 12 k throws). Walking is 127.4 u/s, running 245 (the recorded maxima). A jump-throw
+  lets go 0.107 s after take-off (from 3.4 k running jump-throws), 25.90 units higher standing (3.9 k, p10–p90
+  25.50–25.91) and 26.21 crouched, rising at 218.8 (221.9). Error against the recorded release, canonical setups (the
+  player's speed within 1 u/s of the movement's, moving along the view): jump-throw p0 0.01 median / 0.10 p90 and v0
+  0.01 / 0.26 (1 656 throws); standing 0.66 / 4.44 and 0.00 / 26.8 (4 459: about 3 % throw before the strength settles,
+  0.85–0.95); running 0.29 / 3.50 and 1.62 / 7.84; walking 0.23 / 1.95 and 0.86 / 8.38; running jump-throw 0.97 / 1.72
+  and 0.73 / 3.52. p0's tail is the eye: its mode is the model's, its median 0.4–0.7 units lower (view bob, crouch transitions).
+  A setup's movement carries no speed or direction of its own, so throws at other speeds are not modelled.
+- **The flight** (`fly`): gravity 320 (sv_gravity 800 × 0.4), applied half before and half after the move. The grenade
+  is a box ±2 units: it rests 2.03 above the collider's floor (median of 2.8 k smokes and decoys over 7 maps, the
+  0.03 being Source's 1/32 skin), and the collider being rays, the box is swept as its centre (stopped at the plane's
+  support distance) and its eight corners. A bounce reflects the velocity and keeps 0.45 of it (the mode of 11 k
+  floor bounces' kept speed; 0.43 and 0.47 are both worse on every grenade), then **goes on for the rest of the tick**
+  at the new velocity, walls too: 8 ticks after the first bounce the median error drops from 3.6–4.8 units (CS:GO's
+  rule, a wall ending the tick) to 0.15–0.53. A floor bounce (normal z > 0.7) slower than 20 u/s stops it. The
+  collider gives distances only; a surface's normal is the plane through the hit and two rays beside it, checked by a
+  third. Players are not in the collider.
+- **Going off:** a flash before tick 105's move (where tick 104 left it: 100 % of 6.4 k on the tick, median 0.0 units
+  off), an HE after it (100 %). A molotov or incendiary bursts when it touches a surface with normal z ≥ cos 30°
+  (`weapon_molotov_maxdetonateslope`; 0.7–0.93 are within noise), reported where that tick began (0.0 units in the
+  data), or in the air before tick 130's move; 78–80 % on the game's tick, 90 % within one. A smoke or decoy goes off
+  on its third still tick: on the smokes that come to rest within a unit of the game's, the median time error is 0
+  ticks (p10/p90 −3/+3). Detonation `t` is the event's tick; the path's last point is the detonation.
+- **Landing error** from the recorded release through the pack's collider, 1 000 throws per grenade and map (7 maps;
+  every decoy):
+  | grenade | n | median | p90 | ≤ 32 units |
+  |---|---:|---:|---:|---:|
+  | flash | 6 381 | 0.0 | 25.7 | 91 % |
+  | HE | 5 787 | 7.0 | 61.1 | 85 % |
+  | molotov | 5 311 | 0.7 | 106.0 | 81 % |
+  | incendiary | 5 554 | 0.6 | 63.0 | 84 % |
+  | smoke | 6 224 | 18.8 | 223.6 | 57 % |
+  | decoy | 138 | 18.2 | 306.8 | 57 % |
+  Free flight is exact (every networked point of the fixture's flights within 0.1 unit, positions being networked to
+  1/32).
+  Dust II and Mirage are the best maps (flash 95–97 % within 32, HE 93 %), Nuke and Cache the worst (flash 84–87 %).
+- **Why the rest land off** (where the flight first parts from the game's by 8 units; counts for flash / HE / fires /
+  smoke): **a different bounce normal** 366 / 415 / 847 / 1 378: both bounce at the same place but leave differently,
+  at an edge, a corner, a stair or a displacement, where the game's box touches what the rays miss or the collision
+  mesh is not the game's hull (Mirage's stairs have a ramp in the collider that the game's grenade passes through, as
+  it does player clips); **rolling** 61 / 125 / 542 / 662: small hops and slides drifting apart, since every bounce
+  multiplies an error of a fraction of a unit; **a surface the collider lacks** 123 / 224 / 387 / 371;
+  **a softer surface** 6 / 17 / 9 / 181 (the game kept under 0.36 of the speed: 5 % of Mirage's floor bounces keep
+  0.27, a material's own elasticity the collider does not carry); **a player** 10 / 56 / 77 / 60 (the game's turn
+  beside a living player, from the samples two a second); **an extra surface** 20 / 23 / 31 / 22. A smoke's 2–6 s
+  of bouncing and rolling make it the most sensitive; flashes, which rarely touch anything before 1.64 s, the least.
+- **CI:** `crates/physics/tests/fixture.json` keeps 146 recorded throws (derived numbers only: release, the networked
+  flight until it first turns every 8 ticks, the detonation, the setup, and this model's errors on them).
+  `tests/recorded.rs` checks free flight, the fuses and airbursts (24 throws on the game's tick, within 0.1 unit), the
+  release from 51 setups, and, where the packs are, every landing within its recorded error (skipped without them).
+- **Not done:** surface materials (the collider has none), players as obstacles, the game's own hull against the
+  collision mesh's edges, and subtick releases (the recorded start already carries them).

@@ -10,3 +10,9 @@ publish.workspace = true
 nades-scene.workspace = true
 glam.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+nades-config.workspace = true
+nades-pack.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
