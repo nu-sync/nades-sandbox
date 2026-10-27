@@ -192,6 +192,13 @@ impl Library {
         &self.demos
     }
 
+    /// A demo's rounds, in order.
+    pub fn rounds_of(&self, demo: &DemoId) -> Vec<&Round> {
+        let mut out: Vec<&Round> = self.rounds.values().filter(|r| &r.demo == demo).collect();
+        out.sort_by_key(|r| r.number);
+        out
+    }
+
     pub fn round_of(&self, throw: &Throw) -> Option<&Round> {
         self.rounds.get(&(throw.demo.clone(), throw.round?))
     }

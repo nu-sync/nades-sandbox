@@ -123,6 +123,28 @@ impl Meshes {
         }
     }
 
+    /// A replay's player: a body and a head in their side's colour, and a line from the eye where they look; dead, a
+    /// dark disc where they fell.
+    fn player(&mut self, p: &ReplayPlayer, alpha: f32) {
+        let feet = Vec3::from_array(p.origin);
+        let [r, g, b] = side_color(p.ct);
+        if !p.alive {
+            let squash = Mat4::from_scale(Vec3::new(1.0, 1.0, 0.18));
+            self.ellipsoid(feet + Vec3::Z * 2.0, 15.0, 0.0, squash, [r * 0.35, g * 0.35, b * 0.35, alpha], [0.0, 0.0]);
+            return;
+        }
+        let lift = if p.followed { 1.2 } else { 1.0 };
+        let colour = [r * lift, g * lift, b * lift, alpha];
+        self.ellipsoid(feet + Vec3::Z * 32.0, 12.0, 30.0, Mat4::IDENTITY, colour, [0.0, 0.0]);
+        let eye = feet + Vec3::Z * 64.0;
+        self.sphere(eye, 7.5, colour, [0.0, 0.0]);
+        let (pitch, yaw) = (p.pitch.to_radians(), p.yaw.to_radians());
+        let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
+        let tip = eye + forward * 46.0;
+        self.tube(&[eye + forward * 6.0, tip], 1.6, 6, [1.0, 1.0, 1.0, alpha], [0.0, 0.0]);
+        self.sphere(tip, 2.6, [1.0, 1.0, 1.0, alpha], [0.0, 0.0]);
+    }
+
     fn sphere(&mut self, centre: Vec3, radius: f32, color: [f32; 4], params: [f32; 2]) {
         self.ellipsoid(centre, radius, 0.0, Mat4::IDENTITY, color, params);
     }
@@ -371,6 +393,30 @@ pub struct ThrowLayer {
     pub toward_sun: Vec3,
     /// Seconds after detonation of the moment written last: before it, only the grenade flies, not its tube.
     time: f64,
+    /// A replay's incendiaries: their own frame values and flipbooks, beside the molotovs the main group binds.
+    second: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    second_sprites: Option<(wgpu::Buffer, u32)>,
+    /// A replay's living players again, faint, where walls hide them.
+    ghosts: Option<(wgpu::Buffer, u32)>,
+}
+
+/// One player in a replay's moment, in Hammer units.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplayPlayer {
+    /// The pawn's origin (its feet).
+    pub origin: [f32; 3],
+    /// `m_angEyeAngles`, degrees, pitch positive looking down.
+    pub pitch: f32,
+    pub yaw: f32,
+    pub ct: bool,
+    pub alive: bool,
+    /// The followed player: drawn brighter.
+    pub followed: bool,
+}
+
+/// The sides' colours in a replay: T gold, CT blue.
+pub fn side_color(ct: bool) -> [f32; 3] {
+    if ct { [0.06, 0.24, 1.0] } else { [1.0, 0.55, 0.04] }
 }
 
 /// The throw's draws read the scene's depth through this, one per frame size.
@@ -512,6 +558,9 @@ impl ThrowLayer {
             flight_visible: false,
             toward_sun: Vec3::Z,
             time: 0.0,
+            second: None,
+            second_sprites: None,
+            ghosts: None,
         }
     }
 
@@ -560,6 +609,16 @@ impl ThrowLayer {
     /// Binds the shown fire's three flipbooks (or the blank one).
     fn rebind(&mut self, device: &wgpu::Device) {
         let kind = self.shown.as_ref().and_then(|s| s.fire.as_ref()).map_or(FireKind::Molotov, |(f, _)| f.kind);
+        self.group = self.group_for(device, &self.frame, kind);
+        // the incendiaries' group follows the books too
+        if let Some((frame, _)) = self.second.take() {
+            let group = self.group_for(device, &frame, FireKind::Incendiary);
+            self.second = Some((frame, group));
+        }
+    }
+
+    /// A group over `frame` binding `kind`'s three flipbooks (or the blank one).
+    fn group_for(&self, device: &wgpu::Device, frame: &wgpu::Buffer, kind: FireKind) -> wgpu::BindGroup {
         let blank;
         let views: [&wgpu::TextureView; 3] = match &self.books {
             Some(GpuBooks { views, layout }) => {
@@ -572,11 +631,15 @@ impl ThrowLayer {
                 [&blank, &blank, &blank]
             }
         };
-        self.group = Self::bind(device, &self.group_layout, &self.frame, &self.noise, &self.palette, views, &self.repeated, &self.clamped);
+        Self::bind(device, &self.group_layout, frame, &self.noise, &self.palette, views, &self.repeated, &self.clamped)
     }
 
     /// Builds what `stage` shows that does not move: the flight's tube and marks, the blind lines; and readies its fire.
     pub fn set_stage(&mut self, device: &wgpu::Device, stage: Option<&Stage>) {
+        // after a replay, its players and fires go
+        if self.second_sprites.as_ref().is_some_and(|(_, n)| *n > 0) {
+            self.second_sprites = self.second_sprites.take().map(|(b, _)| (b, 0));
+        }
         let Some(stage) = stage else {
             self.shown = None;
             return;
@@ -627,10 +690,9 @@ impl ThrowLayer {
         self.rebind(device);
     }
 
-    /// Writes what the shown stage looks like `t` seconds after detonation, from `view` into targets of `size`.
-    pub fn set_time(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stage: Option<&Stage>, t: f64, view: &View, size: (u32, u32)) {
+    /// The frame's values for the throw's shaders, the fire's flipbooks being `kind`'s.
+    fn uniform(&self, t: f64, view: &View, size: (u32, u32), kind: Option<FireKind>) -> FrameUniform {
         let toward_sun = self.toward_sun;
-        self.time = t;
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let s2s = source_to_scene();
         // the camera in Hammer units: the scene's view, scaled back to inches
@@ -638,14 +700,13 @@ impl ThrowLayer {
         let projection_h = view.projection(aspect) * Mat4::from_scale(Vec3::splat(INCH));
         let eye = to_source_dir(view.eye) / INCH;
         let books = self.books.as_ref().map(|b| b.layout.clone());
-        let kind = self.shown.as_ref().and_then(|s| s.fire.as_ref()).map(|(f, _)| f.kind);
         let grid = |k: usize| -> (f32, f32) {
             let (Some(layout), Some(kind)) = (&books, kind) else { return (1.0, 1.0) };
             let name = fire::books(kind)[k];
             layout.iter().find(|(n, _, _)| n == name).map_or((1.0, 1.0), |(_, g, _)| (g.0 as f32, g.1 as f32))
         };
         let (g0, g1, g2) = (grid(0), grid(1), grid(2));
-        let uniform = FrameUniform {
+        FrameUniform {
             view_proj: (view.view_proj(aspect) * s2s).to_cols_array(),
             view: view_h.to_cols_array(),
             projection: projection_h.to_cols_array(),
@@ -655,7 +716,16 @@ impl ThrowLayer {
             flip: [if self.books.is_some() && kind.is_some() { 1.0 } else { 0.0 }, fire::Gradient::Film.row(), 0.0, 0.0],
             grid: [g0.0, g0.1, g1.0, g1.1],
             grid2: [g2.0, g2.1, 0.0, 0.0],
-        };
+        }
+    }
+
+    /// Writes what the shown stage looks like `t` seconds after detonation, from `view` into targets of `size`.
+    pub fn set_time(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stage: Option<&Stage>, t: f64, view: &View, size: (u32, u32)) {
+        self.time = t;
+        self.second_sprites = self.second_sprites.take().map(|(b, _)| (b, 0));
+        self.ghosts = self.ghosts.take().map(|(b, _)| (b, 0));
+        let kind = self.shown.as_ref().and_then(|s| s.fire.as_ref()).map(|(f, _)| f.kind);
+        let uniform = self.uniform(t, view, size, kind);
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&uniform));
 
         // the grenade in flight, before it goes off
@@ -697,30 +767,98 @@ impl ThrowLayer {
         self.patches = upload(device, queue, self.patches.take(), "fire ground", &patches);
     }
 
+    /// A replay's moment: every player, and each throw still showing with its stage's own time (seconds after its
+    /// detonation): the grenade while it flies, its burst, its fire. Nothing of a single shown stage stays.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_replay(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, moment: &[(&Stage, f64)], players: &[ReplayPlayer], view: &View, size: (u32, u32)) {
+        if self.shown.is_some() {
+            self.shown = None;
+            // the main group binds the molotov's flipbooks
+            self.rebind(device);
+        }
+        self.time = 0.0;
+        self.flight_visible = false;
+        self.ghosts = self.ghosts.take().map(|(b, _)| (b, 0));
+        queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&self.uniform(0.0, view, size, Some(FireKind::Molotov))));
+
+        let mut moving = Meshes::default();
+        let mut ghosts = Meshes::default();
+        for p in players {
+            moving.player(p, 1.0);
+            if p.alive {
+                ghosts.player(p, 0.35);
+            }
+        }
+        self.ghosts = upload(device, queue, self.ghosts.take(), "replay players behind walls", &ghosts.vertices);
+        let mut glows = Vec::new();
+        let (mut molotov, mut incendiary, mut patches) = (Vec::new(), Vec::new(), Vec::new());
+        for (stage, t) in moment {
+            let t = *t;
+            if t < 0.0
+                && let Some((at, spin)) = stage.flight.as_ref().and_then(|f| f.grenade_at(t))
+            {
+                let turn = Mat4::from_quat(glam::Quat::from_xyzw(spin.x as f32, spin.y as f32, spin.z as f32, spin.w as f32));
+                moving.ellipsoid(v3(at), 1.7 * 1.6, 2.2 * 1.6, turn, rgba(nade_color(stage.grenade), 1.0), [1.0, 0.0]);
+            }
+            if let Some(burst) = stage.burst {
+                let on = burst.on(t) as f32;
+                if on > 0.0 {
+                    let (size, color) = if burst.flash { (260.0, [3.2, 3.2, 3.6]) } else { (300.0, [3.0, 1.2, 0.35]) };
+                    glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, size], color: [color[0], color[1], color[2], on] });
+                }
+            }
+            if let Some(f) = &stage.fire {
+                let sequences = Self::sequences_of(self.books.as_ref(), f.kind);
+                let sprites = fire::instances(f.kind, &f.sprites_at(t), sequences.as_ref())
+                    .into_iter()
+                    .map(|i| SpriteInstance { pos: [i.pos[0], i.pos[1], i.pos[2], 0.0], shape: i.shape, look: i.look, colour: i.colour, tone: i.tone, book: i.book });
+                if f.kind == FireKind::Incendiary { incendiary.extend(sprites) } else { molotov.extend(sprites) }
+                patches.extend(f.patches_at(t).into_iter().map(|p| PatchInstance { pos: [p.pos[0] as f32, p.pos[1] as f32, p.pos[2] as f32, 0.0], normal: [p.normal[0] as f32, p.normal[1] as f32, p.normal[2] as f32, 0.0], data: [p.radius as f32, p.glow as f32, p.scorch as f32, p.seed as f32] }));
+            }
+        }
+        self.moving = upload(device, queue, self.moving.take(), "replay meshes", &moving.vertices);
+        self.glows = upload(device, queue, self.glows.take(), "bursts", &glows);
+        self.sprites = upload(device, queue, self.sprites.take(), "fire sprites", &molotov);
+        self.patches = upload(device, queue, self.patches.take(), "fire ground", &patches);
+        if !incendiary.is_empty() && self.second.is_none() {
+            let frame = device.create_buffer(&wgpu::BufferDescriptor { label: Some("throw frame (incendiary)"), size: std::mem::size_of::<FrameUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let group = self.group_for(device, &frame, FireKind::Incendiary);
+            self.second = Some((frame, group));
+        }
+        if let Some((frame, _)) = &self.second {
+            queue.write_buffer(frame, 0, bytemuck::bytes_of(&self.uniform(0.0, view, size, Some(FireKind::Incendiary))));
+        }
+        self.second_sprites = upload(device, queue, self.second_sprites.take(), "fire sprites (incendiary)", &incendiary);
+    }
+
     /// The draws in the map's pass, over its depth: marks and the grenade, the tube, the bursts, then what draws over
     /// everything (the tube's faint copy, the blind lines).
     pub fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.group, &[]);
         // the flight's tube and marks show once it has gone off (render/effects.ts): before, the grenade flies alone
         let flight = self.flight_visible && self.time >= 0.0;
-        if let Some(shown) = &self.shown
-            && let Some(meshes) = &shown.meshes
+        let meshes = self.shown.as_ref().and_then(|s| Some((s, s.meshes.as_ref()?)));
+        if let Some((shown, meshes)) = meshes
+            && flight
+            && !shown.opaque.is_empty()
         {
+            pass.set_pipeline(&self.mesh_opaque);
             pass.set_vertex_buffer(0, meshes.slice(..));
-            if flight && !shown.opaque.is_empty() {
-                pass.set_pipeline(&self.mesh_opaque);
-                pass.draw(shown.opaque.clone(), 0..1);
-            }
-            if let Some((buffer, count)) = self.moving.as_ref().filter(|(_, n)| *n > 0) {
-                pass.set_pipeline(&self.mesh_opaque);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..*count, 0..1);
-                pass.set_vertex_buffer(0, meshes.slice(..));
-            }
-            if flight && !shown.tube.is_empty() {
-                pass.set_pipeline(&self.mesh_tube);
-                pass.draw(shown.tube.clone(), 0..1);
-            }
+            pass.draw(shown.opaque.clone(), 0..1);
+        }
+        // the grenade in flight, and a replay's players
+        if let Some((buffer, count)) = self.moving.as_ref().filter(|(_, n)| *n > 0) {
+            pass.set_pipeline(&self.mesh_opaque);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..*count, 0..1);
+        }
+        if let Some((shown, meshes)) = meshes
+            && flight
+            && !shown.tube.is_empty()
+        {
+            pass.set_pipeline(&self.mesh_tube);
+            pass.set_vertex_buffer(0, meshes.slice(..));
+            pass.draw(shown.tube.clone(), 0..1);
         }
         if let Some((buffer, count)) = self.glows.as_ref().filter(|(_, n)| *n > 0) {
             pass.set_pipeline(&self.glow);
@@ -742,11 +880,16 @@ impl ThrowLayer {
                 pass.draw(lines, 0..1);
             }
         }
+        if let Some((buffer, count)) = self.ghosts.as_ref().filter(|(_, n)| *n > 0) {
+            pass.set_pipeline(&self.mesh_overlay);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..*count, 0..1);
+        }
     }
 
     /// Whether the effects pass has anything of the throw's to draw.
     pub fn has_effects(&self) -> bool {
-        self.sprites.as_ref().is_some_and(|(_, n)| *n > 0) || self.patches.as_ref().is_some_and(|(_, n)| *n > 0)
+        [&self.sprites, &self.patches, &self.second_sprites].iter().any(|b| b.as_ref().is_some_and(|(_, n)| *n > 0))
     }
 
     /// The draws in the effects pass, which read the scene's depth: the fire's ground, then its sprites.
@@ -759,6 +902,13 @@ impl ThrowLayer {
             pass.draw(0..6, 0..*count);
         }
         if let Some((buffer, count)) = self.sprites.as_ref().filter(|(_, n)| *n > 0) {
+            pass.set_pipeline(&self.sprite);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..*count);
+        }
+        // a replay's incendiaries, with their own flipbooks
+        if let (Some((buffer, count)), Some((_, group))) = (self.second_sprites.as_ref().filter(|(_, n)| *n > 0), &self.second) {
+            pass.set_bind_group(0, group, &[]);
             pass.set_pipeline(&self.sprite);
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..6, 0..*count);

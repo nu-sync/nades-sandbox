@@ -87,6 +87,20 @@ Render one frame from a CS2 console camera or a throw's view, or print the start
 ./target/release/nades-sandbox --exit-after-first-frame
 ```
 
+Replay a round: in the window, **Replay** in the top bar picks a demo and a round, plays it with every player and
+grenade, and follows a player through their eyes or from behind (space plays, ←/→ jump 5 s, esc goes back to the
+lineups; each throw in the list opens its lineup view). Offscreen, a moment as a PNG with its facts beside it as JSON,
+or the frames timed:
+
+```sh
+./target/release/nades-sandbox --data match.dem --replay match --round 16 --time 28.5 --replay-camera chase:ropz --render r16.png
+./target/release/nades-sandbox --data match.dem --replay match --round 16 --time 5 --bench-replay 600 --size 1444x1420
+python3 bench/replay_check.py --data <cs2-throws files>   # players and effects drawn where the facts put them
+```
+
+`--replay` names a demo by its id, the id's start or its file's name; `--replay-camera` is `overview` (the default),
+`top`, a player's name (their eyes) or `chase:<player>`.
+
 Check the views and the effects against show-me-the-nades' web view. Both read a clone of its database, the sandbox
 through the clone's cs2-throws export; the checkout is named, never assumed:
 

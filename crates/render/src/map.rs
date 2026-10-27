@@ -701,8 +701,13 @@ impl Map {
             self.throw.draw_scene(&mut pass);
         }
         self.effects_pass(encoder, targets, &self.map_frame.1, &self.map_effects, true);
-        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if effects.smoke.is_some() { effects.accumulated } else { 0 });
+        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if effects.smoke.is_some() || self.composite.replaying() { effects.accumulated } else { 0 }, view);
         self.post.encode(encoder, &targets.post);
+    }
+
+    /// Readies the composite's targets for a replay's clouds at `targets`' size.
+    pub fn ready_replay(&mut self, device: &wgpu::Device, targets: &Targets) {
+        self.composite.ready_targets(device, targets.size(), &targets.depth);
     }
 
     /// The present pass's draw, into a pass on the output.

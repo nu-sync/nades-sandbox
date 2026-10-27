@@ -204,6 +204,8 @@ pub struct Stage {
     pub result_time: f64,
     pub duration: f64,
     pub release_time: f64,
+    /// The tick it went off: its time 0 (a replay's clock for it).
+    pub detonate_tick: i32,
     /// What the stage could not draw, said plainly (e.g. a throw ingested before tracks existed).
     pub missing: Vec<&'static str>,
 }
@@ -328,6 +330,7 @@ pub fn build_stage(t: &Throw, tracks: &Tracks, d: &Derived) -> Stage {
         result_time,
         duration,
         release_time: -f64::from(d.airtime.unwrap_or(1.0)).max(0.2),
+        detonate_tick: goes_off(t, d),
         missing,
     }
 }

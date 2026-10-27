@@ -14,6 +14,8 @@ use crate::tracks::{self, Flame, InfernoKeys, PathPoint, SmokeKeys, SmokeVoxels}
 
 /// Ticks between player samples: two a second at 64 ticks.
 pub const SAMPLE_EVERY: i32 = 32;
+/// Ticks between replay track points (docs/decisions.md S30).
+pub const TRACK_EVERY: i32 = 4;
 const ORIGIN: &str = "CBodyComponent.m_skeletonInstance.m_vecOrigin";
 const PAWN: &str = "CCSPlayerPawn";
 const CONTROLLER: &str = "CCSPlayerController";
@@ -41,6 +43,21 @@ pub struct Facts {
     pub throws: Vec<ThrowFact>,
     pub blinds: Vec<BlindFact>,
     pub samples: Vec<SampleFact>,
+    /// Players at [`Options::track_every`]'s rate, for replays (no places).
+    pub tracks: Vec<SampleFact>,
+}
+
+/// What a read keeps beyond the facts every file has.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// Ticks between replay track points (0: none).
+    pub track_every: i32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { track_every: TRACK_EVERY }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,9 +305,9 @@ fn round_at(rounds: &[Round], tick: i32) -> Option<&Round> {
     rounds.iter().filter(|r| !r.is_knife_round && round_start(r) <= tick).max_by_key(|r| round_start(r))
 }
 
-/// Whether a sample is due at `tick`: `SAMPLE_EVERY` ticks after the last, which survives skipped and repeated ticks.
-fn sample_due(last: &mut Option<i32>, tick: i32) -> bool {
-    if tick < 0 || last.is_some_and(|last| tick.saturating_sub(last) < SAMPLE_EVERY) {
+/// Whether a sample is due at `tick`: `every` ticks after the last, which survives skipped and repeated ticks.
+fn sample_due(last: &mut Option<i32>, tick: i32, every: i32) -> bool {
+    if every <= 0 || tick < 0 || last.is_some_and(|last| tick.saturating_sub(last) < every) {
         return false;
     }
     *last = Some(tick);
@@ -317,8 +334,13 @@ fn live_samples(mut samples: Vec<SampleFact>, rounds: &[Round]) -> Vec<SampleFac
     samples
 }
 
-/// Reads `path`. `progress` hears the share done, 0 to 1.
+/// Reads `path` with the default [`Options`]. `progress` hears the share done, 0 to 1.
 pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
+    extract_with(path, Options::default(), progress)
+}
+
+/// Reads `path`. `progress` hears the share done, 0 to 1.
+pub fn extract_with(path: &Path, options: Options, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
     let parser = Parser::from_file(path).with_context(|| format!("opening {}", path.display()))?;
     let header = parser.file_header().with_context(|| format!("reading {}'s header", path.display()))?;
     let map = header.map_name.clone().filter(|m| !m.is_empty()).with_context(|| format!("{} names no map", path.display()))?;
@@ -340,6 +362,8 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
     let mut throws: Vec<ThrowFact> = vec![];
     let mut samples = vec![];
     let mut last_sample = None;
+    let mut last_track = None;
+    let mut tracks = vec![];
     let mut reported = 0;
 
     // The entity pass is most of the work: 0 to 0.7.
@@ -351,7 +375,8 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
             reported = tick;
             progress(0.7 * (tick as f32 / total as f32).clamp(0.0, 1.0));
         }
-        let sample = sample_due(&mut last_sample, tick);
+        let sample = sample_due(&mut last_sample, tick, SAMPLE_EVERY);
+        let track = sample_due(&mut last_track, tick, options.track_every);
         for (_, e) in ctx.entities().iter() {
             if !e.active {
                 continue;
@@ -379,7 +404,7 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
                     if uint(get(e, k.ground)).is_some_and(|g| g as u32 != INVALID_ENTITY_HANDLE) {
                         last_ground.insert(e.index, pos);
                     }
-                    if !sample {
+                    if !sample && !track {
                         continue;
                     }
                     let Some(pos) = finite(pos) else { continue };
@@ -396,7 +421,7 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
                     }
                     let Some(ck) = ctrl_keys.as_ref() else { continue };
                     let Some(steamid) = uint(get(c, ck.steamid)).filter(|id| *id != 0) else { continue };
-                    samples.push(SampleFact {
+                    let fact = SampleFact {
                         tick,
                         steamid,
                         player: text(get(c, ck.name)),
@@ -405,8 +430,14 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
                         eye: vec3(get(e, k.eye)).and_then(finite),
                         duck: num(get(e, k.duck)).map(|d| d as f32).filter(|d| d.is_finite()),
                         alive: life == 0.0 && health > 0.0,
-                        place: text(get(e, k.place)),
-                    });
+                        place: None,
+                    };
+                    if track {
+                        tracks.push(fact.clone());
+                    }
+                    if sample {
+                        samples.push(SampleFact { place: text(get(e, k.place)), ..fact });
+                    }
                 }
                 _ => {}
             }
@@ -614,7 +645,7 @@ pub fn extract(path: &Path, progress: &mut dyn FnMut(f32)) -> Result<Facts> {
         }
     }
     progress(1.0);
-    Ok(Facts { map, rounds: round_facts, throws, blinds, samples: live_samples(samples, &rounds) })
+    Ok(Facts { map, rounds: round_facts, throws, blinds, samples: live_samples(samples, &rounds), tracks: live_samples(tracks, &rounds) })
 }
 
 #[cfg(test)]
@@ -643,7 +674,7 @@ mod tests {
     #[test]
     fn samples_are_due_every_32_ticks_through_skipped_and_repeated_ticks() {
         let mut last = None;
-        let due: Vec<_> = [-32, 0, 0, 31, 33, 64, 65, 99, 100, 163].into_iter().filter(|&tick| sample_due(&mut last, tick)).collect();
+        let due: Vec<_> = [-32, 0, 0, 31, 33, 64, 65, 99, 100, 163].into_iter().filter(|&tick| sample_due(&mut last, tick, SAMPLE_EVERY)).collect();
         assert_eq!(due, [0, 33, 65, 99, 163]);
     }
 

@@ -78,6 +78,7 @@ fn facts() -> Facts {
         throws: vec![smoke, fire, flash, sideless],
         blinds: vec![BlindFact { throw: 2, player: Some("Brollan".into()), steamid: Some(76561198000000003), side: Some("CT"), pos: Some([-600.0, 10.0, 1613.0]), seconds: 2.5 }],
         samples: vec![sample(2784, 76561198000000003, "Brollan", "CT", true), sample(2784, 76561198113666193, "ZywOo", "T", true), sample(2816, 76561198000000003, "Brollan", "CT", false)],
+        tracks: [1000, 1004, 1008, 1012].into_iter().map(|tick| sample(tick, 76561198000000003, "Brollan", "CT", tick < 1012)).collect(),
     }
 }
 
@@ -97,7 +98,7 @@ fn the_written_facts_read_back_as_they_were() {
     assert!(report.errors.is_empty() && report.warnings.is_empty(), "{:?} {:?}", report.errors, report.warnings);
     assert!(report.meta.contains(&("producer".into(), nades_source_demo::PRODUCER.into())));
     let c = report.census;
-    assert_eq!((c.demos, c.throws, c.blinds, c.samples, c.smokes_with_voxels, c.fires_with_flames, c.airborne_with_takeoff), (1, 3, 1, 3, 1, 1, 1), "the throw without a side is left out");
+    assert_eq!((c.demos, c.throws, c.blinds, c.samples, c.smokes_with_voxels, c.fires_with_flames, c.airborne_with_takeoff, c.demos_with_tracks), (1, 3, 1, 3, 1, 1, 1, 1), "the throw without a side is left out");
 
     let source = FileSource::open(&[file]).unwrap();
     let facts = source.map(&MapName("de_cache".into())).unwrap();
@@ -123,6 +124,14 @@ fn the_written_facts_read_back_as_they_were() {
     let samples = source.samples(&DemoId(SHA.into()), Tick(0)..=Tick(10_000)).unwrap();
     assert_eq!(samples.iter().map(|s| (s.tick.0, s.player.name.as_deref().unwrap(), s.alive, s.duck)).collect::<Vec<_>>(), [(2784, "Brollan", true, Some(0.25)), (2784, "ZywOo", true, Some(0.25)), (2816, "Brollan", false, Some(0.25))]);
     assert_eq!(source.places(&MapName("de_cache".into())).unwrap().len(), 2, "the living samples' places");
+
+    // the replay's track: alive points until the tick they died
+    let tracks = source.player_tracks(&DemoId(SHA.into()), 1).unwrap();
+    assert_eq!(tracks.len(), 1);
+    let t = &tracks[0];
+    assert_eq!((t.player.name.as_deref(), t.side.name(), t.died, t.points.iter().map(|p| p.tick.0).collect::<Vec<_>>()), (Some("Brollan"), "CT", Some(Tick(1012)), vec![1000, 1004, 1008]));
+    assert_eq!((t.points[0].origin, t.points[0].pitch, t.points[0].yaw), ([-1800.5, 250.25, 1613.0], 4.5, 90.0));
+    assert!(source.player_tracks(&DemoId(SHA.into()), 2).unwrap().is_empty());
 }
 
 #[test]

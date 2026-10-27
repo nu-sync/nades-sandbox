@@ -30,6 +30,8 @@ pub struct Census {
     pub blinds: u64,
     pub samples: u64,
     pub samples_with_place: u64,
+    /// Demos with replay tracks (`player_tracks`).
+    pub demos_with_tracks: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +118,12 @@ pub fn table(c: &Census) -> Vec<Feature> {
             note: (c.samples > 0).then(|| format!("{} of {} samples name their place", c.samples_with_place, c.samples)),
         },
         Feature { name: "round-time and after-plant filters", status: Status::of(c.demos_with_rounds, c.demos), needs: "rounds", note: missing("rounds", c.demos_with_rounds, c.demos, "demos") },
+        Feature {
+            name: "the replay's players, smooth",
+            status: Status::of(c.demos_with_tracks, c.demos_with_rounds),
+            needs: "player tracks (2.1)",
+            note: (c.demos_with_tracks < c.demos_with_rounds).then(|| format!("{} without them replay from the samples, two a second", count(c.demos_with_rounds - c.demos_with_tracks, "demos"))),
+        },
         Feature { name: "one player across name changes", status: Status::of(c.with_steamid, c.throws), needs: "Steam ids", note: missing("a Steam id", c.with_steamid, c.throws, "throws") },
     ]
 }
@@ -139,7 +147,7 @@ mod tests {
         assert_eq!(status("the opponent's view"), Status::Off);
         assert_eq!(status("landing callouts"), Status::Off);
         assert_eq!(status("round-time"), Status::On);
-        assert_eq!(t.len(), 11);
+        assert_eq!(t.len(), 12);
         assert_eq!((count(1, "demos"), count(2, "demos"), count(1, "throws released in the air")), ("1 demo".into(), "2 demos".into(), "1 throw released in the air".to_string()));
     }
 }

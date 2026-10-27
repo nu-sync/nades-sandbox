@@ -847,3 +847,57 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   - `bench/realism.py --note "geometry export made by nades-pack (U3b)"` on the rebuilt packs: headline 5.3 / 10.3 /
     6.2, as before; 5 of 7 renders byte for byte the last run's (`.runs/realism-20261026-232937`).
 ||||||| dd73944
+||||||| b5eebce
+
+## S30 · M5, the replay: tracks 16 a second, every effect at its own time
+
+- **Decision:** a round replays from cs2-throws 2.1's optional `player_tracks`: one row per player and round, the
+  points while alive as a blob (i32 tick, f32 x, y, z, pitch, yaw), and the tick they died. The demo reader writes them
+  16 a second (every 4 ticks); a file without them, or a player without one, replays from the samples (two a second).
+  Between points a player moves in a straight line and turns the short way round; points further apart than 96 ticks
+  are not joined; a dead player lies where they last stood (`nades_model::replay`). Each throw keeps its stage's own
+  clock, seconds after it went off (`Stage::detonate_tick`), so a moment is every stage still showing at its own time:
+  the grenade while it flies, its burst, its fire, its smoke.
+- **Why 16 a second** (`replay_measure` on two demos, every player at every tick of their live rounds: 937 k and
+  1.01 M points, no tick missing): linear interpolation's error against every tick, and the bytes per demo.
+  | every | position p99 / max | view p99 / max | rows | blobs |
+  |---|---|---|---:|---:|
+  | 32 ticks (the samples) | 24.6–25.4 / 61–72 units | 54–57° / 180° | 1.7–1.9 MB | 1.2–1.5 MB |
+  | 16 | 9.4–10.3 / 31–32 | 29–31° / 180° | 3.4–3.6 | 2.8–2.9 |
+  | 8 | 3.2–3.9 / 18–20 | 11–12° / 41–55° | 6.7–7.3 | 3.8–4.0 |
+  | **4** | **0.9–1.3 / 13** | **3.4–3.7° / 19–24°** | 13.4–14.5 | **6.0–6.5** |
+  | 2 | 0.2 / 9–13 | 0.9–1.0° / 8–10° | 26.7–28.9 | 10.8–11.6 |
+  The samples alone swing a view line up to 180° between points; at 4 ticks the worst position is 13 units and the
+  99th percentile view 3.7°. A blob per player and round is half the size of rows. Written with the tick per point:
+  7.6 MB a demo (45.6 MB for six), files of 10–15 MB where they were 3.5.
+- **Drawing it:** the throw layer's `set_replay` draws a moment: each player as a body, a head and a white line where
+  they look, in their side's colour (T gold, CT blue), again faint where walls hide them, and dark on the floor when
+  dead; every grenade in flight; every burst; every fire's ground and sprites, an incendiary's with its own flipbooks
+  through a second bind group. The composite draws several smokes: each cloud has its own volume and values, one pass
+  each, farthest first, through two targets of the frame's size; a single cloud (every lineup view) takes the old path.
+  The brightest burst or fire lights the map.
+- **The window:** **Replay** in the top bar: a demo, its rounds, the round's throws (one jumps there, its *view* opens
+  that throw's lineup view, not its lineup's example); play, pause, scrub, ¼–4×; the free camera starts over the living
+  players and the fly keys take it; a player's eyes or a camera behind them. The round is read on a thread of its own
+  (its smokes lit against the collider).
+- **Evidence** (`.runs/replay-20261026-234609`, the ESL Pro League S24 demos read by the demo reader):
+  - `bench/replay_check.py`: 11 moments on de_cache, de_inferno, de_mirage and de_dust2, from above, slanted and
+    behind a player, each rendered four times (everything, the players, the throws, the bare map). Every living player
+    in view drew pixels where their track puts them (72 of 72) and changed the picture toward their side's colour
+    (72 of 72); every dead player in view shows (4 of 4). Of the 45 live smokes, fires and grenades in flight in view,
+    21 drew at their point; the rest are behind walls or roofs, a grenade a pixel wide, or a smoke a second old (the
+    pictures show which). The same run on show-me-the-nades' 2.0 export (players from the samples): 74 of 74
+    (`.runs/replay-20261026-235125`).
+  - Frames (`--bench-replay 600`, de_cache round 16 from 5 s, 1444×1420, each finished on the GPU): median 4.46 ms
+    from above, 3.94 behind a player, 3.89 through their eyes; p95 4.24–5.18, worst 5.3–7.6; the moment's set-up on the
+    CPU 0.50–0.58 ms (load 7.8).
+  - Nothing else changed: the bare map's frame 3.45 ms on this build and on U2's (`--bench-offscreen 300`, alternated);
+    three lineup views (a smoke, an incendiary, a flash) rendered by both builds are the same image (the smoke's
+    differs in 11 of 2.2 M bytes, as two runs of one build do). The first frame's path gains nothing: the new state is
+    empty until a replay opens.
+  - The window's flow without a window: `a_round_is_replayed_followed_and_left_for_a_throws_lineup_view` opens the
+    replay, reads a round, plays it at half speed, follows a player's eyes, sees him dead, and opens a throw's lineup
+    view.
+- **Not checked:** the replay in the window by hand (the screen was locked overnight): the shell's panels, the fly
+  camera taking over, the windowed frame time. Overlapping smokes are composited in turn, not in one march, so where two
+  clouds interpenetrate the nearer simply covers the farther.

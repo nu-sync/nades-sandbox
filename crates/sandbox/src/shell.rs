@@ -4,7 +4,7 @@
 
 use std::ops::Range;
 
-use nades_model::{Grenade, Library as MapLibrary, Lineup, LineupId, LineupQuery, Side};
+use nades_model::{DemoId, Grenade, Library as MapLibrary, Lineup, LineupId, LineupQuery, Side, ThrowId};
 use nades_scene::camera::Source;
 use nades_scene::stage::ViewMode;
 
@@ -40,6 +40,47 @@ pub enum Action {
     Time(f64),
     Play(bool),
     Copy(String),
+    Replay(ReplayAction),
+}
+
+/// What the replay's controls ask for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplayAction {
+    Open,
+    Close,
+    Demo(DemoId),
+    Round(u32),
+    Play(bool),
+    /// Seconds into the round.
+    Seek(f64),
+    Speed(f64),
+    /// The player a camera follows (by track), or the free camera.
+    Follow(Option<usize>),
+    /// Behind the followed player rather than through their eyes.
+    Chase(bool),
+    /// The lineup view of a throw in the round.
+    Lineup(ThrowId),
+}
+
+/// What the shell shows of the replay.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayStatus {
+    pub demos: Vec<(DemoId, String)>,
+    pub demo: Option<DemoId>,
+    pub rounds: Vec<(u32, String)>,
+    pub round: Option<u32>,
+    /// A throw's id, its line, its seconds into the round, and whether a lineup view can open on it.
+    pub throws: Vec<(ThrowId, String, f64, bool)>,
+    /// A track's index, the player's name, CT, alive now.
+    pub players: Vec<(usize, String, bool, bool)>,
+    pub follow: Option<usize>,
+    pub chase: bool,
+    pub seconds: f64,
+    pub length: f64,
+    pub playing: bool,
+    pub speed: f64,
+    /// Loading, a failure, or where the players come from.
+    pub note: Option<String>,
 }
 
 /// No filter: the query the shell shows before anything is read.
@@ -71,6 +112,8 @@ pub struct Status<'a> {
     pub free: bool,
     /// Demos dropped onto the window: what is being read, or what was.
     pub import: Option<String>,
+    /// The replay, when it is open: then the panels are its.
+    pub replay: Option<ReplayStatus>,
 }
 
 impl<'a> Status<'a> {
@@ -97,6 +140,7 @@ impl<'a> Status<'a> {
             copied: false,
             free: false,
             import: None,
+            replay: None,
         }
     }
 }
@@ -119,6 +163,14 @@ fn place(p: &Option<String>) -> &str {
 pub fn show(ui: &mut egui::Ui, mut status: Status<'_>) -> (Vec<Action>, egui::Rect) {
     let mut actions = Vec::new();
     top_bar(ui, &status, &mut actions);
+    if let Some(replay) = &status.replay {
+        replay_bar(ui, replay, &mut actions);
+        replay_list(ui, replay, &mut actions);
+        replay_details(ui, replay, status.import.as_deref(), &mut actions);
+        let rect = ui.available_rect_before_wrap();
+        replay_keys(ui, replay, &mut actions);
+        return (actions, rect);
+    }
     bottom_bar(ui, &status, &mut actions);
     lineup_list(ui, &mut status, &mut actions);
     details(ui, &status, &mut actions);
@@ -131,6 +183,125 @@ pub fn show(ui: &mut egui::Ui, mut status: Status<'_>) -> (Vec<Action>, egui::Re
     }
     keys(ui, &status, &mut actions);
     (actions, rect)
+}
+
+fn replay_keys(ui: &egui::Ui, replay: &ReplayStatus, actions: &mut Vec<Action>) {
+    if ui.ctx().egui_wants_keyboard_input() {
+        return;
+    }
+    ui.input(|i| {
+        if i.key_pressed(egui::Key::Space) {
+            actions.push(Action::Replay(ReplayAction::Play(!replay.playing)));
+        }
+        for (key, by) in [(egui::Key::ArrowLeft, -5.0), (egui::Key::ArrowRight, 5.0)] {
+            if i.key_pressed(key) {
+                actions.push(Action::Replay(ReplayAction::Seek((replay.seconds + by).clamp(0.0, replay.length))));
+            }
+        }
+        if i.key_pressed(egui::Key::Escape) {
+            actions.push(Action::Replay(ReplayAction::Close));
+        }
+    });
+}
+
+/// The replay's timeline: play, the scrubber, the time, the speed.
+fn replay_bar(ui: &mut egui::Ui, replay: &ReplayStatus, actions: &mut Vec<Action>) {
+    egui::Panel::bottom("replay time").exact_size(BOTTOM).show(ui, |ui| {
+        ui.horizontal_centered(|ui| {
+            if ui.button(if replay.playing { "Pause" } else { "Play" }).clicked() {
+                actions.push(Action::Replay(ReplayAction::Play(!replay.playing)));
+            }
+            let mut seconds = replay.seconds;
+            ui.spacing_mut().slider_width = (ui.available_width() - 330.0).max(120.0);
+            if ui.add(egui::Slider::new(&mut seconds, 0.0..=replay.length.max(0.1)).show_value(false)).changed() {
+                actions.push(Action::Replay(ReplayAction::Seek(seconds)));
+            }
+            let clock = |s: f64| format!("{}:{:04.1}", (s / 60.0).floor() as u32, s % 60.0);
+            ui.monospace(format!("{} / {}", clock(replay.seconds), clock(replay.length)));
+            for speed in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                let label = if speed < 1.0 { format!("{speed}×") } else { format!("{speed:.0}×") };
+                if ui.selectable_label(replay.speed == speed, label).clicked() {
+                    actions.push(Action::Replay(ReplayAction::Speed(speed)));
+                }
+            }
+        });
+    });
+}
+
+/// The demo, its rounds, and the round's throws.
+fn replay_list(ui: &mut egui::Ui, replay: &ReplayStatus, actions: &mut Vec<Action>) {
+    egui::Panel::left("replay rounds").exact_size(LEFT).show(ui, |ui| {
+        let current = replay.demo.as_ref().and_then(|d| replay.demos.iter().find(|(id, _)| id == d)).map_or("Pick a demo", |(_, name)| name.as_str());
+        egui::ComboBox::from_id_salt("replay demo").selected_text(current).width(LEFT - 16.0).show_ui(ui, |ui| {
+            for (id, name) in &replay.demos {
+                if ui.selectable_label(replay.demo.as_ref() == Some(id), name).clicked() {
+                    actions.push(Action::Replay(ReplayAction::Demo(id.clone())));
+                }
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().id_salt("replay rounds").max_height(ui.available_height() * 0.45).show(ui, |ui| {
+            for (number, line) in &replay.rounds {
+                if ui.selectable_label(replay.round == Some(*number), line).clicked() {
+                    actions.push(Action::Replay(ReplayAction::Round(*number)));
+                }
+            }
+        });
+        ui.separator();
+        ui.weak("Throws: click to jump there");
+        egui::ScrollArea::vertical().id_salt("replay throws").show(ui, |ui| {
+            for (id, line, at, lineup) in &replay.throws {
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(replay.seconds >= *at - 0.05 && replay.seconds < at + 2.0, line).clicked() {
+                        actions.push(Action::Replay(ReplayAction::Seek((at - 0.5).max(0.0))));
+                    }
+                    if *lineup && ui.small_button("view").on_hover_text("Its lineup view").clicked() {
+                        actions.push(Action::Replay(ReplayAction::Lineup(id.clone())));
+                    }
+                });
+            }
+        });
+    });
+}
+
+/// The camera and the players.
+fn replay_details(ui: &mut egui::Ui, replay: &ReplayStatus, import: Option<&str>, actions: &mut Vec<Action>) {
+    egui::Panel::right("replay players").exact_size(RIGHT).show(ui, |ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        if let Some(line) = import {
+            ui.label(egui::RichText::new(line).strong());
+            ui.separator();
+        }
+        if let Some(note) = &replay.note {
+            ui.colored_label(egui::Color32::from_rgb(255, 170, 90), note);
+            ui.separator();
+        }
+        ui.horizontal(|ui| {
+            if ui.selectable_label(replay.follow.is_none(), "Free camera").clicked() {
+                actions.push(Action::Replay(ReplayAction::Follow(None)));
+            }
+            if ui.selectable_label(replay.follow.is_some() && !replay.chase, "Eyes").on_hover_text("Through the followed player's eyes").clicked() {
+                actions.push(Action::Replay(ReplayAction::Chase(false)));
+            }
+            if ui.selectable_label(replay.follow.is_some() && replay.chase, "Behind").on_hover_text("Behind the followed player").clicked() {
+                actions.push(Action::Replay(ReplayAction::Chase(true)));
+            }
+        });
+        ui.separator();
+        for ct in [false, true] {
+            ui.strong(if ct { "CT" } else { "T" });
+            for (i, name, side_ct, alive) in replay.players.iter().filter(|p| p.2 == ct) {
+                let colour = if *side_ct { egui::Color32::from_rgb(90, 150, 255) } else { egui::Color32::from_rgb(240, 170, 60) };
+                let text = egui::RichText::new(if *alive { name.clone() } else { format!("{name} (dead)") }).color(if *alive { colour } else { egui::Color32::GRAY });
+                if ui.selectable_label(replay.follow == Some(*i), text).clicked() {
+                    actions.push(Action::Replay(ReplayAction::Follow(Some(*i))));
+                }
+            }
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add(egui::Label::new(egui::RichText::new("space: play · ←/→: 5 s · esc: back to the lineups · fly: WASD + right drag").weak().small()).wrap());
+        });
+    });
 }
 
 fn keys(ui: &egui::Ui, status: &Status<'_>, actions: &mut Vec<Action>) {
@@ -205,6 +376,11 @@ fn top_bar(ui: &mut egui::Ui, status: &Status<'_>, actions: &mut Vec<Action>) {
             ui.label("thrown ≥");
             if ui.add(egui::DragValue::new(&mut min).range(1..=50)).changed() {
                 actions.push(Action::MinThrows(min));
+            }
+            ui.separator();
+            let replaying = status.replay.is_some();
+            if ui.selectable_label(replaying, "Replay").on_hover_text("Play a round of a demo with every player and grenade").clicked() {
+                actions.push(Action::Replay(if replaying { ReplayAction::Close } else { ReplayAction::Open }));
             }
         });
     });

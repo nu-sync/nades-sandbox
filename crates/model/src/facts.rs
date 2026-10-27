@@ -317,6 +317,26 @@ pub struct Sample {
     pub place: Option<String>,
 }
 
+/// A player through one round, for replays: alive from the round's freeze end until `died`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerTrack {
+    pub player: Player,
+    pub side: Side,
+    /// The first tick they were dead, when they died.
+    pub died: Option<Tick>,
+    pub points: Vec<TrackPoint>,
+}
+
+/// Where a player stood and looked at a tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackPoint {
+    pub tick: Tick,
+    /// The pawn's origin.
+    pub origin: Vec3,
+    pub pitch: f32,
+    pub yaw: f32,
+}
+
 /// A map's demos, rounds and throws, without flights or effects: what grouping and the filters read.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MapFacts {

@@ -6,6 +6,9 @@
 //! is the game's 128³ texture, or the stand-in, put on the GPU once ([`noise_texture`]) and shared by every map. A
 //! still view averages jittered frames ([`SmokeFrame::accumulated`]), so it converges to a clean image as the web
 //! view's does.
+//!
+//! A replay shows several clouds at once ([`Composite::set_clouds`]): each has its own volume and values, and the pass
+//! runs once per cloud, the farthest first, through two targets of the frame's size, the last into the frame's own.
 
 use std::num::NonZeroU64;
 
@@ -89,6 +92,34 @@ pub struct Composite {
     /// The shown cloud's grid corner and box (Hammer units), when there is one.
     cloud: Option<(Vec3, Vec3, Vec3)>,
     pub light: SmokeLight,
+    /// A replay's clouds, when one is shown: then the shown cloud is not.
+    slots: Vec<Slot>,
+    replaying: bool,
+    /// The two targets a replay's passes go through, for one frame size.
+    pong: Option<Pong>,
+}
+
+/// One of a replay's clouds on the GPU.
+struct Slot {
+    key: u64,
+    uniform: wgpu::Buffer,
+    volume: wgpu::Texture,
+    group: wgpu::BindGroup,
+    cloud: (Vec3, Vec3, Vec3),
+    frame: Option<SmokeFrame>,
+}
+
+struct Pong {
+    size: (u32, u32),
+    views: [wgpu::TextureView; 2],
+    groups: [wgpu::BindGroup; 2],
+}
+
+/// A cloud's grid corner and box, in Hammer units.
+fn placement(cloud: &Cloud) -> (Vec3, Vec3, Vec3) {
+    let (lo, hi) = cloud.bounding_box();
+    let f = |v: glam::DVec3| Vec3::new(v.x as f32, v.y as f32, v.z as f32);
+    (f(cloud.origin), f(lo), f(hi))
 }
 
 fn volume_texture(device: &wgpu::Device, label: &str, size: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
@@ -172,7 +203,67 @@ impl Composite {
             ..Default::default()
         });
         let group = Self::bind(device, &smoke_layout, &uniform, &volume, &placeholder_noise, &clamped, &repeated);
-        Self { pipeline, smoke_layout, scene_layout, uniform, volume, noise: None, clamped, repeated, group, cloud: None, light }
+        Self { pipeline, smoke_layout, scene_layout, uniform, volume, noise: None, clamped, repeated, group, cloud: None, light, slots: Vec::new(), replaying: false, pong: None }
+    }
+
+    /// Shows a replay's clouds, each `(key, cloud, volume, frame)`: a key seen before keeps its volume on the GPU.
+    /// Until [`Composite::set_cloud`], the shown cloud is not drawn.
+    pub fn set_clouds(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, clouds: &[(u64, &Cloud, &[u8], Option<SmokeFrame>)]) {
+        self.replaying = true;
+        let mut old: Vec<Slot> = std::mem::take(&mut self.slots);
+        for &(key, cloud, volume, frame) in clouds.iter().filter(|(_, _, v, _)| v.len() == CELLS * 4) {
+            let slot = match old.iter().position(|s| s.key == key) {
+                Some(i) => old.swap_remove(i),
+                None => {
+                    // a slot of a cloud gone is filled again, else a new one is made
+                    let mut slot = old.pop().unwrap_or_else(|| {
+                        let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: Some("smoke (replay)"), size: std::mem::size_of::<SmokeUniform>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                        let volume = volume_texture(device, "smoke volume (replay)", GRID as u32, wgpu::TextureFormat::Rgba8Unorm);
+                        let noise = self.noise.clone().unwrap_or_else(|| volume_texture(device, "no smoke noise", 1, wgpu::TextureFormat::R8Unorm));
+                        let group = Self::bind(device, &self.smoke_layout, &uniform, &volume, &noise, &self.clamped, &self.repeated);
+                        Slot { key, uniform, volume, group, cloud: placement(cloud), frame }
+                    });
+                    queue.write_texture(
+                        slot.volume.as_image_copy(),
+                        volume,
+                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(GRID as u32 * 4), rows_per_image: Some(GRID as u32) },
+                        wgpu::Extent3d { width: GRID as u32, height: GRID as u32, depth_or_array_layers: GRID as u32 },
+                    );
+                    slot.key = key;
+                    slot
+                }
+            };
+            self.slots.push(Slot { cloud: placement(cloud), frame, ..slot });
+        }
+    }
+
+    /// Whether a replay's clouds are shown.
+    pub fn replaying(&self) -> bool {
+        self.replaying
+    }
+
+    /// The two targets a replay's passes go through, for frames of `size` over `depth`.
+    pub fn ready_targets(&mut self, device: &wgpu::Device, size: (u32, u32), depth: &wgpu::TextureView) {
+        if self.pong.as_ref().is_some_and(|p| p.size == size) {
+            return;
+        }
+        let view = |label| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HDR_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let views = [view("smoke pass a"), view("smoke pass b")];
+        let groups = [self.scene_group(device, &views[0], depth), self.scene_group(device, &views[1], depth)];
+        self.pong = Some(Pong { size, views, groups });
     }
 
     fn bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniform: &wgpu::Buffer, volume: &wgpu::Texture, noise: &wgpu::Texture, clamped: &wgpu::Sampler, repeated: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -206,11 +297,15 @@ impl Composite {
     /// Raymarches the smoke through `noise` ([`noise_texture`], made once and shared by every map's composite).
     pub fn set_noise(&mut self, device: &wgpu::Device, noise: &wgpu::Texture) {
         self.group = Self::bind(device, &self.smoke_layout, &self.uniform, &self.volume, noise, &self.clamped, &self.repeated);
+        for slot in &mut self.slots {
+            slot.group = Self::bind(device, &self.smoke_layout, &slot.uniform, &slot.volume, noise, &self.clamped, &self.repeated);
+        }
         self.noise = Some(noise.clone());
     }
 
     /// Shows `cloud` with its `volume` (32³ RGBA texels), or no smoke.
     pub fn set_cloud(&mut self, queue: &wgpu::Queue, cloud: Option<(&Cloud, &[u8])>) {
+        self.replaying = false;
         let Some((cloud, volume)) = cloud.filter(|(_, v)| v.len() == CELLS * 4) else {
             self.cloud = None;
             return;
@@ -221,13 +316,23 @@ impl Composite {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(GRID as u32 * 4), rows_per_image: Some(GRID as u32) },
             wgpu::Extent3d { width: GRID as u32, height: GRID as u32, depth_or_array_layers: GRID as u32 },
         );
-        let (lo, hi) = cloud.bounding_box();
-        let f = |v: glam::DVec3| Vec3::new(v.x as f32, v.y as f32, v.z as f32);
-        self.cloud = Some((f(cloud.origin), f(lo), f(hi)));
+        self.cloud = Some(placement(cloud));
     }
 
-    /// Writes this frame's values; `frame` None draws no smoke.
+    /// Writes this frame's values; `frame` None draws no smoke. A replay's clouds take their own frames, and the shown
+    /// cloud is off.
     pub fn prepare(&self, queue: &wgpu::Queue, view: &View, size: (u32, u32), frame: Option<SmokeFrame>) {
+        if self.replaying {
+            self.write(queue, &self.uniform, view, size, None, None);
+            for slot in &self.slots {
+                self.write(queue, &slot.uniform, view, size, Some(slot.cloud), slot.frame);
+            }
+        } else {
+            self.write(queue, &self.uniform, view, size, self.cloud, frame);
+        }
+    }
+
+    fn write(&self, queue: &wgpu::Queue, buffer: &wgpu::Buffer, view: &View, size: (u32, u32), cloud: Option<(Vec3, Vec3, Vec3)>, frame: Option<SmokeFrame>) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let view_proj = view.view_proj(aspect) * source_to_scene();
         let axis = |v: Vec3| {
@@ -235,8 +340,8 @@ impl Composite {
             [d.x, d.y, d.z, 0.0]
         };
         let eye = to_source_dir(view.eye) / INCH;
-        let (origin, lo, hi) = self.cloud.unwrap_or((Vec3::ZERO, Vec3::ZERO, Vec3::ZERO));
-        let on = frame.is_some() && self.cloud.is_some() && self.noise.is_some();
+        let (origin, lo, hi) = cloud.unwrap_or((Vec3::ZERO, Vec3::ZERO, Vec3::ZERO));
+        let on = frame.is_some() && cloud.is_some() && self.noise.is_some();
         let f = frame.unwrap_or(SmokeFrame { seconds: 0.0, fade: 0.0, accumulated: 0 });
         let l = &self.light;
         let uniform = SmokeUniform {
@@ -253,11 +358,31 @@ impl Composite {
             sky_color: [l.sky_color.x, l.sky_color.y, l.sky_color.z, 0.0],
             screen: [size.0 as f32, size.1 as f32, 0.0, 0.0],
         };
-        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+        queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
-    /// The pass: `scene` (colour and depth) into `target`, averaged in by `1 / (accumulated + 1)`.
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, scene: &wgpu::BindGroup, accumulated: u32) {
+    /// The pass: `scene` (colour and depth) into `target`, averaged in by `1 / (accumulated + 1)`. A replay's clouds
+    /// take one pass each, the farthest first, through the two targets of [`Composite::ready_targets`].
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, scene: &wgpu::BindGroup, accumulated: u32, view: &View) {
+        let mut shown: Vec<&Slot> = if self.replaying { self.slots.iter().filter(|s| s.frame.is_some()).collect() } else { Vec::new() };
+        let Some(pong) = self.pong.as_ref().filter(|_| !shown.is_empty()) else {
+            return self.pass(encoder, target, &self.group, scene, accumulated, true);
+        };
+        let eye = to_source_dir(view.eye) / INCH;
+        let distance = |s: &Slot| ((s.cloud.1 + s.cloud.2) * 0.5).distance(eye);
+        shown.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
+        let mut from = scene;
+        for (i, slot) in shown.iter().enumerate() {
+            let last = i + 1 == shown.len();
+            let to = if last { target } else { &pong.views[i % 2] };
+            self.pass(encoder, to, &slot.group, from, accumulated, last);
+            from = &pong.groups[i % 2];
+        }
+    }
+
+    /// One composite pass: `scene` through `smoke`'s cloud into `target`, averaged in when `average`, else written.
+    fn pass(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, smoke: &wgpu::BindGroup, scene: &wgpu::BindGroup, accumulated: u32, average: bool) {
+        let accumulated = if average { accumulated } else { 0 };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -271,7 +396,7 @@ impl Composite {
         let weight = 1.0 / (f64::from(accumulated) + 1.0);
         pass.set_blend_constant(wgpu::Color { r: weight, g: weight, b: weight, a: weight });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.group, &[]);
+        pass.set_bind_group(0, smoke, &[]);
         pass.set_bind_group(1, scene, &[]);
         pass.draw(0..3, 0..1);
     }
