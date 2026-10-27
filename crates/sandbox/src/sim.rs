@@ -159,7 +159,7 @@ pub mod views {
         CsView { eye: b.result.eye, pitch: b.result.pitch, yaw: b.result.yaw, fov: vertical_fov() }
     }
 
-    /// Behind the grenade while it flies, looking where it goes; once it has gone off, from where it was a moment
+    /// 80 units behind the grenade while it flies, looking where it goes; once it has gone off, from where it was a moment
     /// before, over what it left. With the collider, the camera stays on the grenade's side of any wall.
     pub fn follow(b: &Built, local: f64, collider: Option<&Collider>) -> CsView {
         let flight = b.stage.flight.as_ref();
@@ -183,7 +183,7 @@ pub mod views {
         let mut back = now - behind;
         back.z = back.z.max(-40.0);
         let back = if back.length() < 1.0 { (now - b.stage.thrower.eye).normalize_or(DVec3::X) } else { back.normalize() };
-        let mut eye = now - back * 140.0 + DVec3::Z * 30.0;
+        let mut eye = now - back * 80.0 + DVec3::Z * 18.0;
         if let Some(c) = collider {
             let away = eye - now;
             if let Some(d) = c.hit_distance(now, away.normalize_or_zero(), away.length()) {

@@ -930,7 +930,7 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   each with a faint copy where walls hide it). The composite draws every smoke through the replay's per-cloud passes;
   the single-cloud path went. The strongest light of the moment lights the map.
 - **Views:** free (the fly camera, which the throw tool throws from: the feet are the eye less 64, or 46 crouched); the
-  thrower's eye at release; following the grenade (140 units behind where it was a third of a second ago, looking where
+  thrower's eye at release; following the grenade (80 units behind where it was a third of a second ago, looking where
   it goes, then over what it left); an orbit opening on the result shot (`Stage::result_camera` with no recorded
   viewers: a standing eye on the floor that sees the effect, else an overview). Clicking a spot (`sim::pick`, a ray
   through the cursor against the collider, then the floor under the hit) stands the camera there.
