@@ -180,23 +180,14 @@ fn main() {
     std::process::exit(0);
 }
 
-/// The data source for a run that reads throws without a window: one that does not open is an error.
-fn cli_source(args: &Args) -> Result<Arc<dyn nades_model::ThrowSource>> {
-    let data = config::data(&args.data)?;
-    match config::open(&data) {
-        (_, Some(notice)) => bail!("{notice}"),
-        (source, None) => Ok(source),
-    }
-}
-
 fn run() -> Result<()> {
     let args = args()?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(cases) = &args.cameras {
-        return lineups::print_cameras(cli_source(&args)?.as_ref(), cases);
+        return lineups::print_cameras(config::source(&args.data)?.as_ref(), cases);
     }
     if let (Some(out), Some(throw)) = (&args.render, &args.throw) {
-        return lineups::render_throw(cli_source(&args)?.as_ref(), throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
+        return lineups::render_throw(config::source(&args.data)?.as_ref(), throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
     }
     if let Some(out) = &args.render {
         return render_offscreen(&args, out);

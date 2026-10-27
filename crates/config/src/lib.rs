@@ -108,6 +108,15 @@ pub fn open(data: &Data) -> (Arc<dyn ThrowSource>, Option<String>) {
     }
 }
 
+/// The source for a run without a window (`--cameras`, `--render --throw`, a video for the MCP server): the files the
+/// settings name, given the `--data` flags; one that does not open, or no data at all, is an error.
+pub fn source(flags: &[PathBuf]) -> Result<Arc<dyn ThrowSource>> {
+    match open(&data(flags)?) {
+        (_, Some(notice)) => anyhow::bail!("{notice}"),
+        (source, None) => Ok(source),
+    }
+}
+
 fn paths(paths: &[PathBuf]) -> String {
     paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
 }

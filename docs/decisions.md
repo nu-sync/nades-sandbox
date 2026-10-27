@@ -604,9 +604,10 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   viewpoints; the voxel log's decoder (ported from its `tracks.rs` and `voxels.rs` with their tests). A producer's own
   labels are tags: shown, filterable, never interpreted. `crates/data`, DuckDB and the `show-me-the-nades` path
   dependency are gone, and `crates/sandbox/tests/standalone.rs` checks that no path dependency leaves the workspace and
-  that nothing names a sibling checkout. `--data` (then `NADES_SANDBOX_DATA`, the config file, the default; `crates/config`,
-  which the MCP server can share) names the files; `nades-sandbox check` reports a file's problems and the features its facts allow; `tools/cs2_throws.py` writes
-  the schema and a fixture with Python's standard library, which the tests read.
+  that nothing names a sibling checkout. `--data` (then `NADES_SANDBOX_DATA`, the config file, the default;
+  `crates/config`, which the MCP server can share) names the files; `nades-sandbox check` reports a file's problems and
+  the features its facts allow; `tools/cs2_throws.py` writes the schema and a fixture with Python's standard library,
+  which the tests read.
 - **Why:** the reviewed proposal (docs/standalone-api.md, revision 2): anyone's demos, from any producer, on any map.
   Revision 1's "facts with the producer's labels" let one producer define what every filter means.
 - **Refinements to §4, found while porting** (the proposal's text is updated to match):
