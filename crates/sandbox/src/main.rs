@@ -17,7 +17,8 @@
 //! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
 //!   averaged over 16 jittered frames. `--cameras <cases.json>` prints the cameras each `{"throw": id}`'s views open
 //!   with (bench/cameras.py compares them with the web view's). `--bench-switch <n>` switches lineups every frame, n
-//!   times, once their stages are built, and prints what each switching frame cost.
+//!   times, once their stages are built, and prints what each switching frame cost. It needs the window on screen: it
+//!   stops with an error when the window gives no frame to draw into for 5 s (hidden or covered).
 //! - `--exit-after-first-frame` prints the start-up marks as one JSON line once the first frame is presented and macOS
 //!   reports the window visible (`window:visible`), whichever comes last, and exits.
 //! - `--screenshot <file.png>` writes that frame (the bench camera) as an 8-bit sRGB PNG at the window's physical size.
@@ -77,6 +78,9 @@ const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 /// Frames left out of `--bench-frames` statistics.
 const WARM_UP_FRAMES: usize = 30;
+/// How long `--bench-switch` waits for the window to give a frame to draw into before it stops: a hidden or covered
+/// window gives none.
+const BENCH_PATIENCE: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct Args {
@@ -238,7 +242,7 @@ fn run() -> Result<()> {
         Ok("1") => true,
         _ => !bench && !args.exit_after_first_frame && args.bench_switch.is_none(),
     };
-    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, lineups: Some(lineups), wake, switching: None, maps_bench: None, exit_deadline: None };
+    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, lineups: Some(lineups), wake, switching: None, unpresented: None, maps_bench: None, exit_deadline: None };
     app.maps_bench = app.args.bench_maps.clone().map(lineups::MapsBench::new);
     event_loop.run_app(&mut app)?;
     if let Some(view) = &mut app.view
@@ -491,6 +495,9 @@ struct App {
     wake: Arc<dyn Fn() + Send + Sync>,
     /// `--bench-switch`: each switching frame's CPU work and its whole time, GPU included (ms).
     switching: Option<Vec<(f64, f64)>>,
+    /// `--bench-switch`: the CPU work of the switch whose frame is not presented yet (ms). That frame is drawn again,
+    /// not another switch made: each switch puts a stage on the GPU, and only a submitted frame lets the last one go.
+    unpresented: Option<f64>,
     /// `--bench-maps`: the maps still to pick and how long each took.
     maps_bench: Option<lineups::MapsBench>,
     /// `--exit-after-first-frame`: when to stop waiting for the frame's time on the display.
@@ -555,11 +562,13 @@ impl App {
 }
 
 impl App {
-    /// `--bench-switch`: once the game's effects and the stages are in, one lineup switch per frame, each drawn and
-    /// finished on the GPU; then the medians as one JSON line.
+    /// `--bench-switch`: once the game's effects and the stages are in, one lineup switch per presented frame, each
+    /// drawn and finished on the GPU; then the medians as one JSON line. A switch whose frame the window did not take
+    /// is drawn again in the next, not made again.
     fn bench_switch(&mut self, event_loop: &ActiveEventLoop) {
         let (Some(n), Some(view)) = (self.args.bench_switch, self.view.as_mut()) else { return };
-        if !view.lineups.ready_for(n) {
+        // the loop may still deliver frames after the exit asked for: the bench has reported, or failed
+        if event_loop.exiting() || !view.lineups.ready_for(n) {
             return;
         }
         let record = self.switching.get_or_insert_with(Vec::new);
@@ -578,14 +587,29 @@ impl App {
             event_loop.exit();
             return;
         }
-        let started = Instant::now();
-        let switched = view.lineups.switch_next(&view.gpu, &mut view.map);
-        let cpu = started.elapsed().as_secs_f64() * 1e3;
+        let cpu = match self.unpresented.take() {
+            Some(cpu) => cpu,
+            None => {
+                let started = Instant::now();
+                if !view.lineups.switch_next(&view.gpu, &mut view.map) {
+                    self.failure = Some(anyhow!("--bench-switch could not switch lineups ({} listed on {})", view.lineups.sandbox.lineups.len(), view.name));
+                    event_loop.exit();
+                    return;
+                }
+                started.elapsed().as_secs_f64() * 1e3
+            }
+        };
+        let drawing = Instant::now();
         view.finish_frames = true;
         let drawn = view.draw(false);
         view.finish_frames = false;
-        if switched && matches!(drawn, Ok(true)) {
-            record.push((cpu, started.elapsed().as_secs_f64() * 1e3));
+        match drawn {
+            Ok(true) => record.push((cpu, cpu + drawing.elapsed().as_secs_f64() * 1e3)),
+            Ok(false) => self.unpresented = Some(cpu),
+            Err(failure) => {
+                self.failure = Some(failure);
+                event_loop.exit();
+            }
         }
     }
 
@@ -794,6 +818,14 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if let Some(view) = &mut self.view {
+            // the switch bench draws every frame it can: a window that gives it none (hidden or covered) would keep it
+            // waiting for ever
+            if self.args.bench_switch.is_some() && view.last_frame.elapsed() > BENCH_PATIENCE && !event_loop.exiting() {
+                let why = if view.window_visible { "though macOS says it is visible" } else { "macOS says it is hidden or covered" };
+                self.failure = Some(anyhow!("--bench-switch needs the window on screen, and it gave no frame to draw into for {} s ({why})", BENCH_PATIENCE.as_secs()));
+                event_loop.exit();
+                return;
+            }
             if view.fly.moving() || self.args.bench_frames.is_some() || self.args.bench_switch.is_some() || view.lineups.animating() {
                 view.window.request_redraw();
             }
@@ -822,6 +854,7 @@ struct View {
     fly: Fly,
     modifiers: winit::keyboard::ModifiersState,
     frames: u64,
+    /// When the surface last gave a frame to draw into: the fly's step, and how long `--bench-switch` has waited.
     last_frame: Instant,
     /// The first frame's pixels, copied out for `--screenshot`.
     readback: Option<wgpu::Buffer>,

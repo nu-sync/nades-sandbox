@@ -836,10 +836,12 @@ impl Lineups {
         self.sandbox.summary(self.free, self.loading.is_some() || self.pending.is_some() || self.picked.is_some())
     }
 
-    /// Whether everything the switch bench needs is in: the game's effects and `n + 1` built stages.
+    /// Whether everything the switch bench needs is in: the game's effects, and the built stages of the `n + 1` lineups
+    /// it shows, the selected one and the `n` after it (switching to one not built would ask for its stage then).
     pub fn ready_for(&self, n: usize) -> bool {
         let s = &self.sandbox;
-        self.effects_files.is_none() && self.wake.is_some() && !s.lineups.is_empty() && s.lineups.iter().take(n + 1).all(|l| s.prepared.contains_key(&l.example))
+        let at = s.selected.and_then(|id| s.lineups.iter().position(|l| l.id == id)).unwrap_or(0);
+        self.effects_files.is_none() && self.wake.is_some() && !s.lineups.is_empty() && s.lineups.iter().cycle().skip(at).take(n + 1).all(|l| s.prepared.contains_key(&l.example))
     }
 
     /// Picks `name`: shown in this frame when it is on the GPU; else shown when its background open arrives, or loaded
@@ -1266,11 +1268,12 @@ mod tests {
         }
     }
 
-    /// The fixture `tools/cs2_throws.py` writes, through the file adapter.
+    /// The fixture `tools/cs2_throws.py` writes, through the file adapter: a file for each call, as tests run at once.
     fn fixture_source() -> Arc<dyn ThrowSource> {
+        static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("nades-sandbox-lineups-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("fixture.sqlite");
+        let path = dir.join(format!("fixture-{}.sqlite", WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let tool = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/cs2_throws.py");
         let ran = ["python3", "python"].iter().find_map(|p| std::process::Command::new(p).arg("-I").arg(&tool).arg("fixture").arg(&path).output().ok()).expect("python3 on PATH");
         assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
@@ -1312,6 +1315,32 @@ mod tests {
         }
         assert_eq!(s.lineups[0].id, LineupId(3));
         assert_eq!(s.summary(false, false).lineup_id.as_deref(), Some("3"), "a selection no longer listed gives way to the first listed");
+    }
+
+    #[test]
+    fn the_switch_bench_waits_for_the_stages_it_shows() {
+        let (woke, wakes) = std::sync::mpsc::channel();
+        let library = Library::start(fixture_source(), move || {
+            let _ = woke.send(());
+        });
+        let mut s = Sandbox::start("de_mirage", None, library);
+        s.collider = SharedCollider::build(std::env::temp_dir().join("nades-sandbox-no-meshes"), "de_mirage".into(), || {});
+        s.library.send(Request::List(s.filter.clone()));
+        let started = Instant::now();
+        while s.prepared.len() < 7 {
+            assert!(started.elapsed() < Duration::from_secs(20), "listed {}, prepared {}, notice {:?}", s.lineups.len(), s.prepared.len(), s.notice);
+            let _ = wakes.recv_timeout(Duration::from_millis(200));
+            s.receive();
+        }
+        let examples: Vec<ThrowId> = s.lineups.iter().map(|l| l.example.clone()).collect();
+        // from the sixth of seven lineups, two switches show the seventh, then the first
+        s.selected = Some(s.lineups[5].id);
+        let mut lineups = Lineups::new(s, false, egui::Rect::NOTHING);
+        lineups.wake = Some(Arc::new(|| {}));
+        lineups.sandbox.prepared.remove(&examples[1]);
+        assert!(lineups.ready_for(2), "the second lineup is not shown, so its stage is not waited for");
+        lineups.sandbox.prepared.remove(&examples[0]);
+        assert!(!lineups.ready_for(2), "the first is shown after the last");
     }
 
     #[test]
