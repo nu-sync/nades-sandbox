@@ -134,7 +134,8 @@ pub fn simulate(t: &SceneThrow, collider: Option<&Collider>, toward_sun: DVec3) 
         _ => None,
     };
     let flames = match (t.grenade, collider) {
-        (Grenade::Molotov | Grenade::Incendiary, Some(c)) => nades_effects::fire_flames(det.pos, det.normal, c),
+        (Grenade::Molotov, Some(c)) => nades_effects::fire_flames_of(nades_scene::fire::FireKind::Molotov, det.pos, c),
+        (Grenade::Incendiary, Some(c)) => nades_effects::fire_flames_of(nades_scene::fire::FireKind::Incendiary, det.pos, c),
         _ => Vec::new(),
     };
     let stage = build_stage(Simulated { grenade: drawn(t.grenade), thrower: thrower_eye(t), flight: path.points.clone(), release: release.t, detonation: (det.t, det.pos), cloud, flames });
