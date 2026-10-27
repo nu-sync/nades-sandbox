@@ -18,7 +18,10 @@ Status: **M4 done** (2026-10-26).
   (x86_64-pc-windows-msvc, DX12); it has not run on Windows yet (S23).
 - Standalone, step 1 (S24): the throws come from cs2-throws files through a `ThrowSource`, and grouping, technique,
   practice commands, round time, landing callouts and viewpoints are the sandbox's own rules (`crates/model`); the
-  workspace builds with no sibling checkout. The demo reader (step 2) and maps from the game's files (step 3) are next.
+  workspace builds with no sibling checkout.
+- Standalone, step 2 (S26): CS2 demos are read directly (`crates/source-demo`, awpy): `--data` takes `.dem` files and
+  folders, a demo dropped onto the window is imported with its progress shown, and each is parsed once into the cache.
+  On six ESL Pro League demos its files match show-me-the-nades' export row for row.
 - M3 made it the lineup sandbox: a map's lineups from the nades database, cut by side, grenade, team, player and phase;
   each seen from the thrower's eye, zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, the
   smoke, fire, flash or HE as the round had it, a time scrubber and the practice command; every view of 84 throws opens
@@ -90,7 +93,6 @@ views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the pra
 **Not here:**
 - the analytics, map guides and 2D replay, which stay in the web app;
 - editing data;
-- reading demos themselves, until the demo reader (docs/standalone-api.md §6, step 2);
 - any distribution of Valve's assets: packs are built on this machine and stay there.
 
 ## 4. Decisions
@@ -137,6 +139,7 @@ crates/packer    `nades-pack <map>`: builds a map's pack from the export, the ga
 crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
                  (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
 crates/source-file  the cs2-throws file adapter: version 2 SQLite files, several merged, and `check`
+crates/source-demo  the demo adapter: `.dem` files read with awpy into cs2-throws files in the cache (S26)
 crates/config    where the settings come from (§8): flag, environment, config file, default
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
@@ -286,7 +289,8 @@ panel) has no native counterpart: it exists to work around the browser.
   its place-labelled samples. A list is that library cut by side, grenade, team, player, round time, plant and tag, in
   memory; a stage reads the throw's tracks and the samples of its viewpoint window (and, for a flash whose blinded
   players have no position, the samples around its detonation).
-- **Where the data is:** `--data`, `NADES_SANDBOX_DATA`, the config file's `[data] paths`, then the demo reader's cache
+- **Where the data is:** `--data` (cs2-throws files, demos, folders of either), `NADES_SANDBOX_DATA`, the config file's
+  `[data] paths`, then the demo reader's cache
   (`crates/config`, which the MCP server can share); `nades-sandbox check <file>` reports a file's problems and the features its facts allow.
 
 ## 9. Measured, and the targets

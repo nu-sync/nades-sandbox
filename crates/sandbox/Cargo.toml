@@ -25,6 +25,7 @@ png.workspace = true
 nades-control = { path = "../control" }
 nades-model.workspace = true
 nades-source-file.workspace = true
+nades-source-demo.workspace = true
 nades-config.workspace = true
 nades-scene.workspace = true
 serde.workspace = true

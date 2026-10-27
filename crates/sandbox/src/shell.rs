@@ -69,6 +69,8 @@ pub struct Status<'a> {
     pub copied: bool,
     /// The camera was taken by hand or by app control.
     pub free: bool,
+    /// Demos dropped onto the window: what is being read, or what was.
+    pub import: Option<String>,
 }
 
 impl<'a> Status<'a> {
@@ -94,6 +96,7 @@ impl<'a> Status<'a> {
             loading_map: None,
             copied: false,
             free: false,
+            import: None,
         }
     }
 }
@@ -268,6 +271,10 @@ fn lineup_list(ui: &mut egui::Ui, status: &mut Status<'_>, actions: &mut Vec<Act
 fn details(ui: &mut egui::Ui, status: &Status<'_>, actions: &mut Vec<Action>) {
     egui::Panel::right("lineup").exact_size(RIGHT).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+        if let Some(line) = &status.import {
+            ui.label(egui::RichText::new(line).strong());
+            ui.separator();
+        }
         let Some(lineup) = status.selected.and_then(|id| status.lineups.iter().find(|l| l.id == id)) else {
             ui.weak("Pick a lineup.");
             if let Some(notice) = status.notice {

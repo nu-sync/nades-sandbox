@@ -24,6 +24,12 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params};
 
 pub const FORMAT: &str = "cs2-throws";
+/// §3's schema for a new file, as docs/standalone-api.md and tools/cs2_throws.py have it (a test keeps the three the same).
+pub const SCHEMA: &str = include_str!("schema.sql");
+/// The version a writer of this schema puts in `meta`.
+pub const VERSION: &str = "2.0";
+/// §3's recommended page size for a writer.
+pub const PAGE_SIZE: u32 = 16384;
 /// The major version this reader reads; any 2.x.
 pub const MAJOR: u32 = 2;
 const SUPPORTED: &str = "cs2-throws 2.x";
@@ -182,8 +188,8 @@ fn open_file(path: &Path) -> Result<Open, SourceError> {
     Ok(Open { path: path.to_path_buf(), conn, stamp, schema, meta })
 }
 
-/// Whether a file found in a folder is a cs2-throws file: SQLite's header, then its meta.
-fn is_throws_file(path: &Path) -> bool {
+/// Whether a file is a cs2-throws file this reader reads: SQLite's header, then its meta.
+pub fn is_throws_file(path: &Path) -> bool {
     let mut header = [0u8; 16];
     let read = std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut header));
     read.is_ok() && &header == b"SQLite format 3\0" && open_file(path).is_ok()
@@ -233,7 +239,6 @@ impl Inner {
 
 /// Several cs2-throws files as one source.
 pub struct FileSource {
-    paths: Vec<PathBuf>,
     inner: Mutex<Inner>,
 }
 
@@ -244,12 +249,25 @@ impl FileSource {
         let files = paths.iter().map(|p| open_file(p)).collect::<Result<Vec<_>, _>>()?;
         let mut inner = Inner { files, owners: HashMap::new() };
         inner.rebuild_owners()?;
-        Ok(Self { paths, inner: Mutex::new(inner) })
+        Ok(Self { inner: Mutex::new(inner) })
     }
 
     /// The files read, in the order demos are taken from them.
-    pub fn files(&self) -> &[PathBuf] {
-        &self.paths
+    pub fn files(&self) -> Vec<PathBuf> {
+        self.inner.lock().expect("file source").files.iter().map(|f| f.path.clone()).collect()
+    }
+
+    /// Reads one more file, after the others (a demo just imported, say); false when it is read already. The
+    /// [`Revision`] changes, so a reader notices.
+    pub fn add(&self, path: &Path) -> Result<bool, SourceError> {
+        let mut inner = self.inner.lock().expect("file source");
+        if inner.files.iter().any(|f| f.path == path) {
+            return Ok(false);
+        }
+        let file = open_file(path)?;
+        inner.files.push(file);
+        inner.rebuild_owners()?;
+        Ok(true)
     }
 
     /// Each file's `meta`.
@@ -279,8 +297,8 @@ impl FileSource {
 impl ThrowSource for FileSource {
     fn revision(&self) -> Result<Revision, SourceError> {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        for path in &self.paths {
-            (path, stamp(path)?).hash(&mut hash);
+        for path in self.files() {
+            (&path, stamp(&path)?).hash(&mut hash);
         }
         Ok(Revision(hash.finish()))
     }
@@ -759,6 +777,18 @@ mod tests {
         }
         assert_eq!(flight(&bytes), Some(vec![(Tick(10), [1.0, 0.0, -3.0]), (Tick(12), [2.5, 0.0, -3.0])]));
         assert_eq!(flight(&bytes[..20]), None);
+    }
+
+    #[test]
+    fn the_schema_is_the_specs_and_the_reference_writers() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec = std::fs::read_to_string(root.join("docs/standalone-api.md")).unwrap();
+        let start = spec.find("```sql\ncreate table meta").expect("§3's schema") + "```sql\n".len();
+        assert_eq!(&spec[start..start + spec[start..].find("```\n").unwrap()], SCHEMA);
+        let python = std::fs::read_to_string(root.join("tools/cs2_throws.py")).unwrap();
+        let start = python.find("SCHEMA = \"\"\"\n").unwrap() + "SCHEMA = \"\"\"\n".len();
+        assert_eq!(&python[start..start + python[start..].find("\"\"\"\n").unwrap()], SCHEMA);
+        assert!(SCHEMA.contains(&format!("version = '{VERSION}'")) && VERSION.starts_with(&format!("{MAJOR}.")));
     }
 
     #[test]

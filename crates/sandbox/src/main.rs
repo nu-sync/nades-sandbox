@@ -10,8 +10,9 @@
 //! (`state.rs`), and the throw's effects follow when they are built. The collider and the game's flipbooks and smoke
 //! noise are read after it.
 //!
-//! - `--data <file or folder>` (repeatable) names the cs2-throws files to read; else `NADES_SANDBOX_DATA`, else
-//!   `[data] paths` in the config file, else the demo adapter's cache (nades-config).
+//! - `--data <file or folder>` (repeatable) names the cs2-throws files or CS2 demos to read; else
+//!   `NADES_SANDBOX_DATA`, else `[data] paths` in the config file, else the demo adapter's cache (nades-config). A demo
+//!   is read into the cache first (crates/source-demo), once; so is one dropped onto the window (`imports.rs`).
 //! - `check <file>...` prints each cs2-throws file's problems and which features its facts allow (`check.rs`).
 //! - `--map <name>` draws `<packs>/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file); `--packs
 //!   <dir>` names the packs folder, else `NADES_SANDBOX_PACKS`, `[assets] packs`, the platform's cache (`assets.rs`).
@@ -40,6 +41,7 @@ mod assets;
 mod camera;
 mod check;
 mod clock;
+mod imports;
 mod control;
 mod library;
 mod lineups;
@@ -127,7 +129,7 @@ fn args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--data" => args.data.push(it.next().context("--data needs a cs2-throws file or a folder of them")?.into()),
+            "--data" => args.data.push(it.next().context("--data needs a demo, a cs2-throws file, or a folder of them")?.into()),
             "--packs" => args.packs = Some(it.next().context("--packs needs a folder")?.into()),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
@@ -235,6 +237,7 @@ fn run() -> Result<()> {
     if let Some(notice) = &notice {
         eprintln!("data: {notice}");
     }
+    let files = source.clone();
     let library = {
         let wake = wake.clone();
         library::Library::start(source, move || wake())
@@ -242,6 +245,8 @@ fn run() -> Result<()> {
     let mut sandbox = lineups::Sandbox::start(&map, remembered, library);
     sandbox.data_notice = notice;
     let mut lineups = lineups::Lineups::new(sandbox, bench, egui::Rect::NOTHING);
+    // demos dropped onto the window go to the cache, then into the data
+    lineups.imports = Some(imports::Imports::start(files, config::default_data(), wake.clone()));
     // the other maps open in the background after the first frame, except in runs that time one map
     // (NADES_SANDBOX_PRELOAD: 0 never, 1 always)
     lineups.preload = match std::env::var("NADES_SANDBOX_PRELOAD").as_deref() {
@@ -760,6 +765,11 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(view) = self.view.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => {
+                if let Some(imports) = &view.lineups.imports {
+                    imports.dropped(path);
+                }
+            }
             WindowEvent::KeyboardInput { event: ref key, .. } if view.modifiers.super_key() && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => {
                 view.modifiers = modifiers.state();

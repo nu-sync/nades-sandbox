@@ -19,6 +19,7 @@ cargo clippy --release --workspace --all-targets
 ./target/release/nades-sandbox check <file>                 # a cs2-throws file's problems, and the features its facts allow
 python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite     # the format's worked example (the tests read it too)
 cargo run --release -p nades-source-file --example tag_parity -- <export> nades   # groups, techniques, callouts vs a producer's tags
+cargo run --release -p nades-source-demo --example import -- <cache> <demo or folder>   # demos read into cs2-throws files, timed
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
 cargo run --release -p nades-packer --example physics_vs_awpy -- de_cache   # the pack's collider against awpy's mesh

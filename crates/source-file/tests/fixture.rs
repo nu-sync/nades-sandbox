@@ -146,6 +146,20 @@ fn files_merge_taking_each_demo_once_and_another_major_version_is_refused() {
 }
 
 #[test]
+fn a_file_added_to_an_open_source_is_read_with_the_rest() {
+    let dir = scratch("added");
+    let path = fixture(&dir);
+    let source = FileSource::open(&[]).unwrap();
+    let before = source.revision().unwrap();
+    assert!(source.maps().unwrap().is_empty());
+    assert!(source.add(&path).unwrap());
+    assert_ne!(source.revision().unwrap(), before, "a reader notices");
+    assert_eq!((source.maps().unwrap().len(), source.files(), source.map(&MapName("de_mirage".into())).unwrap().throws.len()), (2, vec![path.clone()], 10));
+    assert!(!source.add(&path).unwrap(), "read already");
+    assert!(matches!(source.add(&dir.join("missing.sqlite")), Err(SourceError::Missing(_))));
+}
+
+#[test]
 fn a_file_changed_on_disk_is_read_again() {
     let dir = scratch("changed");
     let path = fixture(&dir);
