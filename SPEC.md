@@ -19,7 +19,7 @@ Status: **M4 done** (2026-10-26).
 - Standalone, step 1 (S24): the throws come from cs2-throws files through a `ThrowSource`, and grouping, technique,
   practice commands, round time, landing callouts and viewpoints are the sandbox's own rules (`crates/model`); the
   workspace builds with no sibling checkout.
-- Standalone, step 2 (S26): CS2 demos are read directly (`crates/source-demo`, awpy): `--data` takes `.dem` files and
+- Standalone, step 2 (S28): CS2 demos are read directly (`crates/source-demo`, awpy): `--data` takes `.dem` files and
   folders, a demo dropped onto the window is imported with its progress shown, and each is parsed once into the cache.
   On six ESL Pro League demos its files match show-me-the-nades' export row for row.
 - M3 made it the lineup sandbox: a map's lineups from the nades database, cut by side, grenade, team, player and phase;
@@ -139,7 +139,7 @@ crates/packer    `nades-pack <map>`: builds a map's pack from the export, the ga
 crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
                  (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
 crates/source-file  the cs2-throws file adapter: version 2 SQLite files, several merged, and `check`
-crates/source-demo  the demo adapter: `.dem` files read with awpy into cs2-throws files in the cache (S26)
+crates/source-demo  the demo adapter: `.dem` files read with awpy into cs2-throws files in the cache (S28)
 crates/config    where the settings come from (§8): flag, environment, config file, default
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)

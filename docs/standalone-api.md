@@ -2,7 +2,7 @@
 
 Proposal, revision 2, 2026-10-26. Step 1 (the core, the file adapter and the switch away from show-me-the-nades'
 database) is implemented; docs/decisions.md S24 records it and the refinements to §4 it needed. §3 is at version 2.0
-(S25): integer keys inside the file, a third of version 1's size. Step 2, the demo adapter, is implemented (S26).
+(S25): integer keys inside the file, a third of version 1's size. Step 2, the demo adapter, is implemented (S28).
 
 **The goal.** Anyone with CS2 demos sees their throws in 3D on any CS2 map. Nothing the sandbox exposes depends on
 how show-me-the-nades, or any other tool, stores or labels its data.

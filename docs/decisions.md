@@ -772,7 +772,7 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   `--bench-switch 20` on an empty data folder; main's binary ran `--bench-frames` and `--bench-maps` until killed at
   15 s. Not run tonight: the same benches with a window on screen (the screen stayed locked).
 
-## S26 · The demo reader: awpy into the cache, one file per demo
+## S28 · The demo reader: awpy into the cache, one file per demo
 
 - **Decision:** `crates/source-demo` reads a CS2 `.dem` with awpy 3.1 and writes one cs2-throws 2.0 file per demo into
   the cache (`throws/<sha256>.sqlite` in the platform's cache folder), which the file adapter then reads. It is a port
