@@ -1,29 +1,17 @@
-//! nades-sandbox, M3: the lineup sandbox. A map in CS2's look with the lineups of the throws in cs2-throws files: pick one
-//! and see it from the thrower's eye (Lineup), zoomed on the aim point (Aim), from an opponent's eye (Result) or from
-//! anywhere around it (Orbit), with the flight, the smoke, fire, flash or HE as the round had it, a time scrubber, and the
-//! practice command to copy (`lineups.rs`, `shell.rs`). The throws are facts read through a `ThrowSource`; grouping,
-//! technique, callouts and viewpoints are nades-model's rules.
+//! nades-sandbox: a CS2 map and grenade simulator. Pick a map, stand somewhere, aim, choose how to throw, and see the
+//! grenade fly through the map, bounce and go off (docs/simulator.md).
 //!
 //! Start-up runs on threads from `main`: this one has AppKit make the window (≈76 ms), while the loader maps the pack,
-//! brings up the GPU, puts the map on it and draws one frame offscreen, and the data thread reads the lineup list
-//! (`library.rs`). The first frame needs only the window and the map: it opens on the camera the last run left
-//! (`state.rs`), and the throw's effects follow when they are built. The collider and the game's flipbooks and smoke
-//! noise are read after it.
+//! brings up the GPU, puts the map on it and draws one frame offscreen. The first frame needs only the window and the
+//! map: it opens on the camera the last run left (`state.rs`). The collider, the game's flipbooks and smoke noise and
+//! the other maps are read after it.
 //!
-//! - `--data <file or folder>` (repeatable) names the cs2-throws files or CS2 demos to read; else
-//!   `NADES_SANDBOX_DATA`, else `[data] paths` in the config file, else the demo adapter's cache (nades-config). A demo
-//!   is read into the cache first (crates/source-demo), once; so is one dropped onto the window (`imports.rs`).
-//! - `check <file>...` prints each cs2-throws file's problems and which features its facts allow (`check.rs`).
 //! - `--map <name>` draws `<packs>/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file); `--packs
 //!   <dir>` names the packs folder, else `NADES_SANDBOX_PACKS`, `[assets] packs`, the platform's cache (`assets.rs`).
-//! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
-//!   averaged over 16 jittered frames. `--cameras <cases.json>` prints the cameras each `{"throw": id}`'s views open
-//!   with (bench/cameras.py compares them with the web view's). `--bench-switch <n>` switches lineups every frame, n
-//!   times, once their stages are built, and prints what each switching frame cost; a list that comes back empty is an
-//!   error. The timed benches (`--bench-switch`, `--bench-frames`, `--bench-maps`) need the window on screen: each
-//!   stops with an error ("needs the window on screen") when the window gives no frame to draw into for 5 s, or macOS
-//!   says it is hidden or covered for 5 s, and `--bench-frames` and `--bench-maps` stop at once when it hides the window
-//!   mid-measurement, since a hidden window's frames wait for the window server (about 1 s each).
+//! - The timed benches (`--bench-frames`, `--bench-maps`) need the window on screen: each stops with an error ("needs
+//!   the window on screen") when the window gives no frame to draw into for 5 s, or macOS says it is hidden or covered
+//!   for 5 s, and stops at once when it hides the window mid-measurement, since a hidden window's frames wait for the
+//!   window server (about 1 s each).
 //! - `--exit-after-first-frame` prints the start-up marks as one JSON line once the first frame is presented and macOS
 //!   reports the window visible (`window:visible`), whichever comes last, and exits.
 //! - `--screenshot <file.png>` writes that frame (the bench camera) as an 8-bit sRGB PNG at the window's physical size.
@@ -37,15 +25,13 @@
 //!   before the next, and prints the median and 95th percentile per frame after the first 30: the steady frame where
 //!   no window can be shown.
 
+mod app;
 mod assets;
+mod bench;
 mod camera;
-mod check;
 mod clock;
-mod imports;
+mod collider;
 mod control;
-mod library;
-mod lineups;
-mod replay;
 mod resident;
 mod shell;
 mod state;
@@ -62,7 +48,6 @@ use camera::{Camera, Fly};
 use base64::Engine as _;
 use nades_control::{AppCommand, AppMessage, AppState, ControlError, ControlOutput, FrameMetrics, Viewport};
 use control::{Control, UserEvent};
-use nades_config as config;
 use nades_pack::Pack;
 use nades_render::map::{FrameEffects, Map, Targets};
 use nades_render::{Gpu, View as Eye};
@@ -86,7 +71,7 @@ const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrg
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 /// Frames left out of `--bench-frames` statistics.
 const WARM_UP_FRAMES: usize = 30;
-/// How long `--bench-switch` waits for the window to give a frame to draw into before it stops: a hidden or covered
+/// How long the timed benches wait for the window to give a frame to draw into before they stop: a hidden or covered
 /// window gives none.
 const BENCH_PATIENCE: Duration = Duration::from_secs(5);
 
@@ -107,20 +92,9 @@ struct Args {
     video_request: Option<PathBuf>,
     render_time: Option<f32>,
     fov: Option<f32>,
-    bench_switch: Option<usize>,
-    throw: Option<String>,
-    view: Option<nades_scene::stage::ViewMode>,
-    time: Option<f64>,
-    cameras: Option<PathBuf>,
     bench_maps: Option<Vec<String>>,
     budget_mb: Option<u64>,
-    data: Vec<PathBuf>,
     packs: Option<PathBuf>,
-    replay: Option<String>,
-    round: Option<u32>,
-    replay_camera: Option<String>,
-    replay_layers: Option<String>,
-    bench_replay: Option<u32>,
 }
 
 /// Numbers separated by commas: `1,2,3`.
@@ -135,23 +109,12 @@ fn args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--replay" => args.replay = Some(it.next().context("--replay needs a demo: its id, the id's start, or its file's name")?),
-            "--round" => args.round = Some(it.next().and_then(|n| n.parse().ok()).context("--round needs a round number")?),
-            "--replay-camera" => args.replay_camera = Some(it.next().context("--replay-camera needs overview, top or a player's name")?),
-            "--replay-layers" => args.replay_layers = Some(it.next().context("--replay-layers needs all, players, effects or map")?),
-            "--bench-replay" => args.bench_replay = Some(it.next().and_then(|n| n.parse().ok()).filter(|&n| n > 0).context("--bench-replay needs a count of frames")?),
-            "--data" => args.data.push(it.next().context("--data needs a demo, a cs2-throws file, or a folder of them")?.into()),
             "--packs" => args.packs = Some(it.next().context("--packs needs a folder")?.into()),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
             "--render-time" => args.render_time = Some(numbers::<1>(it.next(), "--render-time")?[0]),
             "--fov" => args.fov = Some(numbers::<1>(it.next(), "--fov")?[0]),
-            "--bench-switch" => args.bench_switch = Some(it.next().and_then(|n| n.parse().ok()).filter(|&n| n > 0).context("--bench-switch needs a count")?),
-            "--throw" => args.throw = Some(it.next().context("--throw needs a throw id")?),
-            "--view" => args.view = Some(it.next().as_deref().and_then(lineups::view_mode).context("--view needs lineup, aim, result or orbit")?),
-            "--time" => args.time = Some(it.next().and_then(|t| t.parse().ok()).context("--time needs seconds after detonation")?),
-            "--cameras" => args.cameras = Some(it.next().context("--cameras needs a file")?.into()),
             "--bench-maps" => args.bench_maps = Some(it.next().context("--bench-maps needs maps, comma-separated")?.split(',').map(str::to_string).collect()),
             "--map" => args.map = Some(it.next().context("--map needs a map name")?),
             "--budget-mb" => args.budget_mb = Some(it.next().and_then(|n| n.parse().ok()).context("--budget-mb needs megabytes")?),
@@ -188,10 +151,6 @@ use assets::pack_path;
 fn main() {
     clock::init();
     clock::mark("main");
-    let words: Vec<String> = std::env::args().skip(1).collect();
-    if words.first().map(String::as_str) == Some("check") {
-        std::process::exit(if check::run(&words[1..]) { 0 } else { 1 });
-    }
     if let Err(failure) = run() {
         eprintln!("nades-sandbox: {failure:#}");
         std::process::exit(1);
@@ -204,19 +163,6 @@ fn run() -> Result<()> {
     let args = args()?;
     assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
-    if let Some(request) = &args.video_request {
-        return lineups::render_video(request);
-    }
-    if let Some(cases) = &args.cameras {
-        return lineups::print_cameras(config::source(&args.data)?.as_ref(), cases);
-    }
-    if let Some(demo) = &args.replay {
-        let request = replay::Request { demo: demo.clone(), round: args.round.context("--replay needs --round")?, time: args.time.unwrap_or(0.0), camera: args.replay_camera.clone(), map: args.map.clone(), layers: args.replay_layers.clone() };
-        return replay::render(config::source(&args.data)?.as_ref(), &request, args.size.unwrap_or((1138, 640)), args.render.as_deref(), args.bench_replay);
-    }
-    if let (Some(out), Some(throw)) = (&args.render, &args.throw) {
-        return lineups::render_throw(config::source(&args.data)?.as_ref(), throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
-    }
     if let Some(out) = &args.render {
         return render_offscreen(&args, out);
     }
@@ -241,41 +187,28 @@ fn run() -> Result<()> {
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
     let event_loop = builder.build()?;
     clock::mark("event_loop");
-    event_loop.set_control_flow(if args.bench_frames.is_some() || args.bench_switch.is_some() { ControlFlow::Poll } else { ControlFlow::Wait });
+    event_loop.set_control_flow(if args.bench_frames.is_some() { ControlFlow::Poll } else { ControlFlow::Wait });
     let control = args.control_stdio.then(|| Control::start(event_loop.create_proxy())).transpose()?;
-    // the data thread starts now: the lineup list is read while the window and the map come up
     let proxy = event_loop.create_proxy();
     let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = proxy.send_event(UserEvent::Wake);
     });
-    let (source, notice) = config::open(&config::data(&args.data)?);
-    if let Some(notice) = &notice {
-        eprintln!("data: {notice}");
-    }
-    let files = source.clone();
-    let library = {
-        let wake = wake.clone();
-        library::Library::start(source, move || wake())
-    };
-    let mut sandbox = lineups::Sandbox::start(&map, remembered, library);
-    sandbox.data_notice = notice;
-    let mut lineups = lineups::Lineups::new(sandbox, bench, egui::Rect::NOTHING);
-    // demos dropped onto the window go to the cache, then into the data
-    lineups.imports = Some(imports::Imports::start(files, config::default_data(), wake.clone()));
+    let mut sandbox = app::Sandbox::new(&map, remembered, bench, egui::Rect::NOTHING);
     // the other maps open in the background after the first frame, except in runs that time one map
     // (NADES_SANDBOX_PRELOAD: 0 never, 1 always)
-    lineups.preload = match std::env::var("NADES_SANDBOX_PRELOAD").as_deref() {
+    sandbox.preload = match std::env::var("NADES_SANDBOX_PRELOAD").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
-        _ => !bench && !args.exit_after_first_frame && args.bench_switch.is_none(),
+        _ => !bench && !args.exit_after_first_frame,
     };
-    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, lineups: Some(lineups), wake, switching: None, unpresented: None, maps_bench: None, exit_deadline: None, hidden_since: Some(Instant::now()) };
-    app.maps_bench = app.args.bench_maps.clone().map(lineups::MapsBench::new);
+    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, sandbox: Some(sandbox), wake, maps_bench: None, exit_deadline: None, hidden_since: Some(Instant::now()) };
+    app.maps_bench = app.args.bench_maps.clone().map(bench::MapsBench::new);
     event_loop.run_app(&mut app)?;
     if let Some(view) = &mut app.view
-        && !view.lineups.bench
+        && !view.app.bench
     {
-        view.lineups.sandbox.remember();
+        view.app.moved(view.camera.cs());
+        view.app.remember();
     }
     app.failure.map_or(Ok(()), Err)
 }
@@ -310,7 +243,7 @@ fn load(instance: wgpu::Instance, path: &Path, eye: Option<Eye>) -> Result<Loade
         clock::mark(stage);
     });
     // the 3D view sits between the shell's panels
-    let (width, height) = lineups::view_size(WINDOW, EXPECTED_SCALE);
+    let (width, height) = app::view_size(WINDOW, EXPECTED_SCALE);
     let targets = map.targets(&gpu.device, &gpu.queue, width, height);
     let mut painter = egui_wgpu::Renderer::new(&gpu.device, SURFACE_FORMAT, egui_wgpu::RendererOptions { depth_stencil_format: None, dithering: false, ..Default::default() });
     let name = pack.contents().source.map.clone();
@@ -493,9 +426,8 @@ fn warm_egui(gpu: &Gpu, painter: &mut egui_wgpu::Renderer, name: &str) -> egui::
     let mut input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(WINDOW.0 as f32, WINDOW.1 as f32))), max_texture_side, ..Default::default() };
     input.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(EXPECTED_SCALE as f32);
     let maps = [name.to_string()];
-    let mut search = String::new();
     let output = context.run_ui(input, |ui| {
-        shell::show(ui, shell::Status::empty(name, &maps, &mut search));
+        shell::show(ui, shell::Status::empty(name, &maps));
     });
     for (id, deltas) in &output.textures_delta.set {
         for delta in deltas {
@@ -550,17 +482,12 @@ struct App {
     visible: bool,
     control: Option<Control>,
     ready_sent: bool,
-    /// The lineups, until the window takes them.
-    lineups: Option<lineups::Lineups>,
-    /// Wakes the event loop from the data, collider, effects and map threads.
+    /// The simulator, until the window takes it.
+    sandbox: Option<app::Sandbox>,
+    /// Wakes the event loop from the simulation, collider, effects and map threads.
     wake: Arc<dyn Fn() + Send + Sync>,
-    /// `--bench-switch`: each switching frame's CPU work and its whole time, GPU included (ms).
-    switching: Option<Vec<(f64, f64)>>,
-    /// `--bench-switch`: the CPU work of the switch whose frame is not presented yet (ms). That frame is drawn again,
-    /// not another switch made: each switch puts a stage on the GPU, and only a submitted frame lets the last one go.
-    unpresented: Option<f64>,
     /// `--bench-maps`: the maps still to pick and how long each took.
-    maps_bench: Option<lineups::MapsBench>,
+    maps_bench: Option<bench::MapsBench>,
     /// `--exit-after-first-frame`: when to stop waiting for the frame's time on the display.
     exit_deadline: Option<Instant>,
     /// Since when macOS has said the window is hidden or covered (from the start until it first shows it): the timed
@@ -589,13 +516,13 @@ impl App {
         let view = self.view.as_mut().expect("a view draws");
         if view.frames == 1 {
             let at = clock::mark("frame:presented");
-            view.lineups.sandbox.first_frame_ms = Some(at + clock::pre_main().max(0.0));
+            view.app.first_frame_ms = Some(at + clock::pre_main().max(0.0));
             // what the first frame did not need: the collider, the game's flipbooks and smoke noise, the other maps
-            if !view.lineups.bench {
-                view.lineups.after_first_frame(&view.map, &view.name, self.wake.clone());
+            if !view.app.bench {
+                view.app.after_first_frame(&view.map, self.wake.clone());
             }
             if self.visible {
-                view.lineups.open_other_maps(&view.gpu, &view.name);
+                view.app.open_other_maps(&view.gpu, &view.name);
             }
             if let Some(path) = &self.args.screenshot {
                 view.save_screenshot(path)?;
@@ -626,66 +553,6 @@ impl App {
 }
 
 impl App {
-    /// `--bench-switch`: once the game's effects and the stages are in, one lineup switch per presented frame, each
-    /// drawn and finished on the GPU; then the medians as one JSON line. A switch whose frame the window did not take
-    /// is drawn again in the next, not made again.
-    fn bench_switch(&mut self, event_loop: &ActiveEventLoop) {
-        let (Some(n), Some(view)) = (self.args.bench_switch, self.view.as_mut()) else { return };
-        // the loop may still deliver frames after the exit asked for: the bench has reported, or failed
-        if event_loop.exiting() {
-            return;
-        }
-        // a list that came back empty (no data, or a filter matching none) has nothing to switch between
-        if let Some(why) = view.lineups.nothing_to_switch() {
-            self.failure = Some(anyhow!("--bench-switch has no lineups to switch between on {}: {why}", view.name));
-            event_loop.exit();
-            return;
-        }
-        if !view.lineups.ready_for(n) {
-            return;
-        }
-        let record = self.switching.get_or_insert_with(Vec::new);
-        if record.len() == n {
-            let stats = |k: usize| {
-                let mut v: Vec<f64> = record.iter().map(|r| if k == 0 { r.0 } else { r.1 }).collect();
-                v.sort_by(f64::total_cmp);
-                (v[v.len() / 2], v[((v.len() - 1) as f64 * 0.95).round() as usize], v[v.len() - 1])
-            };
-            let ((m0, p0, x0), (m1, p1, x1)) = (stats(0), stats(1));
-            println!(
-                "{{\"switches\":{n},\"switch_cpu_ms\":{{\"median\":{m0:.3},\"p95\":{p0:.3},\"max\":{x0:.3}}},\"frame_ms\":{{\"median\":{m1:.3},\"p95\":{p1:.3},\"max\":{x1:.3}}},\"size\":{:?},\"view\":{:?}}}",
-                view.targets.size(),
-                view.lineups.sandbox.view.name()
-            );
-            event_loop.exit();
-            return;
-        }
-        let cpu = match self.unpresented.take() {
-            Some(cpu) => cpu,
-            None => {
-                let started = Instant::now();
-                if !view.lineups.switch_next(&view.gpu, &mut view.map) {
-                    self.failure = Some(anyhow!("--bench-switch could not switch lineups ({} listed on {})", view.lineups.sandbox.lineups.len(), view.name));
-                    event_loop.exit();
-                    return;
-                }
-                started.elapsed().as_secs_f64() * 1e3
-            }
-        };
-        let drawing = Instant::now();
-        view.finish_frames = true;
-        let drawn = view.draw(false);
-        view.finish_frames = false;
-        match drawn {
-            Ok(true) => record.push((cpu, cpu + drawing.elapsed().as_secs_f64() * 1e3)),
-            Ok(false) => self.unpresented = Some(cpu),
-            Err(failure) => {
-                self.failure = Some(failure);
-                event_loop.exit();
-            }
-        }
-    }
-
     fn detach(&mut self, event_loop: &ActiveEventLoop) {
         let ready = self.ready_sent;
         self.control = None;
@@ -733,8 +600,8 @@ impl App {
                 view.check_revision(expected_revision)?;
                 let camera = camera.validated()?;
                 view.camera.set_pose(&camera);
-                // the camera is the controller's until a lineup or a view is picked
-                view.lineups.free = true;
+                // the camera is the controller's until a view is picked
+                view.app.free = true;
                 view.fly = Fly::default();
                 let _ = view.window.set_cursor_grab(CursorGrabMode::None);
                 view.window.set_cursor_visible(true);
@@ -775,7 +642,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Wake => {
                 if let Some(view) = self.view.as_mut()
-                    && view.lineups.receive(&view.gpu, &mut view.map, &mut view.name)
+                    && view.app.receive(&view.gpu, &mut view.map, &mut view.name)
                 {
                     view.window.request_redraw();
                 }
@@ -792,8 +659,8 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let Some(loader) = self.loader.take() else { return };
         clock::mark("resumed");
-        let lineups = self.lineups.take().expect("the lineups start with the app");
-        let first = View::new(event_loop, &self.instance, loader, &self.args, lineups).and_then(|view| {
+        let sandbox = self.sandbox.take().expect("the simulator starts with the app");
+        let first = View::new(event_loop, &self.instance, loader, &self.args, sandbox).and_then(|view| {
             let capture = self.args.screenshot.is_some();
             let view = self.view.insert(view);
             // the first frame is drawn as soon as the window exists, not on a later turn of the event loop
@@ -814,11 +681,6 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(view) = self.view.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::DroppedFile(path) => {
-                if let Some(imports) = &view.lineups.imports {
-                    imports.dropped(path);
-                }
-            }
             WindowEvent::KeyboardInput { event: ref key, .. } if view.modifiers.super_key() && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => {
                 view.modifiers = modifiers.state();
@@ -833,7 +695,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let timing = if !self.bench.is_empty() {
                     Some(("--bench-frames", format!("after {} frames", self.bench.len())))
                 } else {
-                    self.maps_bench.as_ref().and_then(lineups::MapsBench::picking).map(|map| ("--bench-maps", format!("while {map} was being picked")))
+                    self.maps_bench.as_ref().and_then(bench::MapsBench::picking).map(|map| ("--bench-maps", format!("while {map} was being picked")))
                 };
                 if let Some((flag, when)) = timing
                     && !event_loop.exiting()
@@ -851,17 +713,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.visible = true;
                     // the other maps wait until the window is on screen, so that nothing competes with its showing
                     if view.frames > 0 {
-                        view.lineups.open_other_maps(&view.gpu, &view.name);
+                        view.app.open_other_maps(&view.gpu, &view.name);
                     }
                     self.exit_once_on_screen(event_loop);
                     self.notify_ready(event_loop);
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.switching.is_some() {
-                    self.bench_switch(event_loop);
-                    return;
-                }
                 let capture = view.frames == 0 && self.args.screenshot.is_some();
                 let frame_started = Instant::now();
                 let drawn = view.draw(capture);
@@ -876,11 +734,8 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                     return;
                 }
-                if self.args.bench_switch.is_some() {
-                    self.bench_switch(event_loop);
-                }
                 if let (Some(bench), Some(view)) = (self.maps_bench.as_mut(), self.view.as_mut()) {
-                    match bench.step(&mut view.lineups, &view.name, drew, frame_ms) {
+                    match bench.step(&mut view.app, &view.name, drew, frame_ms) {
                         Some(report) => {
                             println!("{report}");
                             event_loop.exit();
@@ -898,7 +753,7 @@ impl ApplicationHandler<UserEvent> for App {
             && view.fly.looking
         {
             view.fly.look(&mut view.camera, dx, dy);
-            view.lineups.free = true;
+            view.app.free = true;
             view.revision += 1;
             view.window.request_redraw();
         }
@@ -914,7 +769,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(view) = &mut self.view {
             // the timed benches draw every frame they can: a window that gives them none (hidden or covered), or gives
             // them only what the window server hands a hidden window, would keep them waiting for ever or time it
-            let timed = [(self.args.bench_switch.is_some(), "--bench-switch"), (self.args.bench_frames.is_some(), "--bench-frames"), (self.maps_bench.is_some(), "--bench-maps")].into_iter().find_map(|(on, flag)| on.then_some(flag));
+            let timed = [(self.args.bench_frames.is_some(), "--bench-frames"), (self.maps_bench.is_some(), "--bench-maps")].into_iter().find_map(|(on, flag)| on.then_some(flag));
             if let Some(flag) = timed
                 && !event_loop.exiting()
             {
@@ -931,12 +786,10 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
             }
-            if view.fly.moving() || self.args.bench_frames.is_some() || self.args.bench_switch.is_some() || view.lineups.animating() {
+            if view.fly.moving() || self.args.bench_frames.is_some() || view.app.animating() {
                 view.window.request_redraw();
             }
-            // an idle window still notices an ingest, and reads the lineups again
-            view.lineups.sandbox.check_data();
-            if self.args.bench_frames.is_none() && self.args.bench_switch.is_none() {
+            if self.args.bench_frames.is_none() {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)));
             }
         }
@@ -959,7 +812,7 @@ struct View {
     fly: Fly,
     modifiers: winit::keyboard::ModifiersState,
     frames: u64,
-    /// When the surface last gave a frame to draw into: the fly's step, and how long `--bench-switch` has waited.
+    /// When the surface last gave a frame to draw into: the fly's step, and how long a timed bench has waited.
     last_frame: Instant,
     /// The first frame's pixels, copied out for `--screenshot`.
     readback: Option<wgpu::Buffer>,
@@ -972,11 +825,11 @@ struct View {
     window_visible: bool,
     collect_metrics: bool,
     observed: Option<ViewSignature>,
-    /// The lineups, their stages and the shell (lineups.rs).
-    lineups: lineups::Lineups,
+    /// The simulator and the shell (app.rs).
+    app: app::Sandbox,
     /// The map the targets were made for ([`Map::id`]): another map's post-processing is its own.
     targets_map: u64,
-    /// Wait for the GPU after each frame (the switch benches measure whole frames).
+    /// Wait for the GPU after each frame (the maps bench measures whole frames).
     finish_frames: bool,
 }
 
@@ -997,7 +850,7 @@ impl ViewSignature {
 }
 
 impl View {
-    fn new(event_loop: &ActiveEventLoop, instance: &wgpu::Instance, loader: JoinHandle<Result<Loaded>>, args: &Args, mut lineups: lineups::Lineups) -> Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, instance: &wgpu::Instance, loader: JoinHandle<Result<Loaded>>, args: &Args, mut app: app::Sandbox) -> Result<Self> {
         let attributes = Window::default_attributes().with_title(TITLE).with_inner_size(LogicalSize::new(WINDOW.0, WINDOW.1));
         let window = Arc::new(event_loop.create_window(attributes)?);
         if args.control_stdio { window.focus_window(); }
@@ -1012,25 +865,25 @@ impl View {
         let size = window.inner_size();
         let mut config = surface.get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1)).context("the window's surface does not work with this GPU")?;
         config.format = SURFACE_FORMAT;
-        config.present_mode = if args.bench_frames.is_some() || args.bench_switch.is_some() || args.bench_maps.is_some() { wgpu::PresentMode::AutoNoVsync } else { wgpu::PresentMode::AutoVsync };
+        config.present_mode = if args.bench_frames.is_some() || args.bench_maps.is_some() { wgpu::PresentMode::AutoNoVsync } else { wgpu::PresentMode::AutoVsync };
         if args.screenshot.is_some() || args.control_stdio {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&gpu.device, &config);
         // the loader made the targets for the 3D view in a Retina window of the usual size; any other size gets its own
         let scale = window.scale_factor();
-        let (width, height) = lineups::view_size((f64::from(config.width) / scale, f64::from(config.height) / scale), scale);
+        let (width, height) = app::view_size((f64::from(config.width) / scale, f64::from(config.height) / scale), scale);
         let targets = if targets.size() == (width, height) { targets } else { map.targets(&gpu.device, &gpu.queue, width, height) };
-        lineups.rect = egui::Rect::from_min_size(egui::pos2(shell::LEFT, shell::TOP), egui::vec2((f64::from(width) / scale) as f32, (f64::from(height) / scale) as f32));
-        lineups.sandbox.toward_sun = lineups::toward_sun(&map);
-        lineups.resident.budget = resident::budget(&gpu, args.budget_mb);
-        lineups.shown_bytes = map.gpu_bytes;
+        app.rect = egui::Rect::from_min_size(egui::pos2(shell::LEFT, shell::TOP), egui::vec2((f64::from(width) / scale) as f32, (f64::from(height) / scale) as f32));
+        app.toward_sun = app::toward_sun(&map);
+        app.resident.budget = resident::budget(&gpu, args.budget_mb);
+        app.shown_bytes = map.gpu_bytes;
         clock::mark("configured");
         let max_texture = gpu.device.limits().max_texture_dimension_2d as usize;
         let egui = egui_winit::State::new(context, egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(max_texture));
         clock::mark("egui");
         let targets_map = map.id;
-        Ok(Self { window, surface, config, targets, gpu, map, name, started: Instant::now(), egui, painter, camera: Camera::bench(), fly: Fly::default(), modifiers: Default::default(), frames: 0, last_frame: Instant::now(), readback: None, readback_size: (0, 0), capture_include_ui: true, revision: 0, rendered_revision: 0, rendered_time: 0.0, frame_cpu_ms: VecDeque::new(), window_visible: false, collect_metrics: args.control_stdio, observed: None, targets_map, lineups, finish_frames: args.bench_maps.is_some() })
+        Ok(Self { window, surface, config, targets, gpu, map, name, started: Instant::now(), egui, painter, camera: Camera::bench(), fly: Fly::default(), modifiers: Default::default(), frames: 0, last_frame: Instant::now(), readback: None, readback_size: (0, 0), capture_include_ui: true, revision: 0, rendered_revision: 0, rendered_time: 0.0, frame_cpu_ms: VecDeque::new(), window_visible: false, collect_metrics: args.control_stdio, observed: None, targets_map, app, finish_frames: args.bench_maps.is_some() })
     }
 
     fn check_revision(&self, expected: Option<u64>) -> std::result::Result<(), ControlError> {
@@ -1039,8 +892,8 @@ impl View {
 
     fn scene_rect(&self) -> nades_control::ViewportRect {
         let scale = self.window.scale_factor() as f32;
-        let x = (self.lineups.rect.min.x * scale).round().max(0.0) as u32;
-        let y = (self.lineups.rect.min.y * scale).round().max(0.0) as u32;
+        let x = (self.app.rect.min.x * scale).round().max(0.0) as u32;
+        let y = (self.app.rect.min.y * scale).round().max(0.0) as u32;
         let (width, height) = self.targets.size();
         nades_control::ViewportRect { x, y, width: width.min(self.config.width.saturating_sub(x)), height: height.min(self.config.height.saturating_sub(y)) }
     }
@@ -1048,7 +901,7 @@ impl View {
     fn refresh_revision(&mut self) {
         if !self.collect_metrics { return; }
         let current = ViewSignature {
-            map: self.name.clone(), camera: self.camera.pose(), scene: self.lineups.summary(),
+            map: self.name.clone(), camera: self.camera.pose(), scene: self.app.summary(),
             viewport: self.scene_rect(), window_size: (self.config.width, self.config.height),
         };
         current.observe(&mut self.observed, &mut self.revision);
@@ -1064,7 +917,7 @@ impl View {
             viewport: Viewport { width: self.config.width, height: self.config.height, scale_factor: self.window.scale_factor(), visible: self.window_visible },
             scene_viewport: self.scene_rect(),
             frame_id: self.frames, revision: self.revision, presented_revision: self.rendered_revision, render_time_seconds: self.rendered_time,
-            gpu: self.gpu.name(), draws: self.map.draws as u32, triangles: self.map.triangles, scene: self.lineups.summary(),
+            gpu: self.gpu.name(), draws: self.map.draws as u32, triangles: self.map.triangles, scene: self.app.summary(),
             startup_marks: clock::marks().into_iter().map(|(name, ms)| (name.into(), ms)).collect(),
             pre_main_ms: pre_main.is_finite().then_some(pre_main),
             metrics: FrameMetrics {
@@ -1091,7 +944,7 @@ impl View {
     fn input(&mut self, event: &WindowEvent) {
         let response = self.egui.on_window_event(&self.window, event);
         let over_shell = self.egui.egui_ctx().is_pointer_over_egui();
-        if self.lineups.input(event, over_shell, self.window.scale_factor()) {
+        if self.app.input(event, over_shell, self.window.scale_factor()) {
             self.revision += 1;
             self.window.request_redraw();
             return;
@@ -1099,13 +952,13 @@ impl View {
         match event {
             WindowEvent::KeyboardInput { event, .. } if !response.consumed && !self.egui.egui_ctx().egui_wants_keyboard_input() => {
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    // the fly keys take the camera from the lineup's view
+                    // the fly keys take the camera from the view shown
                     let fly = matches!(code, winit::keyboard::KeyCode::KeyW | winit::keyboard::KeyCode::KeyA | winit::keyboard::KeyCode::KeyS | winit::keyboard::KeyCode::KeyD | winit::keyboard::KeyCode::KeyE | winit::keyboard::KeyCode::KeyQ);
-                    if fly && event.state.is_pressed() && !self.lineups.free {
-                        if let Some(shown) = self.lineups.camera() {
-                            self.camera.set_pose(&lineups::pose_of(&shown));
+                    if fly && event.state.is_pressed() && !self.app.free {
+                        if let Some(shown) = self.app.camera() {
+                            self.camera.set_pose(&app::pose_of(&shown));
                         }
-                        self.lineups.free = true;
+                        self.app.free = true;
                     }
                     self.fly.key(code, event.state.is_pressed());
                 }
@@ -1150,38 +1003,37 @@ impl View {
         let (width, height) = (self.config.width, self.config.height);
 
         if !first {
-            self.lineups.receive(&self.gpu, &mut self.map, &mut self.name);
+            self.app.receive(&self.gpu, &mut self.map, &mut self.name);
         }
         laps.lap("receive");
         let input = self.egui.take_egui_input(&self.window);
-        let timings = self.lineups.timings();
-        let lineups = &mut self.lineups;
-        let output = self.egui.egui_ctx().run_ui(input, |ui| lineups.ui(ui, timings.clone()));
+        let timings = self.app.timings();
+        let sandbox = &mut self.app;
+        let output = self.egui.egui_ctx().run_ui(input, |ui| sandbox.ui(ui, timings.clone()));
         self.egui.handle_platform_output(&self.window, output.platform_output);
         let dt = (now - self.started).as_secs_f64() - self.rendered_time;
         laps.lap("shell");
-        self.lineups.update(&self.gpu, &mut self.map, &mut self.name, self.egui.egui_ctx(), dt.clamp(0.0, 0.1));
+        self.app.update(&self.gpu, &mut self.map, &mut self.name, self.egui.egui_ctx(), dt.clamp(0.0, 0.1));
         laps.lap("update");
-        // the 3D view: between the panels, at the window's scale, from the lineup's view (or the camera taken by hand)
+        // the 3D view: between the panels, at the window's scale, from the view shown (or the camera taken by hand)
         let scale = self.window.scale_factor() as f32;
-        let rect = self.lineups.rect;
+        let rect = self.app.rect;
         let size = ((rect.width() * scale).round().max(1.0) as u32, (rect.height() * scale).round().max(1.0) as u32);
         if size != self.targets.size() || self.targets_map != self.map.id {
             self.targets = self.map.targets(&self.gpu.device, &self.gpu.queue, size.0, size.1);
             self.targets_map = self.map.id;
             laps.lap("targets");
         }
-        let shown = self.lineups.camera();
-        if let Some(shown) = shown {
-            self.camera.set_pose(&lineups::pose_of(&shown));
+        if let Some(shown) = self.app.camera() {
+            self.camera.set_pose(&app::pose_of(&shown));
+        } else if !self.app.bench {
+            self.app.moved(self.camera.cs());
         }
-        // a map with no lineup's view yet stays clear, rather than drawn from another map's camera
-        let show_map = shown.is_some() || self.lineups.bench || self.lineups.free;
+        // a map switching in stays clear, rather than drawn from another map's camera
+        let show_map = !self.app.switching() || self.app.bench;
         let eye = self.camera.view();
-        if self.lineups.replay.is_some() {
-            self.map.ready_replay(&self.gpu.device, &self.targets);
-        }
-        let Some(effects) = self.lineups.frame(&self.gpu, &mut self.map, &eye, size, first || capture) else {
+        self.map.ready_clouds(&self.gpu.device, &self.targets);
+        let Some(effects) = self.app.frame(&self.gpu, &mut self.map, &eye, size, first || capture) else {
             // the picture is final (its smoke averaged): nothing to draw
             return Ok(false);
         };
@@ -1281,7 +1133,7 @@ impl View {
             }
         }
         laps.lap("present");
-        self.lineups.frame_parts = laps.parts;
+        self.app.frame_parts = laps.parts;
         self.frames += 1;
         self.rendered_revision = self.revision;
         if !first && self.collect_metrics {

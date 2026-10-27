@@ -77,6 +77,13 @@ impl Camera {
         self.eye_height = pose.eye_height_units;
     }
 
+    /// The CS2 camera: the eye (Hammer units), its angles and vertical field of view.
+    pub fn cs(&self) -> nades_scene::camera::View {
+        let p = self.pose();
+        let eye = glam::DVec3::new(p.position[0].into(), p.position[1].into(), f64::from(p.position[2]) + f64::from(p.eye_height_units));
+        nades_scene::camera::View { eye, pitch: p.pitch_degrees.into(), yaw: p.yaw_degrees.into(), fov: p.vertical_fov_degrees.into() }
+    }
+
     pub fn pose(&self) -> CameraPose {
         let source =
             Vec3::new(self.position.z, self.position.x, self.position.y) / nades_render::view::INCH;

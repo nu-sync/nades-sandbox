@@ -28,12 +28,6 @@ pub enum FireKind {
     Incendiary,
 }
 
-impl FireKind {
-    pub fn of(grenade: nades_model::Grenade) -> Self {
-        if grenade == nades_model::Grenade::Incendiary { FireKind::Incendiary } else { FireKind::Molotov }
-    }
-}
-
 /// A flame the fire spread to, in seconds after detonation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Flame {
@@ -118,7 +112,6 @@ pub struct Fire {
     peaks: Vec<Peak>,
 }
 
-const TICK: f64 = 1.0 / 64.0;
 /// Everything still burning fades out this fast once the fire goes out.
 const END_CAP: f64 = 0.25;
 /// Flecks and steam are shown for this long after the fire; the scrubber runs this far past it.
@@ -158,21 +151,6 @@ fn burns(kind: FireKind) -> f64 {
         FireKind::Molotov => 7.031_25,
         FireKind::Incendiary => 5.5,
     }
-}
-
-/// A fire's flames as the facts record them, in seconds after `detonate_tick`.
-pub fn flames_of(rows: &[nades_model::Flame], detonate_tick: i32) -> Vec<Flame> {
-    rows.iter()
-        .map(|f| {
-            let n = f.normal.map_or([0.0, 0.0, 1.0], |n| n.map(f64::from));
-            Flame {
-                pos: f.pos.map(f64::from),
-                normal: normalize(n),
-                start: f64::from(f.first.0 - detonate_tick) * TICK,
-                end: f64::from(f.last.0 + 1 - detonate_tick) * TICK,
-            }
-        })
-        .collect()
 }
 
 pub fn build_fire(flames: Vec<Flame>, kind: FireKind) -> Option<Fire> {
@@ -957,13 +935,6 @@ mod tests {
         let full = fire.fullest_at();
         assert!(full > 1.0 && full <= 2.5, "{full}");
         assert_eq!(fire.lasts(), 9.5);
-    }
-
-    #[test]
-    fn flames_take_their_ticks_from_the_detonation() {
-        let rows = [nades_model::Flame { slot: 0, pos: [1.0, 2.0, 3.0], normal: None, first: nades_model::Tick(3100), last: nades_model::Tick(3163) }];
-        let flames = flames_of(&rows, 3100);
-        assert_eq!(flames[0], Flame { pos: [1.0, 2.0, 3.0], normal: [0.0, 0.0, 1.0], start: 0.0, end: 1.0 });
     }
 
     #[test]

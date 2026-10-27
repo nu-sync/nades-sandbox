@@ -1,43 +1,34 @@
-//! One throw turned into what the sandbox draws and where it can look from: the thrower's view at release, a zoom on
-//! the aim point, a result shot of what the grenade left from where an opponent actually stood while it was up, and a
-//! free orbit around it. A port of show-me-the-nades' `web/app/src/scene/stage.ts`, with the flight's clock from
-//! `render/effects.ts` and the moments `SceneView.tsx` shows each view at, built from a throw's facts, its tracks and
-//! what nades-model derives of them.
+//! One simulated throw turned into what the sandbox draws and where it can look from: the thrower's view at release,
+//! the flight with its clock, and what it leaves (a smoke's cloud, a fire, a flash's or HE's burst), with the point a
+//! result view looks at. The flight's clock is `render/effects.ts`'s and the result camera `stage.ts`'s, from
+//! show-me-the-nades' web view; the flight and the effects themselves come from the simulator (nades-physics,
+//! nades-effects).
 
 use glam::{DQuat, DVec3};
-use nades_model::{Derived, Effect, Grenade, Throw, Tracks};
 
-use crate::camera::{AIM_FOV, FIRE_FRAMING, Framing, MIN_SEEN, SMOKE_FRAMING, ShotCamera, Source, View, Viewer, angles_to, eye_at, pick_result_camera, spread_points, vertical_fov};
+use crate::camera::{FIRE_FRAMING, Framing, MIN_SEEN, SMOKE_FRAMING, ShotCamera, Source, View, angles_to, pick_result_camera, spread_points};
 use crate::collider::Collider;
-use crate::fire::{Fire, FireKind, build_fire, flames_of};
-use crate::smoke::{Cloud, smoke_cloud};
+use crate::fire::{Fire, FireKind, Flame, build_fire};
+use crate::smoke::Cloud;
 
+/// The grenades, as the scene draws them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ViewMode {
-    /// The thrower's eye at release, with the crosshair.
-    Lineup,
-    /// The same eye zoomed on the aim point.
-    Aim,
-    /// An opponent's eye, with the effect as the round had it.
-    Result,
-    /// Anywhere around the effect, by dragging.
-    Orbit,
+pub enum Grenade {
+    Smoke,
+    Flash,
+    He,
+    Molotov,
+    Incendiary,
+    Decoy,
 }
 
-impl ViewMode {
-    pub const ALL: [ViewMode; 4] = [ViewMode::Lineup, ViewMode::Aim, ViewMode::Result, ViewMode::Orbit];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            ViewMode::Lineup => "Lineup",
-            ViewMode::Aim => "Aim",
-            ViewMode::Result => "Result",
-            ViewMode::Orbit => "Orbit",
-        }
+impl Grenade {
+    pub fn is_fire(self) -> bool {
+        matches!(self, Grenade::Molotov | Grenade::Incendiary)
     }
 }
 
-/// The recorded flight with its clock: where the grenade was at each tick, and the tick it went off.
+/// The flight with its clock: where the grenade was at each tick, and the tick it went off.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flight {
     pub points: Vec<DVec3>,
@@ -56,6 +47,12 @@ const ROLLING_SLOPE: f64 = 0.15;
 const ROLLING_SPEED: f64 = 350.0;
 
 impl Flight {
+    /// From samples in seconds on any clock (one a tick, as the simulator gives them) and the moment it went off.
+    pub fn of(samples: &[(f64, DVec3)], detonate: f64) -> Option<Self> {
+        let tick = |t: f64| (t * 64.0).round() as i32;
+        (samples.len() > 1).then(|| Self::new(samples.iter().map(|(_, p)| *p).collect(), samples.iter().map(|(t, _)| tick(*t)).collect(), tick(detonate)))
+    }
+
     fn new(points: Vec<DVec3>, ticks: Vec<i32>, detonate: i32) -> Self {
         let spins = spin_along(&points, &ticks);
         Self { points, ticks, detonate, spins }
@@ -139,16 +136,6 @@ impl Burst {
     }
 }
 
-/// A line from a flash to a player it blinded.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BlindLine {
-    pub from: DVec3,
-    pub eye: DVec3,
-    /// 0..1: how long they were blind, of 3 s.
-    pub strength: f64,
-    pub enemy: bool,
-}
-
 /// A point light an effect puts on the map (three.js's PointLight in the web view): linear colour, intensity in
 /// candela, the distance it reaches and how it falls off.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,157 +168,93 @@ pub fn nade_color(grenade: Grenade) -> [f64; 3] {
 
 #[derive(Debug, Clone)]
 pub struct Stage {
-    pub throw_id: String,
     pub grenade: Grenade,
-    pub lineup: View,
-    pub aim: View,
-    /// The flight, drawn in result and orbit shots; a lineup shot shows the thrower's view without it.
+    /// The thrower's eye and angles at release.
+    pub thrower: View,
     pub flight: Option<Flight>,
     pub cloud: Option<Cloud>,
     pub fire: Option<Fire>,
     pub burst: Option<Burst>,
-    pub blinded: Vec<BlindLine>,
-    /// What a result shot looks at: the cloud, the fire, or the landing.
+    /// Where it went off.
+    pub detonation: DVec3,
+    /// What a result view looks at: the cloud, the fire, or the detonation.
     pub focus: DVec3,
     /// Points spread over the effect (the focus first); a result shot must see enough of them.
     pub targets: Vec<DVec3>,
     /// Every voxel of the cloud or every flame; a result shot keeps its eye clear of them.
     pub body: Vec<DVec3>,
-    /// For a flash: the eye of the enemy it blinded longest, whose view is the result shot, and for how long.
-    pub victim: Option<(DVec3, f64)>,
-    /// Seconds after detonation a result shot shows, how long the effect lasts, and when the grenade left the hand
-    /// (the moment the lineup and aim views show).
+    /// Seconds after detonation a result view shows (the effect at its fullest), how long the effect lasts, and when
+    /// the grenade left the hand (negative: before it went off).
     pub result_time: f64,
     pub duration: f64,
     pub release_time: f64,
-    /// The tick it went off: its time 0 (a replay's clock for it).
-    pub detonate_tick: i32,
-    /// What the stage could not draw, said plainly (e.g. a throw ingested before tracks existed).
-    pub missing: Vec<&'static str>,
 }
 
-fn three(v: [f32; 3]) -> DVec3 {
-    DVec3::new(v[0].into(), v[1].into(), v[2].into())
+/// What a simulated throw gives the stage: the grenade, the thrower's view at release, the flight (seconds and points
+/// on the throw's clock), where and when it went off, and its effect (the smoke's cloud, the fire's flames).
+pub struct Simulated {
+    pub grenade: Grenade,
+    pub thrower: View,
+    pub flight: Vec<(f64, DVec3)>,
+    pub release: f64,
+    pub detonation: (f64, DVec3),
+    pub cloud: Option<Cloud>,
+    pub flames: Vec<Flame>,
 }
 
-/// The thrower's view at release: their eye where they stood (nades-model's rule), their angles, CS2's field of view.
-/// Without the thrower's pawn, the eye is the grenade's start.
-pub fn lineup_view(t: &Throw, d: &Derived) -> View {
-    let eye = nades_model::derive::eye(t, d.technique.as_ref()).map_or_else(|| three(t.start), DVec3::from_array);
-    let angle = |a: Option<f32>| a.map_or(0.0, f64::from);
-    let pawn = t.thrower.as_ref();
-    View { eye, pitch: angle(pawn.and_then(|p| p.pitch)), yaw: angle(pawn.and_then(|p| p.yaw)), fov: vertical_fov() }
-}
+/// How long a decoy's or a burst's stage runs on after it goes off, with nothing left to draw.
+const NO_EFFECT: f64 = 2.0;
 
-/// The tick the grenade went off, the flight's clock: one that never did goes off when its airtime ran out.
-fn goes_off(t: &Throw, d: &Derived) -> i32 {
-    t.detonation.map_or_else(|| t.tick.0 + (64.0 * f64::from(d.airtime.unwrap_or(1.0)).max(0.2) + 0.5).floor() as i32, |(at, _)| at.0)
-}
-
-/// A player a flash blinded, where they stood and whether an enemy, longest first (those without a position cannot be
-/// drawn).
-struct Blinded {
-    pos: [f32; 3],
-    seconds: f32,
-    enemy: bool,
-}
-
-fn blinded_by(t: &Throw, tracks: &Tracks) -> Vec<Blinded> {
-    let Effect::Flash(blinds) = &tracks.effect else { return Vec::new() };
-    let mut out: Vec<Blinded> = blinds.iter().filter(|b| b.seconds > 0.0).filter_map(|b| Some(Blinded { pos: b.pos?, seconds: b.seconds, enemy: b.side.is_none_or(|s| s != t.side) })).collect();
-    out.sort_by(|a, b| b.seconds.total_cmp(&a.seconds));
-    out
-}
-
-pub fn build_stage(t: &Throw, tracks: &Tracks, d: &Derived) -> Stage {
-    let lineup = lineup_view(t, d);
-    let mut missing = Vec::new();
-    let land = three(d.landing.unwrap_or(t.start));
-    let detonate = t.detonation.map_or(t.tick.0, |(at, _)| at.0);
+pub fn build_stage(s: Simulated) -> Stage {
+    let (detonate, land) = s.detonation;
+    let flight = Flight::of(&s.flight, detonate);
     let mut focus = land + DVec3::new(0.0, 0.0, 32.0);
-    let (mut cloud, mut fire, mut burst, mut blinded, mut victim) = (None, None, None, Vec::new(), None);
+    let (mut fire, mut burst) = (None, None);
     let mut result_time = 0.05;
     let mut body: Vec<DVec3> = Vec::new();
-    let mut duration = if d.effect_recorded { f64::from(d.effect_seconds) } else { 2.0 };
-
-    let flight = (tracks.flight.len() > 1).then(|| Flight::new(tracks.flight.iter().map(|(_, p)| three(*p)).collect(), tracks.flight.iter().map(|(tick, _)| tick.0).collect(), goes_off(t, d)));
-    if flight.is_none() {
-        missing.push("flight path");
-    }
-
-    match (t.grenade, &tracks.effect) {
-        (Grenade::Smoke, effect) => {
-            let voxels = if let Effect::Smoke(Some(v)) = effect { Some(v) } else { None };
-            // the grid is centred on m_vSmokeDetonationPos, else on where it went off
-            cloud = voxels.and_then(|v| smoke_cloud(&v.bytes, three(v.origin.or(t.detonation.map(|(_, at)| at))?)));
-            match &cloud {
-                Some(c) => {
-                    focus = c.focus();
-                    result_time = c.settled_seconds();
-                    body = c.voxels();
-                }
-                None => missing.push("smoke cloud"),
+    let mut duration = NO_EFFECT;
+    match s.grenade {
+        Grenade::Smoke => {
+            if let Some(c) = &s.cloud {
+                focus = c.focus();
+                result_time = c.settled_seconds();
+                body = c.voxels();
+                duration = c.hold_seconds + 2.5;
             }
         }
-        (Grenade::Molotov | Grenade::Incendiary, effect) => {
-            let flames = if let Effect::Fire(flames) = effect { flames.as_slice() } else { &[] };
-            if !flames.is_empty() {
-                let f = build_fire(flames_of(flames, detonate), FireKind::of(t.grenade)).expect("flames to build from");
+        Grenade::Molotov | Grenade::Incendiary => {
+            let kind = if s.grenade == Grenade::Incendiary { FireKind::Incendiary } else { FireKind::Molotov };
+            let points: Vec<DVec3> = s.flames.iter().map(|f| DVec3::from_array(f.pos)).collect();
+            if let Some(f) = build_fire(s.flames, kind) {
                 // the fire is a carpet a foot deep: a result shot looks at the flame nearest the fire's middle, since
                 // the middle of a fire that ran down a floor is inside a wall
                 let centre = DVec3::from_array(f.centre);
-                let middle = flames.iter().map(|f| three(f.pos)).fold(None, |a: Option<DVec3>, p| match a {
-                    Some(a) if centre.distance_squared(p) >= centre.distance_squared(a) => Some(a),
-                    _ => Some(p),
-                });
-                let middle = middle.expect("flames");
-                focus = DVec3::new(middle.x, middle.y, middle.z + 12.0);
-                body = flames.iter().map(|f| three(f.pos) + DVec3::new(0.0, 0.0, 12.0)).collect();
+                let middle = points.iter().copied().min_by(|a, b| centre.distance_squared(*a).total_cmp(&centre.distance_squared(*b))).unwrap_or(centre);
+                focus = middle + DVec3::new(0.0, 0.0, 12.0);
+                body = points.iter().map(|p| *p + DVec3::new(0.0, 0.0, 12.0)).collect();
                 result_time = f.fullest_at();
                 // the scrubber runs on past the fire, through the flecks and steam it leaves
                 duration = f.lasts();
                 fire = Some(f);
-            } else if d.effect_recorded {
-                missing.push("fire spread");
             }
         }
-        (Grenade::Flash | Grenade::He, _) => {
-            let flash = t.grenade == Grenade::Flash;
-            burst = Some(Burst { flash, at: land });
-            let caught = blinded_by(t, tracks);
-            if flash && !caught.is_empty() {
-                blinded = caught.iter().map(|b| BlindLine { from: land, eye: three(b.pos) + DVec3::new(0.0, 0.0, 64.0), strength: (f64::from(b.seconds) / 3.0).min(1.0), enemy: b.enemy }).collect();
-                if let Some(worst) = caught.iter().find(|b| b.enemy) {
-                    victim = Some((eye_at(three(worst.pos), Some(0.0)), f64::from(worst.seconds)));
-                }
-                // frame the flash and the players it caught
-                let points: Vec<DVec3> = std::iter::once(land).chain(caught.iter().map(|b| three(b.pos) + DVec3::new(0.0, 0.0, 40.0))).collect();
-                let sum = points.iter().fold(DVec3::ZERO, |a, b| a + *b);
-                focus = sum * (1.0 / points.len() as f64);
-            }
-        }
-        (Grenade::Decoy, _) => {}
+        Grenade::Flash | Grenade::He => burst = Some(Burst { flash: s.grenade == Grenade::Flash, at: land }),
+        Grenade::Decoy => {}
     }
-
     Stage {
-        throw_id: t.id.0.clone(),
-        grenade: t.grenade,
-        aim: View { fov: AIM_FOV, ..lineup },
-        lineup,
+        grenade: s.grenade,
+        thrower: s.thrower,
         flight,
-        cloud,
+        cloud: s.cloud,
         fire,
         burst,
-        blinded,
+        detonation: land,
         targets: spread_points(&body, focus, 0.35),
         focus,
         body,
-        victim,
         result_time,
         duration,
-        release_time: -f64::from(d.airtime.unwrap_or(1.0)).max(0.2),
-        detonate_tick: goes_off(t, d),
-        missing,
+        release_time: (s.release - detonate).min(0.0),
     }
 }
 
@@ -339,15 +262,6 @@ impl Stage {
     /// The scrubber's span: from release to the effect's end (or a second after it went off).
     pub fn timeline(&self) -> (f64, f64) {
         (self.release_time, self.duration.max(1.0))
-    }
-
-    /// The moment each view opens at: the release for the thrower's views, the effect at its fullest for the result,
-    /// and the release for the orbit, which then plays.
-    pub fn opens_at(&self, view: ViewMode) -> f64 {
-        match view {
-            ViewMode::Lineup | ViewMode::Aim | ViewMode::Orbit => self.release_time,
-            ViewMode::Result => self.result_time,
-        }
     }
 
     /// The light the effect puts on the map at `t`, if any (the fire's, a flash's or an HE's).
@@ -363,22 +277,15 @@ impl Stage {
         (on > 0.0).then_some(Light { at: burst.at, color, intensity: peak * on, distance, decay: 1.3 })
     }
 
-    /// The result shot: an opponent's view of the focus with nothing in between. When no opponent had one, a spot on
-    /// the floor around the focus that sees it, preferring the far side from the thrower.
-    pub fn result_camera(&self, viewers: &[Viewer], collider: Option<&Collider>) -> ShotCamera {
-        let target = self.focus;
-        if let Some((eye, seconds)) = self.victim {
-            // what the player it blinded longest saw as it went off
-            let at = self.flight.as_ref().map_or(target, |f| f.points[f.points.len() - 1]);
-            return ShotCamera::looking(eye, at, Source::Victim { seconds });
-        }
+    /// A result shot: a standing eye on the floor around the focus that sees most of the effect, preferring the far
+    /// side from the thrower; without the collider, an overview from the thrower's side.
+    pub fn result_camera(&self, collider: Option<&Collider>) -> ShotCamera {
         let framing: Framing = if self.grenade.is_fire() { FIRE_FRAMING } else { SMOKE_FRAMING };
         let seen = |eye: DVec3| collider.map_or(1.0, |c| seen_share(c, eye, &self.targets));
         let gap = |eye: DVec3| nearest(eye, &self.body);
-        let mut shot = pick_result_camera(viewers, target, self.lineup.eye, seen, framing, gap);
-        if !matches!(shot.source, Source::Opponent { .. })
-            && let Some(c) = collider
-            && let Some(standing) = standing_view(c, self.focus, self.lineup.eye, |eye| if gap(eye) < framing.clear { 0.0 } else { seen(eye) })
+        let mut shot = pick_result_camera(&[], self.focus, self.thrower.eye, seen, framing, gap);
+        if let Some(c) = collider
+            && let Some(standing) = standing_view(c, self.focus, self.thrower.eye, |eye| if gap(eye) < framing.clear { 0.0 } else { seen(eye) })
         {
             shot = standing;
         }
@@ -451,99 +358,47 @@ fn standing_view(c: &Collider, focus: DVec3, thrower: DVec3, seen: impl Fn(DVec3
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nades_model::technique::{Click, Movement};
-    use nades_model::{Blind, Flame, Pawn, Player, Side, Technique, ThrowId, Tick, fixture};
+    use crate::camera::vertical_fov;
 
-    /// A throw released in the air at 1000 from a take-off at (10, 20, 30), its pawn's origin at (1, 2, 3), looking at
-    /// pitch -10, yaw 90, gone off at 1100 where it landed: its facts, a three-point flight, and its derivations.
-    fn throw(grenade: Grenade) -> (Throw, Tracks, Derived) {
-        let mut t = fixture::throw("t", "d", grenade, Side::T, [12.0, 22.0, 94.0]);
-        t.tick = Tick(1000);
-        t.player = Player { name: Some("ropz".into()), steamid: None };
-        t.thrower = Some(Pawn { origin: [1.0, 2.0, 3.0], takeoff: Some([10.0, 20.0, 30.0]), pitch: Some(-10.0), yaw: Some(90.0), on_ground: Some(false), duck: Some(0.0), ..Default::default() });
-        t.detonation = Some((Tick(1100), [500.0, 600.0, 0.0]));
-        let tracks = Tracks { flight: vec![(Tick(1000), [12.0, 22.0, 94.0]), (Tick(1050), [250.0, 300.0, 300.0]), (Tick(1100), [500.0, 600.0, 0.0])], effect: Effect::Explosion };
-        let d = Derived::of(&t, None);
-        (t, tracks, d)
-    }
-
-    fn crouched(d: &mut Derived) {
-        d.technique = Some(Technique { movement: Movement::Stand, click: Some(Click::Left), crouched: true });
-    }
-
-    #[test]
-    fn the_lineup_is_the_throwers_eye_where_they_stood() {
-        let (mut t, tracks, mut d) = throw(Grenade::He);
-        let v = lineup_view(&t, &d);
-        assert_eq!((v.eye, v.pitch, v.yaw), (DVec3::new(10.0, 20.0, 94.0), -10.0, 90.0));
-        // crouched, the eye is 46 up; without a take-off point, from the origin; without the pawn, the release point
-        crouched(&mut d);
-        assert_eq!(lineup_view(&t, &d).eye.z, 76.0);
-        t.thrower.as_mut().unwrap().takeoff = None;
-        assert_eq!(lineup_view(&t, &d).eye, DVec3::new(1.0, 2.0, 49.0));
-        t.thrower = None;
-        assert_eq!(lineup_view(&t, &d).eye, DVec3::new(12.0, 22.0, 94.0));
-        let (t, _, d) = throw(Grenade::He);
-        let stage = build_stage(&t, &tracks, &d);
-        assert_eq!((stage.aim.fov, stage.aim.eye), (AIM_FOV, stage.lineup.eye));
-        assert_eq!(stage.release_time, -1.5625);
-        assert_eq!(stage.opens_at(ViewMode::Result), 0.05);
-        assert_eq!(stage.duration, 2.0, "an HE has no recorded effect");
+    fn simulated(grenade: Grenade) -> Simulated {
+        let thrower = View { eye: DVec3::new(0.0, 0.0, 64.0), pitch: -10.0, yaw: 0.0, fov: vertical_fov() };
+        // released 0.1 s into the throw, up over (250, 0, 300) at 50 ticks, down at (500, 0, 0) where it goes off
+        let flight = vec![(0.1, DVec3::new(10.0, 0.0, 64.0)), (0.1 + 50.0 / 64.0, DVec3::new(250.0, 0.0, 300.0)), (0.1 + 100.0 / 64.0, DVec3::new(500.0, 0.0, 0.0))];
+        Simulated { grenade, thrower, flight, release: 0.1, detonation: (0.1 + 100.0 / 64.0, DVec3::new(500.0, 0.0, 0.0)), cloud: None, flames: Vec::new() }
     }
 
     #[test]
     fn the_flight_plays_until_it_goes_off_and_marks_its_bounce() {
-        let (t, tracks, d) = throw(Grenade::He);
-        let stage = build_stage(&t, &tracks, &d);
+        let stage = build_stage(simulated(Grenade::He));
+        assert_eq!(stage.release_time, -100.0 / 64.0);
         let flight = stage.flight.as_ref().unwrap();
         assert_eq!(flight.marks().len(), 3, "release, the turn at the top, the stop");
-        // in the hand at release; halfway up at 50 ticks before detonation; gone once it goes off
+        // in the hand at release; halfway up 50 ticks before detonation; gone once it goes off
         assert!(flight.grenade_at(-100.0 / 64.0).is_none());
         let (mid, _) = flight.grenade_at(-50.0 / 64.0).unwrap();
-        assert!(mid.distance(DVec3::new(250.0, 300.0, 300.0)) < 1e-9);
+        assert!(mid.distance(DVec3::new(250.0, 0.0, 300.0)) < 1e-9);
         assert!(flight.grenade_at(0.0).is_none());
+        assert_eq!(stage.burst, Some(Burst { flash: false, at: DVec3::new(500.0, 0.0, 0.0) }));
         assert!(stage.light_at(0.1).is_some_and(|l| l.intensity > 0.0) && stage.light_at(0.3).is_none());
-        let still = Tracks { flight: Vec::new(), ..tracks };
-        assert_eq!(build_stage(&t, &still, &d).missing, ["flight path"]);
-    }
-
-    #[test]
-    fn a_flash_shows_the_enemy_it_blinded_longest() {
-        let (t, mut tracks, d) = throw(Grenade::Flash);
-        let blind = |x: f32, seconds: f32, side: Side| Blind { player: Player::default(), side: Some(side), pos: Some([x, 600.0, 0.0]), seconds };
-        tracks.effect = Effect::Flash(vec![blind(900.0, 0.5, Side::Ct), blind(600.0, 1.0, Side::T), Blind { pos: None, ..blind(0.0, 3.0, Side::Ct) }]);
-        let stage = build_stage(&t, &tracks, &d);
-        assert_eq!(stage.victim, Some((DVec3::new(900.0, 600.0, 64.0), 0.5)));
-        assert_eq!(stage.blinded.len(), 2, "one without a position is not drawn");
-        assert!(!stage.blinded[0].enemy && stage.blinded[1].enemy, "longest first; a teammate is no enemy");
-        let shot = stage.result_camera(&[], None);
-        assert_eq!(shot.source, Source::Victim { seconds: 0.5 });
-        // it looks at where the flash went off: the flight's end
-        assert!((shot.yaw - 180.0).abs() < 1e-9);
-        assert!(stage.focus.distance(DVec3::new(2000.0 / 3.0, 600.0, 80.0 / 3.0)) < 1e-9, "{}", stage.focus);
+        assert_eq!((stage.duration, stage.focus), (NO_EFFECT, DVec3::new(500.0, 0.0, 32.0)));
     }
 
     #[test]
     fn a_fire_frames_the_flame_nearest_its_middle() {
-        let (mut t, mut tracks, _) = throw(Grenade::Molotov);
-        t.end = Some(Tick(1100 + 7 * 64));
-        let d = Derived::of(&t, None);
-        assert!(d.effect_recorded && d.effect_seconds == 7.0);
-        tracks.effect = Effect::Fire([(400.0, 1100), (500.0, 1110), (650.0, 1150)].iter().enumerate().map(|(slot, &(x, first))| Flame { slot: slot as u32, pos: [x, 600.0, 0.0], normal: Some([0.0, 0.0, 1.0]), first: Tick(first), last: Tick(1500) }).collect());
-        let stage = build_stage(&t, &tracks, &d);
-        assert_eq!(stage.focus, DVec3::new(500.0, 600.0, 12.0));
+        let mut s = simulated(Grenade::Molotov);
+        s.flames = [(400.0, 0.0), (500.0, 0.15), (650.0, 0.8)].iter().map(|&(x, start)| Flame { pos: [x, 0.0, 0.0], normal: [0.0, 0.0, 1.0], start, end: 7.0 }).collect();
+        let stage = build_stage(s);
+        assert_eq!(stage.focus, DVec3::new(500.0, 0.0, 12.0));
         assert_eq!(stage.body.len(), 3);
         assert!(stage.duration > 7.0);
-        // nobody watched: without a collider, an overview from the thrower's side
-        let shot = stage.result_camera(&[], None);
-        assert_eq!(shot.source, Source::Overview);
         assert!(stage.light_at(1.0).is_some_and(|l| l.intensity > 900.0));
-        // an incendiary is a fire too, framed as one; one that burned without its flames says so
-        t.grenade = Grenade::Incendiary;
-        assert!(build_stage(&t, &tracks, &d).fire.is_some());
-        tracks.effect = Effect::Fire(Vec::new());
-        assert_eq!(build_stage(&t, &tracks, &d).missing, ["fire spread"]);
-        assert_eq!(build_stage(&t, &tracks, &d).throw_id, ThrowId("t".into()).0);
+        // nobody's floor to stand on without the collider: an overview from the thrower's side
+        assert_eq!(stage.result_camera(None).source, Source::Overview);
+        // an incendiary is a fire too; a fire with no flames draws none
+        let mut s = simulated(Grenade::Incendiary);
+        s.flames = vec![Flame { pos: [500.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0], start: 0.0, end: 5.5 }];
+        assert_eq!(build_stage(s).fire.map(|f| f.kind), Some(FireKind::Incendiary));
+        assert!(build_stage(simulated(Grenade::Molotov)).fire.is_none());
     }
 
     #[test]

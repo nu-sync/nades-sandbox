@@ -9,7 +9,6 @@ publish.workspace = true
 [dependencies]
 nades-control = { path = "../control" }
 nades-pack.workspace = true
-nades-model.workspace = true
 nades-config.workspace = true
 rmcp = { version = "=3.7.0", features = ["server", "transport-io", "macros", "schemars"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "fs", "signal"] }

@@ -1,5 +1,6 @@
-//! What the sandbox reopens on: the map, lineup, view and camera last shown, in `~/.cache/nades/sandbox/state.json`
-//! (`NADES_SANDBOX_STATE` names another file). The camera is kept so the first frame needs no database read.
+//! What the sandbox reopens on: the map and camera last shown, and each map's last camera, in
+//! `~/.cache/nades/sandbox/state.json` (`NADES_SANDBOX_STATE` names another file). The camera is kept so the first frame
+//! opens where the last run left off.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,10 +10,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Remembered {
     pub map: String,
-    pub lineup: Option<String>,
-    pub throw: Option<String>,
-    /// lineup, aim, result or orbit
-    pub view: Option<String>,
     /// The CS2 camera shown: eye (Hammer units), pitch, yaw, vertical field of view (degrees).
     pub camera: Option<Camera>,
     /// Each map's last camera, so any map opened before opens where it was left.
@@ -63,7 +60,7 @@ mod tests {
     #[test]
     fn the_state_reads_back_as_written() {
         let cameras = BTreeMap::from([("de_cache".to_string(), ([9.0, 8.0, 7.0], 1.0, 2.0, 73.7))]);
-        let state = Remembered { map: "de_inferno".into(), lineup: Some("inferno-smoke-0001".into()), throw: Some("t".into()), view: Some("result".into()), camera: Some(([1.0, 2.0, 3.0], 4.0, 5.0, 73.7)), cameras };
+        let state = Remembered { map: "de_inferno".into(), camera: Some(([1.0, 2.0, 3.0], 4.0, 5.0, 73.7)), cameras };
         let json = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<Remembered>(&json).unwrap(), state);
         // each map opens where it was left
@@ -72,5 +69,7 @@ mod tests {
         assert_eq!(state.camera_on("de_nuke"), None);
         // a file from an older build still reads, with what it lacks left out
         assert_eq!(serde_json::from_str::<Remembered>(r#"{"map":"de_cache"}"#).unwrap().map, "de_cache");
+        // and one from the lineup sandbox, with what it no longer keeps left out
+        assert_eq!(serde_json::from_str::<Remembered>(r#"{"map":"de_cache","lineup":"x","throw":"t","view":"result"}"#).unwrap().map, "de_cache");
     }
 }

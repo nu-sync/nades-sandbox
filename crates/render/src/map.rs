@@ -22,7 +22,7 @@ use nades_pack::scene::{AlphaMode, CubemapFog, Draw, GradientFog, IndexFormat, L
 use wgpu::util::DeviceExt as _;
 
 use crate::post::{self, HDR_FORMAT};
-use crate::smoke::{Composite, SmokeFrame, SmokeLight};
+use crate::smoke::{Composite, SmokeLight};
 use crate::throw::{ThrowLayer, ThrowTargets, to_scene};
 use crate::view::{INCH, SkyPlacement, View};
 
@@ -296,11 +296,10 @@ pub struct PointLight {
     pub decay: f32,
 }
 
-/// What a frame draws of the shown throw beyond what [`Map::throw`] holds: the smoke, the effect's light on the map,
-/// and how many jittered frames the target has averaged.
+/// What a frame draws of the scene's throws beyond what [`Map::throw`] and [`Map::composite`] hold: the effects' light
+/// on the map, and how many jittered frames the target has averaged.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FrameEffects {
-    pub smoke: Option<SmokeFrame>,
     pub light: Option<PointLight>,
     pub accumulated: u32,
 }
@@ -673,7 +672,7 @@ impl Map {
         let sky_view = self.placement.map_or(*view, |p| p.view(view));
         queue.write_buffer(&self.map_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(view, aspect, &self.map_light, size, seconds, effects.light.as_ref())));
         queue.write_buffer(&self.sky_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(&sky_view, aspect, &self.sky_light, size, seconds, None)));
-        self.composite.prepare(queue, view, size, effects.smoke);
+        self.composite.prepare(queue, view, size);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky"),
@@ -701,12 +700,12 @@ impl Map {
             self.throw.draw_scene(&mut pass);
         }
         self.effects_pass(encoder, targets, &self.map_frame.1, &self.map_effects, true);
-        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if effects.smoke.is_some() || self.composite.replaying() { effects.accumulated } else { 0 }, view);
+        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if self.composite.any() { effects.accumulated } else { 0 }, view);
         self.post.encode(encoder, &targets.post);
     }
 
-    /// Readies the composite's targets for a replay's clouds at `targets`' size.
-    pub fn ready_replay(&mut self, device: &wgpu::Device, targets: &Targets) {
+    /// Readies the composite's targets for the clouds at `targets`' size.
+    pub fn ready_clouds(&mut self, device: &wgpu::Device, targets: &Targets) {
         self.composite.ready_targets(device, targets.size(), &targets.depth);
     }
 

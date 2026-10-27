@@ -8,7 +8,6 @@
 
 use std::fmt;
 
-use crate::facts::Throw;
 
 /// Full-strength release speed (`750 · 0.9`).
 pub const THROW_SPEED: f64 = 675.0;
@@ -157,22 +156,6 @@ impl fmt::Display for Technique {
     }
 }
 
-/// The technique and the solved release, from the initial velocity and the thrower's angles, velocity and ground
-/// state; None while any of them is unknown.
-pub fn of(throw: &Throw) -> Option<(Technique, Release)> {
-    let v0 = throw.velocity?;
-    let pawn = throw.thrower.as_ref()?;
-    let (pitch, yaw, velocity, on_ground) = (pawn.pitch?, pawn.yaw?, pawn.velocity?, pawn.on_ground?);
-    let release = invert(f64::from(pitch), f64::from(yaw), [f64::from(velocity[0]), f64::from(velocity[1])], v0.map(f64::from));
-    let horizontal = f64::from(velocity[0]).hypot(f64::from(velocity[1]));
-    let technique = Technique {
-        movement: Movement::of(!on_ground, release.player_vz, horizontal),
-        click: Some(Click::of(release.strength)),
-        crouched: pawn.duck.is_some_and(|d| d > CROUCHED),
-    };
-    Some((technique, release))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,23 +203,5 @@ mod tests {
         assert_eq!(Click::of(1.0), Click::Left);
         assert_eq!(Click::of(0.48), Click::Middle);
         assert_eq!(Click::of(0.0), Click::Right);
-    }
-
-    #[test]
-    fn a_throw_needs_its_release_facts_and_names_its_technique_as_the_format_does() {
-        let mut t = crate::fixture::throw("t", "d", crate::Grenade::Smoke, crate::Side::T, [0.0, 0.0, 64.0]);
-        assert_eq!(of(&t), None, "no initial velocity, no pawn");
-        // a crouched jump-throw, left click: the player's vertical speed 221.9 at release
-        let (pitch, yaw) = (-20.0_f32, 45.0_f32);
-        let v0 = release_velocity(f64::from(pitch), f64::from(yaw), 1.0, [0.0, 0.0, CROUCH_JUMPTHROW_VZ]);
-        t.velocity = Some(v0.map(|v| v as f32));
-        t.thrower = Some(crate::Pawn { origin: [0.0, 0.0, 0.0], pitch: Some(pitch), yaw: Some(yaw), velocity: Some([0.0, 0.0, 0.0]), on_ground: Some(false), duck: Some(1.0), ..Default::default() });
-        let (technique, release) = of(&t).unwrap();
-        assert_eq!(technique, Technique { movement: Movement::Jumpthrow, click: Some(Click::Left), crouched: true });
-        assert!((release.player_vz - CROUCH_JUMPTHROW_VZ).abs() < 1e-3);
-        assert_eq!(technique.name(), "jumpthrow+crouch/left");
-        // the ground state is needed
-        t.thrower.as_mut().unwrap().on_ground = None;
-        assert_eq!(of(&t), None);
     }
 }

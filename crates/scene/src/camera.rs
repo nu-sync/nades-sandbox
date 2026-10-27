@@ -13,7 +13,9 @@ pub fn vertical_fov() -> f64 {
 }
 /// About 3× the normal view: the zoom lineup sites use for the aim point.
 pub const AIM_FOV: f64 = 28.0;
-pub use nades_model::derive::{EYE_CROUCHED, EYE_STANDING};
+/// The eye over the feet, standing and crouched.
+pub const EYE_STANDING: f64 = 64.0;
+pub const EYE_CROUCHED: f64 = 46.0;
 
 fn rad(deg: f64) -> f64 {
     deg * std::f64::consts::PI / 180.0
@@ -34,9 +36,9 @@ pub fn angles_to(from: DVec3, to: DVec3) -> (f64, f64) {
     (-deg(d.z.atan2(hypot2(d.x, d.y))), deg(d.y.atan2(d.x)))
 }
 
-/// Where the eye is for someone standing at `feet`; a partial duck lowers it in proportion (nades-model's rule).
+/// Where the eye is for someone standing at `feet`; a partial duck lowers it in proportion.
 pub fn eye_at(feet: DVec3, duck: Option<f64>) -> DVec3 {
-    DVec3::from_array(nades_model::derive::eye_at(feet.to_array(), duck))
+    feet + DVec3::Z * (EYE_STANDING - (EYE_STANDING - EYE_CROUCHED) * duck.unwrap_or(0.0).clamp(0.0, 1.0))
 }
 
 /// Math.hypot of three, as camera.ts's `distance` computes it.
@@ -82,7 +84,7 @@ pub struct View {
     pub fov: f64,
 }
 
-/// An opponent's sample while the effect was up (a nades-model viewpoint).
+/// Someone who could watch the effect: where they stand, and their view's angles when known.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Viewer {
     pub tick: i32,
@@ -90,13 +92,6 @@ pub struct Viewer {
     pub feet: DVec3,
     pub pitch: Option<f64>,
     pub yaw: Option<f64>,
-}
-
-/// A result shot judges a viewpoint from its standing eye, as the web view does, whatever its duck amount.
-impl From<&nades_model::Viewpoint> for Viewer {
-    fn from(v: &nades_model::Viewpoint) -> Self {
-        Self { tick: v.tick.0, player: v.player.name.clone(), feet: DVec3::new(v.origin[0].into(), v.origin[1].into(), v.origin[2].into()), pitch: v.pitch.map(f64::from), yaw: v.yaw.map(f64::from) }
-    }
 }
 
 /// Whose view a result shot is.

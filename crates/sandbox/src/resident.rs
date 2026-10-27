@@ -66,7 +66,7 @@ pub fn warm(device: &wgpu::Device, queue: &wgpu::Queue, map: &Map, view: &View) 
 /// Draws `map` `frames` times offscreen from `view` with `effects`, at the window's usual size; `wait` for each on the
 /// GPU (a loader thread does; the window's thread does not).
 pub fn draw_offscreen(device: &wgpu::Device, queue: &wgpu::Queue, map: &Map, view: &View, effects: &FrameEffects, frames: u32, wait: bool) {
-    let (width, height) = crate::lineups::view_size(crate::WINDOW, crate::EXPECTED_SCALE);
+    let (width, height) = crate::app::view_size(crate::WINDOW, crate::EXPECTED_SCALE);
     let targets = map.targets(device, queue, width, height);
     let output = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("warm-up"),

@@ -17,8 +17,6 @@ nades-render = { path = "crates/render" }
 nades-pack = { path = "crates/pack" }
 nades-source2 = { path = "crates/source2" }
 nades-model = { path = "crates/model" }
-nades-source-file = { path = "crates/source-file" }
-nades-source-demo = { path = "crates/source-demo" }
 nades-config = { path = "crates/config" }
 nades-packer = { path = "crates/packer" }
 nades-scene = { path = "crates/scene" }
@@ -40,11 +38,6 @@ block2 = "0.6.2"
 objc2 = "0.6.5"
 
 # data and assets
-# the cs2-throws files (crates/source-file): SQLite, bundled
-rusqlite = { version = "0.41", features = ["bundled"] }
-# CS2 demos (crates/source-demo): awpy's parser, and the demo file's SHA-256 that names it
-awpy = "3.1"
-sha2 = "0.10"
 # the platform's config and cache folders (docs/standalone-api.md §8) and the config file
 directories = "6"
 toml = { version = "1", default-features = false, features = ["parse", "serde"] }

@@ -1,16 +1,16 @@
-//! What a throw adds to the map (`throw.wgsl`): the recorded flight as a tube with its marks and the grenade flying
-//! along it, the lines to the players a flash blinded, a flash's or HE's burst, and a fire's sprites with the film and
-//! scorch under its flames, as show-me-the-nades' web view draws them (`render/effects.ts`, `render/fire.ts`).
+//! What the scene's throws add to the map (`throw.wgsl`): flights as tubes with their marks, each grenade flying along
+//! its own, a flash's or HE's burst, and a fire's sprites with the film and scorch under its flames, as
+//! show-me-the-nades' web view draws them (`render/effects.ts`, `render/fire.ts`).
 //!
-//! Everything is in Hammer units with z up, as the database stores it; the frame's matrices take it to the scene's
-//! frame. A stage's static geometry is built once when it is shown ([`ThrowLayer::set_stage`]); what moves (the
-//! grenade, the fire's sprites, the bursts) is rewritten for each moment ([`ThrowLayer::set_time`]).
+//! Everything is in Hammer units with z up; the frame's matrices take it to the scene's frame. The arcs are built when
+//! they change ([`ThrowLayer::set_arcs`]); what moves (the grenades, the fires' sprites, the bursts) is rewritten for
+//! each moment ([`ThrowLayer::set_moment`]).
 
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Vec3};
-use nades_scene::fire::{self, Fire, FireKind};
+use nades_scene::fire::{self, FireKind};
 use nades_scene::stage::{Stage, nade_color};
 use wgpu::util::DeviceExt as _;
 
@@ -121,28 +121,6 @@ impl Meshes {
             }
             previous = next;
         }
-    }
-
-    /// A replay's player: a body and a head in their side's colour, and a line from the eye where they look; dead, a
-    /// dark disc where they fell.
-    fn player(&mut self, p: &ReplayPlayer, alpha: f32) {
-        let feet = Vec3::from_array(p.origin);
-        let [r, g, b] = side_color(p.ct);
-        if !p.alive {
-            let squash = Mat4::from_scale(Vec3::new(1.0, 1.0, 0.18));
-            self.ellipsoid(feet + Vec3::Z * 2.0, 15.0, 0.0, squash, [r * 0.35, g * 0.35, b * 0.35, alpha], [0.0, 0.0]);
-            return;
-        }
-        let lift = if p.followed { 1.2 } else { 1.0 };
-        let colour = [r * lift, g * lift, b * lift, alpha];
-        self.ellipsoid(feet + Vec3::Z * 32.0, 12.0, 30.0, Mat4::IDENTITY, colour, [0.0, 0.0]);
-        let eye = feet + Vec3::Z * 64.0;
-        self.sphere(eye, 7.5, colour, [0.0, 0.0]);
-        let (pitch, yaw) = (p.pitch.to_radians(), p.yaw.to_radians());
-        let forward = Vec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin());
-        let tip = eye + forward * 46.0;
-        self.tube(&[eye + forward * 6.0, tip], 1.6, 6, [1.0, 1.0, 1.0, alpha], [0.0, 0.0]);
-        self.sphere(tip, 2.6, [1.0, 1.0, 1.0, alpha], [0.0, 0.0]);
     }
 
     fn sphere(&mut self, centre: Vec3, radius: f32, color: [f32; 4], params: [f32; 2]) {
@@ -352,18 +330,25 @@ fn mipmapped(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, pixels: &[
     texture
 }
 
-/// What a stage keeps on the GPU while it is shown.
-struct Shown {
-    stage_id: String,
-    /// The static meshes: the opaque marks, then the tube, then what draws over everything.
-    meshes: Option<wgpu::Buffer>,
+/// The arcs on the GPU: the opaque marks, then the tubes, then their faint copies over everything.
+struct Arcs {
+    meshes: wgpu::Buffer,
     opaque: std::ops::Range<u32>,
     tube: std::ops::Range<u32>,
     overlay: std::ops::Range<u32>,
-    fire: Option<(Fire, Option<[Sequences; 3]>)>,
 }
 
-/// The throw's pipelines, its textures, and what the shown stage puts on the GPU.
+/// A flight drawn as a tube with its marks (release, bounces, rest), in its grenade's colour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arc {
+    pub points: Vec<DVec3>,
+    pub marks: Vec<(DVec3, f64)>,
+    pub color: [f64; 3],
+    /// Drawn thicker and brighter (the selected throw, the throw being aimed).
+    pub strong: bool,
+}
+
+/// The throws' pipelines, their textures, and what the scene puts on the GPU.
 pub struct ThrowLayer {
     frame: wgpu::Buffer,
     group: wgpu::BindGroup,
@@ -381,42 +366,17 @@ pub struct ThrowLayer {
     clamped: wgpu::Sampler,
     /// The flipbooks on the GPU, their names and grids, once loaded.
     books: Option<GpuBooks>,
-    shown: Option<Shown>,
+    arcs: Option<Arcs>,
     /// What moves, rewritten for each moment: the grenade's mesh, the bursts, the sprites, the patches.
     moving: Option<(wgpu::Buffer, u32)>,
     glows: Option<(wgpu::Buffer, u32)>,
     sprites: Option<(wgpu::Buffer, u32)>,
     patches: Option<(wgpu::Buffer, u32)>,
-    /// Whether the stage's flight shows (the result and orbit views).
-    pub flight_visible: bool,
-    /// Towards the map's sun (Hammer units' axes), which lights the grenade in flight.
+    /// Towards the map's sun (Hammer units' axes), which lights the grenades in flight.
     pub toward_sun: Vec3,
-    /// Seconds after detonation of the moment written last: before it, only the grenade flies, not its tube.
-    time: f64,
-    /// A replay's incendiaries: their own frame values and flipbooks, beside the molotovs the main group binds.
+    /// The incendiaries: their own frame values and flipbooks, beside the molotovs the main group binds.
     second: Option<(wgpu::Buffer, wgpu::BindGroup)>,
     second_sprites: Option<(wgpu::Buffer, u32)>,
-    /// A replay's living players again, faint, where walls hide them.
-    ghosts: Option<(wgpu::Buffer, u32)>,
-}
-
-/// One player in a replay's moment, in Hammer units.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ReplayPlayer {
-    /// The pawn's origin (its feet).
-    pub origin: [f32; 3],
-    /// `m_angEyeAngles`, degrees, pitch positive looking down.
-    pub pitch: f32,
-    pub yaw: f32,
-    pub ct: bool,
-    pub alive: bool,
-    /// The followed player: drawn brighter.
-    pub followed: bool,
-}
-
-/// The sides' colours in a replay: T gold, CT blue.
-pub fn side_color(ct: bool) -> [f32; 3] {
-    if ct { [0.06, 0.24, 1.0] } else { [1.0, 0.55, 0.04] }
 }
 
 /// The throw's draws read the scene's depth through this, one per frame size.
@@ -550,17 +510,14 @@ impl ThrowLayer {
             repeated,
             clamped,
             books: None,
-            shown: None,
+            arcs: None,
             moving: None,
             glows: None,
             sprites: None,
             patches: None,
-            flight_visible: false,
             toward_sun: Vec3::Z,
-            time: 0.0,
             second: None,
             second_sprites: None,
-            ghosts: None,
         }
     }
 
@@ -590,12 +547,6 @@ impl ThrowLayer {
     /// Plays the fire's flipbooks (on the GPU already, [`Flipbooks::upload`]) in the fires shown from now on.
     pub fn set_flipbooks(&mut self, device: &wgpu::Device, books: &GpuBooks) {
         self.books = Some(books.clone());
-        // the shown fire's books, if any, take effect when its stage is set again
-        if let Some(shown) = &mut self.shown
-            && let Some((fire, sequences)) = &mut shown.fire
-        {
-            *sequences = Self::sequences_of(self.books.as_ref(), fire.kind);
-        }
         self.rebind(device);
     }
 
@@ -606,10 +557,9 @@ impl ThrowLayer {
         Some([find(names[0])?, find(names[1])?, find(names[2])?])
     }
 
-    /// Binds the shown fire's three flipbooks (or the blank one).
+    /// Binds the molotov's three flipbooks (or the blank one) in the main group, the incendiary's in the second.
     fn rebind(&mut self, device: &wgpu::Device) {
-        let kind = self.shown.as_ref().and_then(|s| s.fire.as_ref()).map_or(FireKind::Molotov, |(f, _)| f.kind);
-        self.group = self.group_for(device, &self.frame, kind);
+        self.group = self.group_for(device, &self.frame, FireKind::Molotov);
         // the incendiaries' group follows the books too
         if let Some((frame, _)) = self.second.take() {
             let group = self.group_for(device, &frame, FireKind::Incendiary);
@@ -634,60 +584,31 @@ impl ThrowLayer {
         Self::bind(device, &self.group_layout, frame, &self.noise, &self.palette, views, &self.repeated, &self.clamped)
     }
 
-    /// Builds what `stage` shows that does not move: the flight's tube and marks, the blind lines; and readies its fire.
-    pub fn set_stage(&mut self, device: &wgpu::Device, stage: Option<&Stage>) {
-        // after a replay, its players and fires go
-        if self.second_sprites.as_ref().is_some_and(|(_, n)| *n > 0) {
-            self.second_sprites = self.second_sprites.take().map(|(b, _)| (b, 0));
-        }
-        let Some(stage) = stage else {
-            self.shown = None;
-            return;
-        };
-        if self.shown.as_ref().is_some_and(|s| s.stage_id == stage.throw_id) {
-            return;
-        }
+    /// Builds the arcs' tubes and marks, with a faint copy of each tube drawn where walls hide it so the arc still reads.
+    pub fn set_arcs(&mut self, device: &wgpu::Device, arcs: &[Arc]) {
         let mut opaque = Meshes::default();
         let mut tube = Meshes::default();
         let mut overlay = Meshes::default();
-        if let Some(flight) = &stage.flight {
-            let color = nade_color(stage.grenade);
-            let curve = catmull_rom(&flight.points, (flight.points.len() * 6).min(600));
-            tube.tube(&curve, 1.6, 8, rgba(color, 0.9), [0.0, 1.0]);
-            // the same tube, faint, where walls hide it, so the arc still reads
-            overlay.tube(&curve, 1.6, 8, rgba(color, 0.22), [0.0, 1.0]);
-            for (at, size) in flight.marks() {
-                opaque.sphere(v3(at), 4.0 * size as f32, rgba(color, 1.0), [0.0, 0.0]);
+        for arc in arcs.iter().filter(|a| a.points.len() > 1) {
+            let color = arc.color;
+            let (radius, alpha, ghost) = if arc.strong { (1.6, 0.9, 0.22) } else { (1.0, 0.55, 0.1) };
+            let curve = catmull_rom(&arc.points, (arc.points.len() * 6).min(600));
+            tube.tube(&curve, radius, 8, rgba(color, alpha), [0.0, 1.0]);
+            overlay.tube(&curve, radius, 8, rgba(color, ghost), [0.0, 1.0]);
+            for (at, size) in &arc.marks {
+                opaque.sphere(v3(*at), 4.0 * *size as f32 * radius / 1.6, rgba(color, 1.0), [0.0, 0.0]);
             }
-        }
-        for line in &stage.blinded {
-            let color = if line.enemy {
-                let s = line.strength as f32;
-                [1.0, 0.85 + 0.15 * s, 0.3 + 0.7 * s, 0.85]
-            } else {
-                [1.0, 0.35, 0.3, 0.85]
-            };
-            overlay.tube(&[v3(line.from), v3(line.eye)], 0.9 + line.strength as f32 * 1.4, 6, color, [0.0, 0.0]);
-            overlay.sphere(v3(line.eye), 7.0, [color[0], color[1], color[2], 0.9], [0.0, 0.0]);
         }
         let opaque_count = opaque.vertices.len() as u32;
         let tube_count = tube.vertices.len() as u32;
         let overlay_count = overlay.vertices.len() as u32;
         let all: Vec<Vertex> = opaque.vertices.into_iter().chain(tube.vertices).chain(overlay.vertices).collect();
-        let meshes = (!all.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("throw meshes"), contents: bytemuck::cast_slice(&all), usage: wgpu::BufferUsages::VERTEX }));
-        let fire = stage.fire.clone().map(|f| {
-            let sequences = Self::sequences_of(self.books.as_ref(), f.kind);
-            (f, sequences)
-        });
-        self.shown = Some(Shown {
-            stage_id: stage.throw_id.clone(),
-            meshes,
+        self.arcs = (!all.is_empty()).then(|| Arcs {
+            meshes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("arcs"), contents: bytemuck::cast_slice(&all), usage: wgpu::BufferUsages::VERTEX }),
             opaque: 0..opaque_count,
             tube: opaque_count..opaque_count + tube_count,
             overlay: opaque_count + tube_count..opaque_count + tube_count + overlay_count,
-            fire,
         });
-        self.rebind(device);
     }
 
     /// The frame's values for the throw's shaders, the fire's flipbooks being `kind`'s.
@@ -719,77 +640,11 @@ impl ThrowLayer {
         }
     }
 
-    /// Writes what the shown stage looks like `t` seconds after detonation, from `view` into targets of `size`.
-    pub fn set_time(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, stage: Option<&Stage>, t: f64, view: &View, size: (u32, u32)) {
-        self.time = t;
-        self.second_sprites = self.second_sprites.take().map(|(b, _)| (b, 0));
-        self.ghosts = self.ghosts.take().map(|(b, _)| (b, 0));
-        let kind = self.shown.as_ref().and_then(|s| s.fire.as_ref()).map(|(f, _)| f.kind);
-        let uniform = self.uniform(t, view, size, kind);
-        queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&uniform));
-
-        // the grenade in flight, before it goes off
-        let mut moving = Meshes::default();
-        if self.flight_visible
-            && let Some((at, spin)) = stage.and_then(|s| s.flight.as_ref()).and_then(|f| f.grenade_at(t))
-        {
-            let color = stage.map_or([1.0; 3], |s| nade_color(s.grenade));
-            let turn = Mat4::from_quat(glam::Quat::from_xyzw(spin.x as f32, spin.y as f32, spin.z as f32, spin.w as f32));
-            moving.ellipsoid(v3(at), 1.7, 2.2, turn, rgba(color, 1.0), [1.0, 0.0]);
-        }
-        self.moving = upload(device, queue, self.moving.take(), "grenade", &moving.vertices);
-
-        let mut glows = Vec::new();
-        if let Some(burst) = stage.and_then(|s| s.burst) {
-            let on = burst.on(t) as f32;
-            if on > 0.0 {
-                let (size, color) = if burst.flash { (260.0, [3.2, 3.2, 3.6]) } else { (300.0, [3.0, 1.2, 0.35]) };
-                glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, size], color: [color[0], color[1], color[2], on] });
-            }
-        }
-        self.glows = upload(device, queue, self.glows.take(), "bursts", &glows);
-
-        let (mut sprites, mut patches) = (Vec::new(), Vec::new());
-        if let Some(shown) = &self.shown
-            && let Some((fire, sequences)) = &shown.fire
-        {
-            sprites = fire::instances(fire.kind, &fire.sprites_at(t), sequences.as_ref())
-                .into_iter()
-                .map(|i| SpriteInstance { pos: [i.pos[0], i.pos[1], i.pos[2], 0.0], shape: i.shape, look: i.look, colour: i.colour, tone: i.tone, book: i.book })
-                .collect();
-            patches = fire
-                .patches_at(t)
-                .into_iter()
-                .map(|p| PatchInstance { pos: [p.pos[0] as f32, p.pos[1] as f32, p.pos[2] as f32, 0.0], normal: [p.normal[0] as f32, p.normal[1] as f32, p.normal[2] as f32, 0.0], data: [p.radius as f32, p.glow as f32, p.scorch as f32, p.seed as f32] })
-                .collect();
-        }
-        self.sprites = upload(device, queue, self.sprites.take(), "fire sprites", &sprites);
-        self.patches = upload(device, queue, self.patches.take(), "fire ground", &patches);
-    }
-
-    /// A replay's moment: every player, and each throw still showing with its stage's own time (seconds after its
-    /// detonation): the grenade while it flies, its burst, its fire. Nothing of a single shown stage stays.
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_replay(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, moment: &[(&Stage, f64)], players: &[ReplayPlayer], view: &View, size: (u32, u32)) {
-        if self.shown.is_some() {
-            self.shown = None;
-            // the main group binds the molotov's flipbooks
-            self.rebind(device);
-        }
-        self.time = 0.0;
-        self.flight_visible = false;
-        self.ghosts = self.ghosts.take().map(|(b, _)| (b, 0));
+    /// A moment of the scene: each throw with its stage's own time (seconds after its detonation, negative before):
+    /// the grenade while it flies, its burst, its fire.
+    pub fn set_moment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, moment: &[(&Stage, f64)], view: &View, size: (u32, u32)) {
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&self.uniform(0.0, view, size, Some(FireKind::Molotov))));
-
         let mut moving = Meshes::default();
-        let mut ghosts = Meshes::default();
-        for p in players {
-            moving.player(p, 1.0);
-            if p.alive {
-                ghosts.player(p, 0.35);
-            }
-        }
-        self.ghosts = upload(device, queue, self.ghosts.take(), "replay players behind walls", &ghosts.vertices);
         let mut glows = Vec::new();
         let (mut molotov, mut incendiary, mut patches) = (Vec::new(), Vec::new(), Vec::new());
         for (stage, t) in moment {
@@ -798,7 +653,7 @@ impl ThrowLayer {
                 && let Some((at, spin)) = stage.flight.as_ref().and_then(|f| f.grenade_at(t))
             {
                 let turn = Mat4::from_quat(glam::Quat::from_xyzw(spin.x as f32, spin.y as f32, spin.z as f32, spin.w as f32));
-                moving.ellipsoid(v3(at), 1.7 * 1.6, 2.2 * 1.6, turn, rgba(nade_color(stage.grenade), 1.0), [1.0, 0.0]);
+                moving.ellipsoid(v3(at), 1.7 * 1.3, 2.2 * 1.3, turn, rgba(nade_color(stage.grenade), 1.0), [1.0, 0.0]);
             }
             if let Some(burst) = stage.burst {
                 let on = burst.on(t) as f32;
@@ -816,7 +671,7 @@ impl ThrowLayer {
                 patches.extend(f.patches_at(t).into_iter().map(|p| PatchInstance { pos: [p.pos[0] as f32, p.pos[1] as f32, p.pos[2] as f32, 0.0], normal: [p.normal[0] as f32, p.normal[1] as f32, p.normal[2] as f32, 0.0], data: [p.radius as f32, p.glow as f32, p.scorch as f32, p.seed as f32] }));
             }
         }
-        self.moving = upload(device, queue, self.moving.take(), "replay meshes", &moving.vertices);
+        self.moving = upload(device, queue, self.moving.take(), "grenades", &moving.vertices);
         self.glows = upload(device, queue, self.glows.take(), "bursts", &glows);
         self.sprites = upload(device, queue, self.sprites.take(), "fire sprites", &molotov);
         self.patches = upload(device, queue, self.patches.take(), "fire ground", &patches);
@@ -831,59 +686,40 @@ impl ThrowLayer {
         self.second_sprites = upload(device, queue, self.second_sprites.take(), "fire sprites (incendiary)", &incendiary);
     }
 
-    /// The draws in the map's pass, over its depth: marks and the grenade, the tube, the bursts, then what draws over
-    /// everything (the tube's faint copy, the blind lines).
+    /// The draws in the map's pass, over its depth: the arcs' marks, the grenades, the tubes, the bursts, then the tubes'
+    /// faint copies over everything.
     pub fn draw_scene(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.group, &[]);
-        // the flight's tube and marks show once it has gone off (render/effects.ts): before, the grenade flies alone
-        let flight = self.flight_visible && self.time >= 0.0;
-        let meshes = self.shown.as_ref().and_then(|s| Some((s, s.meshes.as_ref()?)));
-        if let Some((shown, meshes)) = meshes
-            && flight
-            && !shown.opaque.is_empty()
+        if let Some(arcs) = &self.arcs
+            && !arcs.opaque.is_empty()
         {
             pass.set_pipeline(&self.mesh_opaque);
-            pass.set_vertex_buffer(0, meshes.slice(..));
-            pass.draw(shown.opaque.clone(), 0..1);
+            pass.set_vertex_buffer(0, arcs.meshes.slice(..));
+            pass.draw(arcs.opaque.clone(), 0..1);
         }
-        // the grenade in flight, and a replay's players
         if let Some((buffer, count)) = self.moving.as_ref().filter(|(_, n)| *n > 0) {
             pass.set_pipeline(&self.mesh_opaque);
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..*count, 0..1);
         }
-        if let Some((shown, meshes)) = meshes
-            && flight
-            && !shown.tube.is_empty()
+        if let Some(arcs) = &self.arcs
+            && !arcs.tube.is_empty()
         {
             pass.set_pipeline(&self.mesh_tube);
-            pass.set_vertex_buffer(0, meshes.slice(..));
-            pass.draw(shown.tube.clone(), 0..1);
+            pass.set_vertex_buffer(0, arcs.meshes.slice(..));
+            pass.draw(arcs.tube.clone(), 0..1);
         }
         if let Some((buffer, count)) = self.glows.as_ref().filter(|(_, n)| *n > 0) {
             pass.set_pipeline(&self.glow);
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..6, 0..*count);
         }
-        if let Some(shown) = &self.shown
-            && let Some(meshes) = &shown.meshes
+        if let Some(arcs) = &self.arcs
+            && !arcs.overlay.is_empty()
         {
-            // the tube's faint copy only with the tube; the blind lines always
-            let tube_ghost = shown.overlay.start..shown.overlay.start + shown.tube.len() as u32;
-            let lines = tube_ghost.end..shown.overlay.end;
             pass.set_pipeline(&self.mesh_overlay);
-            pass.set_vertex_buffer(0, meshes.slice(..));
-            if flight && !tube_ghost.is_empty() {
-                pass.draw(tube_ghost, 0..1);
-            }
-            if !lines.is_empty() {
-                pass.draw(lines, 0..1);
-            }
-        }
-        if let Some((buffer, count)) = self.ghosts.as_ref().filter(|(_, n)| *n > 0) {
-            pass.set_pipeline(&self.mesh_overlay);
-            pass.set_vertex_buffer(0, buffer.slice(..));
-            pass.draw(0..*count, 0..1);
+            pass.set_vertex_buffer(0, arcs.meshes.slice(..));
+            pass.draw(arcs.overlay.clone(), 0..1);
         }
     }
 
@@ -906,7 +742,7 @@ impl ThrowLayer {
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..6, 0..*count);
         }
-        // a replay's incendiaries, with their own flipbooks
+        // the incendiaries, with their own flipbooks
         if let (Some((buffer, count)), Some((_, group))) = (self.second_sprites.as_ref().filter(|(_, n)| *n > 0), &self.second) {
             pass.set_bind_group(0, group, &[]);
             pass.set_pipeline(&self.sprite);

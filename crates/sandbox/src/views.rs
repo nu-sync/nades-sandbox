@@ -1,17 +1,14 @@
-//! The four views of a lineup as renderer cameras: the thrower's eye at release (Lineup), the same eye zoomed to 28°
-//! (Aim), the result shot's eye (Result) and a free orbit around the effect (Orbit), from a stage's CS2 cameras (Hammer
-//! units, z up, CS angles).
+//! CS2 cameras (Hammer units, z up, CS angles) as renderer cameras, and the orbit around a throw's result.
 //!
-//! The orbit opens where the web view's does, on the thrower's view at release; the first drag turns it onto the
-//! effect, and from then on it circles it as three.js's OrbitControls do (`render/engine.ts` `setOrbit`): from straight
-//! down to a little past level, 80 to 5,000 units out.
+//! The orbit opens on a view it is given (the thrower's at release, or the result shot); the first drag turns it onto
+//! the effect, and from then on it circles it as three.js's OrbitControls do (show-me-the-nades' `render/engine.ts`
+//! `setOrbit`): from straight down to a little past level, 80 to 5,000 units out.
 
 use glam::DVec3;
 use nades_render::View;
-use nades_scene::camera::{ShotCamera, View as CsView, angles_to, vertical_fov};
+use nades_scene::camera::{View as CsView, angles_to, vertical_fov};
 #[cfg(test)]
 use nades_scene::camera::forward;
-use nades_scene::stage::{Stage, ViewMode};
 
 /// A renderer camera from a CS2 eye (Hammer units), angles and vertical field of view (degrees).
 pub fn cs_view(eye: DVec3, pitch: f64, yaw: f64, fov: f64) -> View {
@@ -85,16 +82,6 @@ impl Orbit {
         let eye = self.eye();
         let (pitch, yaw) = angles_to(eye, self.target);
         CsView { eye, pitch, yaw, fov: vertical_fov() }
-    }
-}
-
-/// The CS2 camera a view of `stage` opens with; `result` is its result shot, `orbit` the orbit when it moves.
-pub fn camera(view: ViewMode, stage: &Stage, result: &ShotCamera, orbit: Option<&Orbit>) -> CsView {
-    match view {
-        ViewMode::Lineup => stage.lineup,
-        ViewMode::Aim => stage.aim,
-        ViewMode::Result => CsView { eye: result.eye, pitch: result.pitch, yaw: result.yaw, fov: vertical_fov() },
-        ViewMode::Orbit => orbit.map_or(stage.lineup, Orbit::view),
     }
 }
 

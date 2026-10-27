@@ -1,6 +1,6 @@
 [package]
 name = "nades-model"
-description = "The sandbox's vocabulary and rules: CS2 throws as the game records them, the port a data source implements, and what the sandbox derives from them"
+description = "CS2's own encodings and rules the sandbox keeps: the smoke's voxel log, the grenade release model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
