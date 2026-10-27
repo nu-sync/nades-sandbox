@@ -353,6 +353,11 @@ show-me-the-nades' scripts make:
 
 Workshop maps use the same VPK layout, so they work once the packer reads VPKs directly.
 
+**Status (step 3, decisions S25):** the collider (byte for byte awpy's mesh, from the map's physics), the shared
+effects pack, the entity lumps, the sky and post-processing records and the textures now come from the game's files,
+with Source 2 Viewer's CLI run by the packer; the §8 settings for packs, CS2's files and the CLI are in. The geometry
+export (`<map>.glb`, `<map>.skybox.glb`) is still `export_map.py`'s.
+
 ## 8. Configuration
 
 | Setting | Flag | Environment | Config file (`config.toml` in the platform's config folder) | Default |

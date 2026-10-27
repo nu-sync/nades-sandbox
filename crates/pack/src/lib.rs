@@ -13,6 +13,7 @@
 //! upload path serves every texture. [`scene`] documents that interface; [`Pack::scene`], [`Pack::geometry`] and
 //! [`Pack::textures`] read it.
 
+pub mod effects;
 pub mod scene;
 
 use std::fs::File;
@@ -41,8 +42,11 @@ pub enum SectionKind {
     /// Texture mips as GPU blocks (BC1/BC3/BC4/BC5/BC6H/BC7) or RGBA8, rows padded for buffer-to-texture copies, in
     /// chunks ([`scene::Texture`]): the materials', the lightmaps' and the sky's.
     Textures,
-    /// The collision mesh's triangles and its bounding volume hierarchy, for line of sight (M3).
+    /// The collision mesh's triangles, for line of sight: awpy's AWMH layout ("AWMH", version 1, the vertex and
+    /// triangle counts, 3 × f32 a vertex, 3 × u32 a triangle), made from the map's physics (crates/packer, physics.rs).
     Collider,
+    /// The shared effects pack's one section: an [`effects::Effects`] (postcard).
+    Effects,
 }
 
 /// Where the pack came from, so a new export or a game update rebuilds it.
@@ -138,6 +142,19 @@ impl Pack {
     /// The Geometry section (empty when the pack has none): the bytes [`scene::Draw`]'s spans point into.
     pub fn geometry(&self) -> &[u8] {
         self.section(SectionKind::Geometry).unwrap_or_default()
+    }
+
+    /// The Collider section, when the pack has one.
+    pub fn collider(&self) -> Option<&[u8]> {
+        self.section(SectionKind::Collider)
+    }
+
+    /// The effects of the shared effects pack, checked.
+    pub fn effects(&self) -> Result<effects::Effects, PackError> {
+        let bytes = self.section(SectionKind::Effects).ok_or_else(|| PackError::Scene("the pack has no Effects section".into()))?;
+        let effects = effects::Effects::from_bytes(bytes).map_err(|e| PackError::Scene(format!("unreadable effects: {e}")))?;
+        effects.validate().map_err(PackError::Scene)?;
+        Ok(effects)
     }
 
     /// The Textures section (empty when the pack has none): the bytes [`scene::Texture`]'s chunks and mips point into.

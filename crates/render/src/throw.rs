@@ -7,7 +7,6 @@
 //! grenade, the fire's sprites, the bursts) is rewritten for each moment ([`ThrowLayer::set_time`]).
 
 use std::num::NonZeroU64;
-use std::path::Path;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4, Vec3};
@@ -257,7 +256,7 @@ struct Book {
     sequences: Sequences,
 }
 
-/// The fire's flipbooks, decoded on the CPU (CS2's own, written by show-me-the-nades' `scripts/cs2_effects.py web`).
+/// The fire's flipbooks, decoded on the CPU: CS2's own, from the shared effects pack.
 pub struct Flipbooks {
     books: Vec<Book>,
 }
@@ -271,27 +270,14 @@ pub struct GpuBooks {
 }
 
 impl Flipbooks {
-    /// Reads `flipbooks.json` and the atlases it names from `dir`; None where this machine does not have them.
-    pub fn load(dir: &Path) -> Option<Self> {
-        let layout: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("flipbooks.json")).ok()?).ok()?;
-        let mut books = Vec::new();
-        for name in ["fire_small_sim_a", "fire_small_sim_b", "fire_small_sim_b_desat", "fire_small_sim_a_v02"] {
-            let book = layout.get(name)?;
-            let image = book.get("image")?.as_str()?;
-            let columns = book.get("columns")?.as_u64()? as u32;
-            let rows = book.get("rows")?.as_u64()? as u32;
-            let sequences = book.get("sequences")?.as_array()?.iter().filter_map(|s| Some((s.get(0)?.as_u64()? as u32, s.get(1)?.as_u64()? as u32))).collect();
-            let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(dir.join(image)).ok()?));
-            let mut reader = decoder.read_info().ok()?;
-            let mut pixels = vec![0u8; reader.output_buffer_size()?];
-            let info = reader.next_frame(&mut pixels).ok()?;
-            if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-                return None;
-            }
-            pixels.truncate(info.buffer_size());
-            books.push(Book { name: name.to_string(), pixels, size: (info.width, info.height), grid: (columns, rows), sequences });
-        }
-        Some(Self { books })
+    /// The flipbooks of the shared effects pack (`nades-pack --effects`).
+    pub fn from_effects(effects: &nades_pack::effects::Effects) -> Self {
+        let books = effects
+            .flipbooks
+            .iter()
+            .map(|f| Book { name: f.name.clone(), pixels: f.rgba.clone(), size: (f.columns * f.cell, f.rows * f.cell), grid: (f.columns, f.rows), sequences: f.sequences.clone() })
+            .collect();
+        Self { books }
     }
 
     /// The flipbooks on the GPU, with every mip.

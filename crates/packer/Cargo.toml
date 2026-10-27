@@ -17,11 +17,13 @@ path = "src/main.rs"
 [dependencies]
 nades-pack.workspace = true
 nades-source2.workspace = true
+nades-config.workspace = true
 anyhow.workspace = true
 glam.workspace = true
 image-webp.workspace = true
 memmap2.workspace = true
 meshopt.workspace = true
+png.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true

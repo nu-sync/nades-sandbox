@@ -56,12 +56,7 @@ impl Config {
         let mut config = Self {
             server: root.join("target/release/nades-mcp"),
             sandbox: root.join("target/release/nades-sandbox"),
-            packs: std::env::var_os("NADES_PACKS_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                        .join(".cache/nades/packs")
-                }),
+            packs: nades_config::packs(None)?.path,
             output: root.join(format!(".runs/mcp-{unique}")),
             keep_handoff: false,
             database: PathBuf::new(),

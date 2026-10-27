@@ -1,36 +1,13 @@
-//! The noise CS2's smoke shader breaks its cloud up with: the game's own (`worley_perlin.bin`, which show-me-the-nades'
-//! `scripts/cs2_effects.py web` writes from the game's files into `~/.cache/nades/cs2/effects/web`, D27), or the
-//! stand-in the web view builds to its measurements (`web/app/src/scene/smokeNoise.ts`), ported here.
+//! The noise CS2's smoke shader breaks its cloud up with: the game's own (the shared effects pack's, which `nades-pack
+//! --effects` reads from the game's `pak01`), or the stand-in the web view builds to its measurements
+//! (`web/app/src/scene/smokeNoise.ts`), ported here.
 //!
 //! The game's smoke material samples a 128³ RGBA8 volume, `materials/dev/noise/worley_perlin`, and uses only R + 0.95 G
 //! of it: R is clustered blobs, G a smooth, low-contrast field. The stand-in has the same make-up: a smooth field, plus
 //! blobs splatted where a cluster field allows. It tiles.
 
-use std::path::{Path, PathBuf};
-
 /// Texels a side.
 pub const SIZE: usize = 128;
-
-/// Where show-me-the-nades keeps the game's effects (`NADES_CS2_EFFECTS_DIR` overrides it, as for its web server).
-pub fn effects_dir() -> PathBuf {
-    match std::env::var_os("NADES_CS2_EFFECTS_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/nades/cs2/effects/web"),
-    }
-}
-
-/// 128³ texels of R + 0.95 G, x fastest: the game's, where this machine has it, else the stand-in.
-pub fn smoke_noise() -> (Vec<u8>, bool) {
-    match game_noise(&effects_dir()) {
-        Some(game) => (game, true),
-        None => (stand_in(SIZE, 7), false),
-    }
-}
-
-/// The game's noise, when the file is there and the right size.
-pub fn game_noise(dir: &Path) -> Option<Vec<u8>> {
-    std::fs::read(dir.join("worley_perlin.bin")).ok().filter(|b| b.len() == SIZE * SIZE * SIZE)
-}
 
 /// A seeded Park–Miller generator in (0, 1).
 struct Generator(f64);
@@ -173,13 +150,5 @@ mod tests {
         assert!((at(0.9) - 0.325).abs() < 0.07, "90th {}", at(0.9));
         assert!(at(0.1) > 0.08);
         assert_eq!(stand_in(64, 7), noise, "seeded");
-    }
-
-    #[test]
-    #[ignore = "needs the game's effects (show-me-the-nades: uv run scripts/cs2_effects.py web)"]
-    fn the_games_noise_is_used_where_it_exists() {
-        let (noise, game) = smoke_noise();
-        assert!(game);
-        assert_eq!(noise.len(), SIZE * SIZE * SIZE);
     }
 }

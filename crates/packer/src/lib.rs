@@ -16,11 +16,16 @@
 //!   Viewer's CLI can tell it, else the web view's rule.
 //! - **The sky:** the visible env_sky's cube map (BC6H) from `pak01`; **the sun** from the export's light;
 //!   **the post-processing** from `<map>.post.json` and `<map>.lut.bin` ([`post`]).
+//! - **The collider** ([`physics`]): the map's own physics from its VPK, through Source 2 Viewer's CLI, reduced as
+//!   awpy reduces it, in the Collider section.
 
+pub mod effects;
 pub mod entities;
 pub mod geometry;
 pub mod gltf;
+pub mod lump;
 pub mod materials;
+pub mod physics;
 pub mod post;
 pub mod textures;
 pub mod world;
@@ -45,41 +50,67 @@ use crate::textures::{ByName, CHUNK_TARGET, Fill, GameFile, GameIndex, Planned};
 pub struct Inputs {
     /// e.g. `de_cache`.
     pub map: String,
-    /// The Source 2 Viewer export: `~/.cache/nades/maps/<map>.glb`; the files beside it (`<map>.post.json`,
-    /// `<map>.lut.bin`, `<map>.sky.json`, `<map>.skybox.json`, `<map>.skybox.glb`) are read from the same folder.
+    /// The Source 2 Viewer export: `<map>.glb`; the files beside it (`<map>.post.json`, `<map>.lut.bin`,
+    /// `<map>.sky.json`, `<map>.skybox.json`, `<map>.skybox.glb`) are read from the same folder.
     pub export: PathBuf,
-    /// The game's unpacked files: `~/.cache/nades/cs2/game/csgo` (with `maps/<map>.vpk`).
+    /// CS2's files: the folder holding `game/csgo` (an install, or DepotDownloader's folder, whose manifests name the
+    /// game build), with the maps' VPKs in `game/csgo/maps` and `pak01` in `game/csgo` (`--game`, `NADES_SANDBOX_GAME`,
+    /// `[assets] game`).
     pub game: PathBuf,
-    /// DepotDownloader's folder, whose manifests name the game build and whose `game/csgo/pak01_dir.vpk` and numbered
-    /// archives hold the rest of the game's files: `~/.cache/nades/cs2/depot`.
-    pub depot: PathBuf,
-    /// export_map.py's working folder, where Source 2 Viewer decompiled each map's sky material and entities:
-    /// `~/.cache/nades/cs2/export`.
-    pub decompiled: PathBuf,
-    /// Source 2 Viewer's CLI, which prints the game's meshes' draw calls: `~/.cache/nades/tools/s2v/Source2Viewer-CLI`.
-    pub cli: PathBuf,
-    /// The pack: `~/.cache/nades/packs/<map>.pack`.
+    /// Game files unpacked from `pak01` (a `game/csgo` folder), which stand for the archive's entries at their paths
+    /// (`--unpacked`): for a depot download whose archives were dropped once unpacked. None reads `pak01` alone.
+    pub unpacked: Option<PathBuf>,
+    /// Source 2 Viewer's CLI (`--s2v`, `NADES_SANDBOX_S2V`, `[tools] s2v`): it exports the map's physics (the
+    /// collider), decompiles its entity lump, prints its meshes' draw calls and decompiles the fire's flipbooks.
+    pub cli: Option<PathBuf>,
+    /// The pack: `<packs>/<map>.pack` (`--packs`, `NADES_SANDBOX_PACKS`, `[assets] packs`, or `--out <file>`).
     pub out: PathBuf,
 }
 
+/// The packer's settings (docs/standalone-api.md §8): flags first, then the environment, the config file, the default.
+#[derive(Debug, Clone, Default)]
+pub struct Flags {
+    pub packs: Option<PathBuf>,
+    pub game: Option<PathBuf>,
+    pub s2v: Option<PathBuf>,
+}
+
 impl Inputs {
-    /// The usual places under `~/.cache/nades`.
+    /// The settings' places for `map`: the export in show-me-the-nades' maps folder until the packer exports the
+    /// geometry itself (`--export`), the rest from the settings.
     pub fn for_map(map: &str) -> Result<Self> {
+        Self::with(map, &Flags::default())
+    }
+
+    pub fn with(map: &str, flags: &Flags) -> Result<Self> {
         let home = std::env::var_os("HOME").context("HOME is not set")?;
         let cache = Path::new(&home).join(".cache/nades");
+        let packs = nades_config::packs(flags.packs.as_deref())?;
+        let game = nades_config::asset(nades_config::Asset::Game, flags.game.as_deref())?
+            .with_context(|| "CS2's files are not set: pass --game <folder holding game/csgo>, or set NADES_SANDBOX_GAME or [assets] game in the config file".to_string())?;
+        let cli = nades_config::asset(nades_config::Asset::S2v, flags.s2v.as_deref())?;
         Ok(Self {
             map: map.to_string(),
             export: cache.join("maps").join(format!("{map}.glb")),
-            game: cache.join("cs2/game/csgo"),
-            depot: cache.join("cs2/depot"),
-            decompiled: cache.join("cs2/export"),
-            cli: cache.join("tools/s2v/Source2Viewer-CLI"),
-            out: cache.join("packs").join(format!("{map}.pack")),
+            game: game.path,
+            unpacked: None,
+            cli: cli.map(|s| s.path),
+            out: packs.path.join(format!("{map}.pack")),
         })
     }
 
+    /// `game/csgo` under the game folder.
+    pub fn csgo(&self) -> PathBuf {
+        self.game.join("game/csgo")
+    }
+
+    /// A map's (or a prefab's) VPK: `game/csgo/maps/<name>.vpk`.
+    pub fn map_vpk(&self, name: &str) -> PathBuf {
+        self.csgo().join("maps").join(format!("{name}.vpk"))
+    }
+
     pub fn vpk(&self) -> PathBuf {
-        self.game.join("maps").join(format!("{}.vpk", self.map))
+        self.map_vpk(&self.map)
     }
 
     pub fn lightmap_entry(&self) -> String {
@@ -92,7 +123,12 @@ impl Inputs {
     }
 
     pub fn pak(&self) -> PathBuf {
-        self.depot.join("game/csgo/pak01_dir.vpk")
+        self.csgo().join("pak01_dir.vpk")
+    }
+
+    /// The CLI, when it is set and there.
+    pub fn cli(&self) -> Option<&Path> {
+        self.cli.as_deref().filter(|c| c.is_file())
     }
 }
 
@@ -100,8 +136,10 @@ impl Inputs {
 pub struct Report {
     pub scene: Scene,
     pub source: Source,
-    /// Section bytes: Scene, Geometry, Textures.
-    pub sections: [(SectionKind, u64); 3],
+    /// Section bytes: Scene, Geometry, Textures, and the Collider when there is one.
+    pub sections: Vec<(SectionKind, u64)>,
+    /// The collider's triangles and the export's, and why there is none.
+    pub collider: Result<physics::Physics, String>,
     pub file_size: u64,
     /// Stage name and milliseconds, in order.
     pub stages: Vec<(&'static str, f64)>,
@@ -114,6 +152,8 @@ pub struct Report {
     /// World-node meshes the game said are lightmapped, of those it said anything about; none without the CLI.
     pub game_meshes: Option<(usize, usize)>,
     pub game_files: usize,
+    /// The CLI's decompiles for the entity lumps, the skies' materials and the post-processing.
+    pub decompiled: u32,
     pub pak_entries: usize,
     /// Each base colour image decoded from the export, and why no game file stood for it.
     pub fallbacks: Vec<String>,
@@ -126,16 +166,31 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// The game build: DepotDownloader's manifests (`<depot>_<manifest id>.manifest`) in the depot folder.
-pub fn game_build(depot: &Path) -> String {
-    let mut manifests: Vec<String> = std::fs::read_dir(depot.join(".DepotDownloader"))
+/// Why there is no CLI to run.
+pub fn no_cli(inputs: &Inputs) -> String {
+    match &inputs.cli {
+        Some(cli) => format!("no Source 2 Viewer CLI at {}", cli.display()),
+        None => "Source 2 Viewer's CLI is not set (--s2v, NADES_SANDBOX_S2V or [tools] s2v)".into(),
+    }
+}
+
+/// The game build: DepotDownloader's manifests (`<depot>_<manifest id>.manifest`) in the game folder, else an
+/// install's `game/csgo/steam.inf` `ClientVersion`.
+pub fn game_build(game: &Path) -> String {
+    let mut manifests: Vec<String> = std::fs::read_dir(game.join(".DepotDownloader"))
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.strip_suffix(".manifest").map(str::to_string))
         .collect();
     manifests.sort();
-    if manifests.is_empty() { "unknown".to_string() } else { manifests.join("+") }
+    if !manifests.is_empty() {
+        return manifests.join("+");
+    }
+    std::fs::read_to_string(game.join("game/csgo/steam.inf"))
+        .ok()
+        .and_then(|inf| inf.lines().find_map(|l| l.strip_prefix("ClientVersion=").map(|v| format!("client {}", v.trim()))))
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// One export (the map's, or its 3D skybox's), mapped and parsed.
@@ -244,7 +299,17 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     };
 
     let (map, export_hash) = Export::open(&inputs.export)?;
-    let skybox_file: Option<post::SkyboxFile> = post::read(&inputs.beside(".skybox.json"))?;
+    // the entity lumps, the skies' materials and the post-processing, decompiled by the CLI
+    let pak = if inputs.pak().is_file() { Some(Vpk::open(&inputs.pak()).with_context(|| format!("the game's archive {}", inputs.pak().display()))?) } else { None };
+    let lump = match inputs.cli() {
+        Some(cli) => {
+            let mut decompiler = lump::Decompiler::new(cli, &std::env::temp_dir(), &format!("lump-{}", inputs.map))?;
+            lump::read(&mut decompiler, &lump::Game { maps: inputs.csgo().join("maps"), pak: pak.as_ref(), pak_path: inputs.pak() }, &inputs.map)?
+        }
+        None => lump::Lump::default(),
+    };
+    let record = |value: &serde_json::Value| (!value.is_null()).then(|| value.clone());
+    let skybox_file: Option<post::SkyboxFile> = record(&lump.skybox).map(serde_json::from_value).transpose().context("the 3D skybox's record")?;
     let skybox_glb = inputs.beside(".skybox.glb");
     let sky_export = match (&skybox_file, skybox_glb.is_file()) {
         (Some(_), true) => Some(Export::open(&skybox_glb)?.0),
@@ -295,17 +360,17 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     // which world-node meshes the game lights by its lightmap, the map's and the skybox prefab's
     let mut meshes: HashMap<String, bool> = HashMap::new();
     let mut asked_game = false;
-    if inputs.cli.is_file() {
+    if let Some(cli) = inputs.cli() {
         let mut ask = |vpk: &Path, prefix: &str| -> Result<()> {
             if vpk.is_file() {
-                meshes.extend(world::lightmapped_meshes(&inputs.cli, vpk, prefix)?);
+                meshes.extend(world::lightmapped_meshes(cli, vpk, prefix)?);
                 asked_game = true;
             }
             Ok(())
         };
         ask(&inputs.vpk(), &format!("maps/{}", inputs.map))?;
         if let Some(file) = &skybox_file {
-            ask(&inputs.game.join(format!("maps/{}.vpk", file.prefab)), &format!("maps/{}", file.prefab))?;
+            ask(&inputs.map_vpk(&file.prefab), &format!("maps/{}", file.prefab))?;
         }
     }
     let lightmapped = |mesh: &str| meshes.get(world::mesh_of(mesh)).copied();
@@ -328,7 +393,7 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     }
     stage("draws and the Geometry section");
 
-    let game = GameIndex::scan(&inputs.game, Some(&inputs.pak()))?;
+    let game = GameIndex::scan(inputs.unpacked.as_deref(), Some(&inputs.pak()))?;
     stage("index the game's files");
 
     // base colours: one per image some material uses as its base colour, as M1 found them
@@ -424,7 +489,7 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
 
     let vpk = Vpk::open(&inputs.vpk()).with_context(|| format!("the map's VPK {}", inputs.vpk().display()))?;
     let vpk_name = format!("maps/{}.vpk", inputs.map);
-    let entities = entities::of_map(&inputs.decompiled, &inputs.map).unwrap_or_default();
+    let entities = entities::parse(&lump.entities);
     let sun_index = entities::sun_shadow_index(&entities).unwrap_or(0);
     let lightmaps = plan_lightmaps(&mut plan, &vpk, &vpk_name, &format!("maps/{}", inputs.map), sun_index)?;
     let probe_atlas = plan_vpk(&vpk, &vpk_name, &format!("maps/{}/lightmaps/env_light_probe_volume_atlas.vtex_c", inputs.map), Semantic::ProbeIrradiance)?;
@@ -444,7 +509,7 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     let skybox_lightmaps = match &skybox_file {
         Some(file) if sky_export.is_some() => {
             let name = format!("maps/{}.vpk", file.prefab);
-            let path = inputs.game.join(&name);
+            let path = inputs.map_vpk(&file.prefab);
             // the prefab's own sun, when it bakes one, is its first baked light
             if path.is_file() { plan_lightmaps(&mut plan, &Vpk::open(&path).with_context(|| format!("the skybox's VPK {}", path.display()))?, &name, &format!("maps/{}", file.prefab), 0)? } else { None }
         }
@@ -452,13 +517,13 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     };
     stage("lightmaps from the VPKs");
 
-    let post_file: post::PostFile = post::read(&inputs.beside(".post.json"))?.unwrap_or_default();
-    let lut = std::fs::read(inputs.beside(".lut.bin")).ok();
-    let post = post::post(&post_file, lut.as_deref())?;
-    let sky_file: Option<post::SkyFile> = post::read(&inputs.beside(".sky.json"))?;
+    let post_file: post::PostFile = record(&lump.post).map(serde_json::from_value).transpose().context("the post-processing's record")?.unwrap_or_default();
+    let post = post::post(&post_file, lump.lut.as_deref())?;
+    let sky_file: Option<post::SkyFile> = record(&lump.sky).map(serde_json::from_value).transpose().context("the sky's record")?;
     let mut sky = None;
     if let Some(file) = &sky_file
-        && let Some(path) = post::sky_texture(&inputs.decompiled, &inputs.map, &file.material, &mut game.pak_paths())
+        && let Some(pak) = &pak
+        && let Some(path) = lump::sky_texture(lump.sky_vmat.as_deref(), &file.material, pak)
     {
         let want = Want { slot: Slot::BaseColor, param: "g_tSkyTexture".into(), path: Some(path.clone()), image: None, semantic: Semantic::Sky, srgb: false, max_size: u32::MAX };
         match plan_game(&game, &want, &path) {
@@ -579,17 +644,28 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     scene.validate(geometry.bytes.len() as u64, textures_section.len() as u64).map_err(|e| anyhow::anyhow!("the scene the packer made is invalid: {e}"))?;
     stage("scene and its checks");
 
-    let source = Source { map: inputs.map.clone(), game_build: game_build(&inputs.depot), export_hash: format!("{export_hash:016x}") };
+    let collider = match inputs.cli() {
+        Some(cli) => physics::of_map(cli, &inputs.vpk(), &inputs.map, &std::env::temp_dir()).map_err(|e| format!("{e:#}")),
+        None => Err(no_cli(inputs)),
+    };
+    let collider_bytes = collider.as_ref().ok().map(physics::Physics::to_awmh);
+    stage("the collider from the map's physics");
+
+    let source = Source { map: inputs.map.clone(), game_build: game_build(&inputs.game), export_hash: format!("{export_hash:016x}") };
     let scene_bytes = scene.to_bytes();
     if let Some(dir) = inputs.out.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    nades_pack::write(&inputs.out, source.clone(), &[(SectionKind::Scene, &scene_bytes), (SectionKind::Geometry, &geometry.bytes), (SectionKind::Textures, &textures_section)])
-        .with_context(|| format!("writing {}", inputs.out.display()))?;
+    let mut sections: Vec<(SectionKind, &[u8])> = vec![(SectionKind::Scene, &scene_bytes), (SectionKind::Geometry, &geometry.bytes), (SectionKind::Textures, &textures_section)];
+    if let Some(bytes) = &collider_bytes {
+        sections.push((SectionKind::Collider, bytes));
+    }
+    nades_pack::write(&inputs.out, source.clone(), &sections).with_context(|| format!("writing {}", inputs.out.display()))?;
     stage("write the pack");
     let file_size = std::fs::metadata(&inputs.out)?.len();
     Ok(Report {
-        sections: [(SectionKind::Scene, scene_bytes.len() as u64), (SectionKind::Geometry, geometry.bytes.len() as u64), (SectionKind::Textures, textures_section.len() as u64)],
+        sections: sections.iter().map(|(k, b)| (*k, b.len() as u64)).collect(),
+        collider,
         scene,
         source,
         file_size,
@@ -599,6 +675,7 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
         missing_frames,
         game_meshes: asked_game.then(|| (meshes.values().filter(|&&l| l).count(), meshes.len())),
         game_files: game.len(),
+        decompiled: lump.runs,
         pak_entries: game.pak_entries(),
         fallbacks,
         missing,
@@ -620,18 +697,22 @@ fn plan_base_color(doc: &gltf::Document, buffers: &[Cow<'_, [u8]>], index: &Game
     let webp = image_bytes(doc, buffers, image).map_err(|e| format!("{label}: {e:#}"))?;
     let is_webp = doc.images[image].mime_type.as_deref() == Some("image/webp") || webp.starts_with(b"RIFF");
     let expected = if is_webp { Some(textures::webp_size(webp).map_err(|e| format!("{label}: {e:#}"))?) } else { None };
-    let try_file = |path: &Path| -> Result<(nades_source2::Vtex, TextureFormat, u32), String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let vtex = nades_source2::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        let (format, first) = textures::fits(&vtex, expected).map_err(|e| format!("{}: {e}", index.relative(path)))?;
-        Ok((vtex, format, first))
+    let try_file = |file: &GameFile| -> Result<(nades_source2::Vtex, Vec<u8>, TextureFormat, u32), String> {
+        let bytes = index.read(file).map_err(|e| format!("{e:#}"))?;
+        let vtex = nades_source2::parse(&bytes).map_err(|e| format!("{}: {e}", index.name(file)))?;
+        let (format, first) = textures::fits(&vtex, expected).map_err(|e| format!("{}: {e}", index.name(file)))?;
+        Ok((vtex, bytes, format, first))
+    };
+    let fill = |file: &GameFile, first: u32| match file {
+        GameFile::Disk(path) => Fill::GameFile { path: path.clone(), first },
+        GameFile::Pak(entry) => Fill::Pak { entry: entry.clone(), first },
     };
     let mut why = Vec::new();
     match index.by_name(&name) {
-        ByName::Found(path) => match try_file(&path) {
-            Ok((vtex, format, first)) => {
-                let source = TextureSource::ByName { file: index.relative(&path), first_mip: first };
-                return Ok((textures::from_vtex(name, &vtex, format, true, Semantic::Color, source, Fill::GameFile { path, first }), None));
+        ByName::Found(file) => match try_file(&file) {
+            Ok((vtex, _, format, first)) => {
+                let source = TextureSource::ByName { file: index.name(&file), first_mip: first };
+                return Ok((textures::from_vtex(name, &vtex, format, true, Semantic::Color, source, fill(&file, first)), None));
             }
             Err(e) => why.push(e),
         },
@@ -648,13 +729,13 @@ fn plan_base_color(doc: &gltf::Document, buffers: &[Cow<'_, [u8]>], index: &Game
                 continue;
             }
             let Some(file) = index.by_path(path) else {
-                why.push(format!("{param} names {path}, which is not under the game folder"));
+                why.push(format!("{param} names {path}, which is neither unpacked nor in a pak01 archive the depot holds"));
                 continue;
             };
             match try_file(&file) {
-                Ok((vtex, format, first)) => {
-                    let source = TextureSource::ByTextureParams { param: param.to_string(), file: index.relative(&file), first_mip: first };
-                    return Ok((textures::from_vtex(label, &vtex, format, true, Semantic::Color, source, Fill::GameFile { path: file, first }), None));
+                Ok((vtex, _, format, first)) => {
+                    let source = TextureSource::ByTextureParams { param: param.to_string(), file: index.name(&file), first_mip: first };
+                    return Ok((textures::from_vtex(label, &vtex, format, true, Semantic::Color, source, fill(&file, first)), None));
                 }
                 Err(e) => why.push(e),
             }

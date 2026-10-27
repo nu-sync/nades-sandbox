@@ -199,17 +199,21 @@ maps      once the window shows: the other packed maps, one at a time, each draw
 
 ## 6. The pack (format 2)
 
-`~/.cache/nades/packs/<map>.pack`, built by `nades-pack <map>` (`crates/packer`) in 1.5–4 s from:
-- the Source 2 Viewer export in `~/.cache/nades/maps`:
-  - geometry, and materials with their `vmat` parameters;
-  - the 3D skybox (`<map>.skybox.glb`);
-  - post-processing and sky (`<map>.post.json`, `.lut.bin`, `.sky.json`, `.skybox.json`);
-- the game's own files in `~/.cache/nades/cs2`:
-  - textures as BC blocks, loose or in `pak01`;
+`<packs>/<map>.pack`, built by `nades-pack <map>` (`crates/packer`) in 2.5–6.5 s from:
+- the Source 2 Viewer export in `~/.cache/nades/maps`: geometry, and materials with their `vmat` parameters, and the 3D
+  skybox (`<map>.skybox.glb`);
+- the game's own files (the `[assets] game` folder, docs/standalone-api.md §8):
+  - textures as BC blocks, from `pak01` (or files unpacked from it);
   - each map's lightmaps and light probes, from its VPK;
-- Source 2 Viewer's decompiled entity lump (`~/.cache/nades/cs2/export/<map>`): the sun's shadow channel, the light
-  probe volumes, the sky's material;
-- Source 2 Viewer's CLI (`~/.cache/nades/tools/s2v`): which meshes the game lightmaps (S9).
+- through Source 2 Viewer's CLI (`[tools] s2v`), run by the packer itself (S25):
+  - the map's physics, reduced as awpy reduces it, into the Collider section (byte for byte awpy's mesh);
+  - the entity lumps (the map's, its 3D skybox prefab's): the sun's shadow channel, the light probe volumes, the sky,
+    the fog, the 3D skybox's placement;
+  - the sky materials and the post-processing resource with its lookup table;
+  - which meshes the game lightmaps (S9).
+
+The smoke's noise and the fire's flipbooks, the same on every map, are one shared pack, `<packs>/shared/effects.pack`
+(`nades-pack --effects`), from `pak01`.
 
 It is keyed by the game build and the export's hash, rebuilt when either changes, and never committed or shared.
 

@@ -1,25 +1,14 @@
-//! The map's collider: awpy's collision mesh (`~/.cache/nades/maps/<map>.mesh`, the map's visual occluders in Hammer
-//! units, written by show-me-the-nades' `just map-meshes`) and a BVH over it, as the web view uses since its D26
-//! (`render/mapModel.ts` `collisionCollider`, three-mesh-bvh).
+//! The map's collider: the map's visual occluders in Hammer units, as awpy reduces the map's physics into its collision
+//! mesh (the pack's Collider section, which `nades-pack` makes from the map's own physics the same way, byte for byte),
+//! and a BVH over it, as the web view uses since its D26 (`render/mapModel.ts` `collisionCollider`, three-mesh-bvh).
 //!
 //! The answers are the web view's: each triangle is tested with three.js's watertight ray/triangle test
 //! (`Ray.intersectTriangle`, both faces) in doubles, a hit's distance is |point − origin| as three-mesh-bvh measures
 //! it, and the queries (`clear_between`, `blocked`, `floor_below`) compare those distances as `mapModel.ts` does. The
 //! tree only decides which triangles are tested, never what a test says, so it can differ from three-mesh-bvh's.
 
-use std::path::Path;
-
 use glam::DVec3;
 use rayon::prelude::*;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ColliderError {
-    #[error("reading {0}: {1}")]
-    Io(String, std::io::Error),
-    #[error("{0} is not an awpy collision mesh (AWMH)")]
-    Format(String),
-}
 
 /// A node of the tree: its box, and either its first child (the second follows it) or its triangles.
 #[derive(Debug, Clone, Copy)]
@@ -44,13 +33,6 @@ const LEAF: usize = 4;
 const BINS: usize = 12;
 
 impl Collider {
-    /// Reads `<maps>/<map>.mesh`.
-    pub fn load(path: &Path) -> Result<Self, ColliderError> {
-        let name = path.display().to_string();
-        let bytes = std::fs::read(path).map_err(|e| ColliderError::Io(name.clone(), e))?;
-        Self::from_awmh(&bytes).ok_or(ColliderError::Format(name))
-    }
-
     /// awpy's mesh: "AWMH", a version, the vertex and triangle counts (u32, little-endian), then the vertices
     /// (3 × f32 each) and the triangles (3 × u32 each).
     pub fn from_awmh(bytes: &[u8]) -> Option<Self> {
@@ -440,18 +422,5 @@ mod tests {
         assert_eq!(c.floor_below(DVec3::new(1.0, 1.0, 5.0), 10.0), Some(0.0));
         assert!(Collider::from_awmh(&bytes[..20]).is_none());
         assert!(Collider::from_awmh(b"NOPE").is_none());
-    }
-
-    /// The real meshes: every pool map's builds, and a ray down onto de_cache's mid finds a floor.
-    #[test]
-    #[ignore = "needs awpy's meshes in ~/.cache/nades/maps (show-me-the-nades: just map-meshes)"]
-    fn every_pool_maps_mesh_builds() {
-        let maps = Path::new(&std::env::var("HOME").unwrap()).join(".cache/nades/maps");
-        for map in ["de_ancient", "de_anubis", "de_cache", "de_dust2", "de_inferno", "de_mirage", "de_nuke"] {
-            let started = std::time::Instant::now();
-            let c = Collider::load(&maps.join(format!("{map}.mesh"))).unwrap();
-            eprintln!("{map}: {} triangles, {} nodes, {:.1} ms", c.triangles(), c.nodes.len(), started.elapsed().as_secs_f64() * 1e3);
-            assert!(c.triangles() > 50_000);
-        }
     }
 }

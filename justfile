@@ -35,6 +35,10 @@ bundle: build
 pack $map='de_cache':
     cargo run --release -p nades-packer -- "$map"
 
+# Build the shared effects pack (the smoke noise and the fire's flipbooks) from the game's pak01.
+effects:
+    cargo run --release -p nades-packer -- --effects
+
 # Run workspace tests.
 test:
     cargo test --release --workspace

@@ -13,7 +13,8 @@
 //! - `--data <file or folder>` (repeatable) names the cs2-throws files to read; else `NADES_SANDBOX_DATA`, else
 //!   `[data] paths` in the config file, else the demo adapter's cache (nades-config).
 //! - `check <file>...` prints each cs2-throws file's problems and which features its facts allow (`check.rs`).
-//! - `--map <name>` draws `~/.cache/nades/packs/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file).
+//! - `--map <name>` draws `<packs>/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file); `--packs
+//!   <dir>` names the packs folder, else `NADES_SANDBOX_PACKS`, `[assets] packs`, the platform's cache (`assets.rs`).
 //! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
 //!   averaged over 16 jittered frames. `--cameras <cases.json>` prints the cameras each `{"throw": id}`'s views open
 //!   with (bench/cameras.py compares them with the web view's). `--bench-switch <n>` switches lineups every frame, n
@@ -32,6 +33,7 @@
 //!   before the next, and prints the median and 95th percentile per frame after the first 30: the steady frame where
 //!   no window can be shown.
 
+mod assets;
 mod camera;
 mod check;
 mod clock;
@@ -107,6 +109,7 @@ struct Args {
     bench_maps: Option<Vec<String>>,
     budget_mb: Option<u64>,
     data: Vec<PathBuf>,
+    packs: Option<PathBuf>,
 }
 
 /// Numbers separated by commas: `1,2,3`.
@@ -122,6 +125,7 @@ fn args() -> Result<Args> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--data" => args.data.push(it.next().context("--data needs a cs2-throws file or a folder of them")?.into()),
+            "--packs" => args.packs = Some(it.next().context("--packs needs a folder")?.into()),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
@@ -163,13 +167,7 @@ fn args() -> Result<Args> {
     Ok(args)
 }
 
-/// The pack to draw: `NADES_PACK`, else `~/.cache/nades/packs/<map>.pack`.
-fn pack_path(map: Option<&str>) -> PathBuf {
-    if let Some(path) = std::env::var_os("NADES_PACK") {
-        return PathBuf::from(path);
-    }
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(format!(".cache/nades/packs/{}.pack", map.unwrap_or("de_cache")))
-}
+use assets::pack_path;
 
 fn main() {
     clock::init();
@@ -188,6 +186,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = args()?;
+    assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(request) = &args.video_request {
         return lineups::render_video(request);

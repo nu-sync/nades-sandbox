@@ -26,46 +26,55 @@ A generic GLB export may omit the companion metadata and compression expected by
 
 ## Input layout
 
-The default cache root is `~/.cache/nades`:
+The packer's settings (docs/standalone-api.md §8) each come from a flag, else the environment, else `config.toml` in
+the platform's config folder (on macOS `~/Library/Application Support/io.github.nu-sync.nades-sandbox/config.toml`):
 
-| Path under the cache root | Contents |
-|---|---|
-| `maps/de_cache.glb` | compressed Source 2 Viewer map export and its texture buffers |
-| `maps/de_cache.post.json`, `maps/de_cache.lut.bin` | post-processing metadata and colour lookup table, when exported |
-| `maps/de_cache.sky.json`, `maps/de_cache.skybox.json`, `maps/de_cache.skybox.glb` | sky and 3D skybox inputs, when exported |
-| `cs2/game/csgo/maps/de_cache.vpk` | the map's VPK; skybox VPKs belong beside it |
-| `cs2/depot/game/csgo/pak01_dir.vpk` and numbered archives | shared materials and textures |
-| `cs2/export` | Source 2 Viewer's decompiled entities and sky materials |
-| `tools/s2v/Source2Viewer-CLI` | Source 2 Viewer CLI used to identify lightmapped draws |
-| `packs/de_cache.pack` | generated pack loaded by the viewer |
+| Setting | Flag | Environment | Config file | What it is |
+|---|---|---|---|---|
+| packs | `--packs <dir>` | `NADES_SANDBOX_PACKS` | `[assets] packs` | where packs go and the viewer reads them; default `packs/` in the platform's cache folder |
+| CS2's files | `nades-pack --game <dir>` | `NADES_SANDBOX_GAME` | `[assets] game` | the folder holding `game/csgo`: an install, or DepotDownloader's folder (its manifests name the build); no default |
+| Source 2 Viewer's CLI | `nades-pack --s2v <path>` | `NADES_SANDBOX_S2V` | `[tools] s2v` | exports the map's physics, decompiles its entities, skies, post-processing and the fire's flipbooks, and says which meshes are lightmapped; no default |
 
-Return to this checkout, then build and open the map:
+```toml
+[assets]
+packs = "~/.cache/nades/packs"
+game = "~/.cache/nades/cs2/depot"
+
+[tools]
+s2v = "~/.cache/nades/tools/s2v-master/Source2Viewer-CLI"
+```
+
+From the game folder the packer reads `game/csgo/maps/<map>.vpk` (and the 3D skybox prefab's VPK beside it) and
+`game/csgo/pak01_dir.vpk` with its numbered archives; with the CLI it decompiles what it needs into a scratch folder of
+its own. The one input still made by show-me-the-nades' `export_map.py` is the geometry: `~/.cache/nades/maps/<map>.glb`
+and `<map>.skybox.glb` (`--export` moves it). Use Source 2 Viewer's master build (`s2v-master`, as `export_map.py`
+does): its decompiled flipbook frames are the ones the web view's fire was made from (decisions S25).
+
+Return to this checkout, then build the packs and open a map:
 
 ```sh
 cargo build --release
-./target/release/nades-pack de_cache
+./target/release/nades-pack de_cache        # every map you want
+./target/release/nades-pack --effects       # once: the smoke noise and fire flipbooks, <packs>/shared/effects.pack
 ./target/release/nades-sandbox --map de_cache
 ```
 
-The packer prints which game textures and optional inputs it found. Without the CLI it falls back to the
-web viewer's lightmap rule; without decompiled entities it omits light probes and sky. These fallbacks do not
-produce the full look shown in the README. If the exporter placed the CLI in `tools/s2v-master`, pass that
-location explicitly with `--cli`.
+The packer prints what it found and what it left out. Without the CLI a pack has no collider (the result shot falls
+back to an overview, the smoke is unlit), no light probes, sky or post-processing, and lightmapping follows the web
+view's rule; without the effects pack the smoke and fire draw the web view's stand-ins.
 
 ## Custom input locations
 
 ```sh
 ./target/release/nades-pack de_cache \
+  --game /path/to/cs2 \
+  --s2v /path/to/Source2Viewer-CLI \
   --export /path/to/maps/de_cache.glb \
-  --game /path/to/cs2/game/csgo \
-  --depot /path/to/cs2/depot \
-  --decompiled /path/to/cs2/export \
-  --cli /path/to/Source2Viewer-CLI \
-  --out "$HOME/.cache/nades/packs/de_cache.pack"
+  --out /path/to/de_cache.pack
 ```
 
-Companion metadata is read beside the GLB. The viewer uses `~/.cache/nades/packs/<map>.pack`.
-The packer does not inherit the exporter's `NADES_CACHE` override; use the explicit flags above.
+`--unpacked <game/csgo>` adds game files unpacked from `pak01`, for a depot whose archives were dropped once unpacked.
+The viewer reads `<packs>/<map>.pack` (`NADES_PACK` names one file).
 
 ## The lineups' inputs (M3)
 
@@ -75,8 +84,8 @@ them the map still opens, with no lineups or with the stand-ins named below):
 | Input | Default | What reads it |
 |---|---|---|
 | the throws: cs2-throws files | `--data <file or folder>` (repeatable), else `NADES_SANDBOX_DATA` (paths separated as in PATH), else `[data] paths` in `config.toml` in the platform's config folder, else the demo reader's cache (`throws/` in the platform's cache folder) | the lineups and each throw's flight, smoke, fire and viewpoints, read-only; a file written again is read again |
-| awpy's collision mesh | `~/.cache/nades/maps/<map>.mesh` (show-me-the-nades' `just map-meshes`), or `NADES_MAPS_DIR` | the result shot's line of sight and the smoke's light; without it, an overview and an unlit smoke |
-| the game's smoke noise and fire flipbooks | `~/.cache/nades/cs2/effects/web` (its `uv run scripts/cs2_effects.py web`), or `NADES_CS2_EFFECTS_DIR` | the smoke and the fire; without them, the web view's stand-ins |
+| the collider | the map pack's Collider section (`nades-pack <map>` with the CLI) | the result shot's line of sight and the smoke's light; without it, an overview and an unlit smoke |
+| the game's smoke noise and fire flipbooks | `<packs>/shared/effects.pack` (`nades-pack --effects`) | the smoke and the fire; without them, the web view's stand-ins |
 | the remembered view | `~/.cache/nades/sandbox/state.json`, or `NADES_SANDBOX_STATE` | each map's last lineup, view and camera, written on exit |
 
 A flag beats the environment, which beats the config file, which beats the default. On macOS the config file is
@@ -87,8 +96,7 @@ A flag beats the environment, which beats the config file, which beats the defau
 paths = ["~/cs2/pro.sqlite", "throws"]   # a relative path is the config folder's
 ```
 
-The packs, the collider and the effects keep their `~/.cache/nades` paths until the sandbox reads maps from the game's
-own files (docs/standalone-api.md §7).
+The packs folder follows the same order (`--packs`, `NADES_SANDBOX_PACKS`, `[assets] packs`, the platform's cache).
 
 ### Writing cs2-throws files
 

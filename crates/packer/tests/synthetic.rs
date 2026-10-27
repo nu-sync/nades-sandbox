@@ -205,7 +205,7 @@ fn builds_a_pack_from_an_export_the_game_files_and_the_maps_vpk() {
     let direction = vtex(1, (8, 8), nades_source2::flags::ARRAY, &[vec![7; 32]], None);
     let shadows = vtex(27, (8, 8), nades_source2::flags::ARRAY, &[vec![9; 32]], None);
     write(
-        &game.join("maps/de_test.vpk"),
+        &root.join("depot/game/csgo/maps/de_test.vpk"),
         &vpk(&[
             ("vtex_c", "maps/de_test/lightmaps", "irradiance", &lightmap),
             ("vtex_c", "maps/de_test/lightmaps", "directional_irradiance", &direction),
@@ -214,27 +214,35 @@ fn builds_a_pack_from_an_export_the_game_files_and_the_maps_vpk() {
     );
     write(&root.join("depot/.DepotDownloader/2347770_42.manifest"), b"");
     write(&root.join("maps/de_test.glb"), &glb([&webp(8, 8, 1), &webp(4, 4, 2), &webp(8, 8, 3)]));
-    // the entity lump: the sun's baked shadow is the first channel
-    write(&root.join("export/de_test/sky/maps/de_test/entities/default_ents.vents"), b"====1====\nbakedshadowindex \"0\"\nclassname \"light_environment\"\n");
-    // Source 2 Viewer's CLI, as far as the packer asks it: the posters' mesh is lightmapped, the awning's is not
+    // Source 2 Viewer's CLI, as far as the packer asks it: the entity lump decompiled (the sun's baked shadow is the
+    // first channel), and the meshes' draw calls (the posters' mesh is lightmapped, the awning's is not)
     let cli = root.join("tools/Source2Viewer-CLI");
     write(
         &cli,
-        b"#!/bin/sh\necho '[1/2] maps/de_test/worldnodes/n0_lr0_posters_0.vmdl_c'\necho '      m_bHasBakedLightingFromLightMap = true'\necho '[2/2] maps/de_test/worldnodes/n0_lr0_awning_1.vmdl_c'\n",
+        br#"#!/bin/sh
+entry=""; out=""
+while [ $# -gt 0 ]; do case "$1" in -f) entry="$2"; shift;; -o) out="$2"; shift;; esac; shift; done
+case "$entry" in
+  *default_ents.vents_c) mkdir -p "$out/maps/de_test/entities"; printf '====1====\nbakedshadowindex "0"\nclassname "light_environment"\n' > "$out/maps/de_test/entities/default_ents.vents";;
+  *worldnodes/) echo '[1/2] maps/de_test/worldnodes/n0_lr0_posters_0.vmdl_c'; echo '      m_bHasBakedLightingFromLightMap = true'; echo '[2/2] maps/de_test/worldnodes/n0_lr0_awning_1.vmdl_c';;
+esac
+"#,
     );
     std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let inputs = Inputs {
         map: "de_test".into(),
         export: root.join("maps/de_test.glb"),
-        game: game.clone(),
-        depot: root.join("depot"),
-        decompiled: root.join("export"),
-        cli,
+        game: root.join("depot"),
+        unpacked: Some(game.clone()),
+        cli: Some(cli),
         out: root.join("packs/de_test.pack"),
     };
 
     let report = build(&inputs).unwrap();
     assert_eq!(report.source.game_build, "2347770_42");
+    // the stand-in CLI exports no physics: a pack without a collider, and why
+    assert!(report.collider.as_ref().is_err_and(|why| why.contains("no glb")), "{:?}", report.collider.as_ref().err());
+    assert!(!report.sections.iter().any(|(k, _)| *k == nades_pack::SectionKind::Collider));
     assert_eq!(report.fallbacks, ["poster_color_psd_2.vtex: no game file is named poster_color_psd_2.vtex"]);
     let pack = Pack::open(&inputs.out).unwrap();
     let scene = pack.scene().unwrap();

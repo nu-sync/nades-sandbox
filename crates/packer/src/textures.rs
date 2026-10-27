@@ -38,14 +38,15 @@ pub const BASE_COLOR_PARAMS: [&str; 3] = ["g_tColor", "g_tColor1", "g_tLayer1Col
 /// (the directory and whichever numbered archives the depot holds).
 pub struct GameIndex {
     root: PathBuf,
-    by_stem: HashMap<String, Vec<PathBuf>>,
+    /// Each texture's stem: the unpacked folder's files, then `pak01`'s entries the depot holds that are not unpacked.
+    by_stem: HashMap<String, Vec<GameFile>>,
     pak: Option<Vpk>,
 }
 
 /// What an image's name finds under the game folder.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ByName {
-    Found(PathBuf),
+    Found(GameFile),
     /// More than one file has this name.
     Ambiguous(usize),
     Missing,
@@ -63,17 +64,24 @@ pub enum GameFile {
 }
 
 impl GameIndex {
-    /// Indexes `root` (`game/csgo`), and opens `pak` (`pak01_dir.vpk`) when it exists.
-    pub fn scan(root: &Path, pak: Option<&Path>) -> Result<Self> {
-        let mut by_stem: HashMap<String, Vec<PathBuf>> = HashMap::new();
-        let mut stack = vec![root.to_path_buf()];
+    /// Indexes `root` (an unpacked `game/csgo`, when there is one) and `pak` (`pak01_dir.vpk`, when it exists): the
+    /// textures of both by name, an unpacked file standing for the `pak01` entry at its path.
+    pub fn scan(root: Option<&Path>, pak: Option<&Path>) -> Result<Self> {
+        let mut by_stem: HashMap<String, Vec<GameFile>> = HashMap::new();
+        let mut unpacked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack: Vec<PathBuf> = root.filter(|r| r.is_dir()).map(Path::to_path_buf).into_iter().collect();
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).with_context(|| format!("listing {}", dir.display()))? {
                 let path = entry?.path();
                 if path.is_dir() {
                     stack.push(path);
                 } else if let Some(stem) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".vtex_c")) {
-                    by_stem.entry(stem.to_string()).or_default().push(path.clone());
+                    if let Some(root) = root
+                        && let Ok(relative) = path.strip_prefix(root)
+                    {
+                        unpacked.insert(relative.to_string_lossy().replace('\\', "/"));
+                    }
+                    by_stem.entry(stem.to_string()).or_default().push(GameFile::Disk(path.clone()));
                 }
             }
         }
@@ -81,16 +89,25 @@ impl GameIndex {
             Some(p) if p.is_file() => Some(Vpk::open(p).with_context(|| format!("the game's archive {}", p.display()))?),
             _ => None,
         };
-        Ok(Self { root: root.to_path_buf(), by_stem, pak })
+        if let Some(pak) = &pak {
+            for entry in pak.entries() {
+                let Some(stem) = entry.path.rsplit('/').next().and_then(|n| n.strip_suffix(".vtex_c")) else { continue };
+                if unpacked.contains(&entry.path) || !held(pak, entry) {
+                    continue;
+                }
+                by_stem.entry(stem.to_string()).or_default().push(GameFile::Pak(entry.path.clone()));
+            }
+        }
+        Ok(Self { root: root.map(Path::to_path_buf).unwrap_or_default(), by_stem, pak })
     }
 
     /// An index over the given files (relative to `root`), for tests.
     pub fn of(root: &Path, files: &[&str]) -> Self {
-        let mut by_stem: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut by_stem: HashMap<String, Vec<GameFile>> = HashMap::new();
         for f in files {
             let path = root.join(f);
             let stem = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".vtex_c")).expect("a .vtex_c").to_string();
-            by_stem.entry(stem).or_default().push(path);
+            by_stem.entry(stem).or_default().push(GameFile::Disk(path));
         }
         Self { root: root.to_path_buf(), by_stem, pak: None }
     }
@@ -126,25 +143,33 @@ impl GameIndex {
         }
     }
 
-    /// The file a `TextureParams` path names (`materials/…/x.vtex` → `<root>/materials/…/x.vtex_c`), when it is
-    /// on disk.
-    pub fn by_path(&self, param: &str) -> Option<PathBuf> {
-        let path = self.root.join(format!("{param}_c"));
-        path.is_file().then_some(path)
+    /// The file a `TextureParams` path names (`materials/…/x.vtex` → `materials/…/x.vtex_c`): unpacked, or in
+    /// `pak01`.
+    pub fn by_path(&self, param: &str) -> Option<GameFile> {
+        self.find(param)
     }
 
     /// A game path's compiled file (`materials/…/x.vtex`, or any path with `_c` already): under the unpacked folder,
     /// or in `pak01` when the depot holds the archive it is in.
     pub fn find(&self, path: &str) -> Option<GameFile> {
         let compiled = if path.ends_with("_c") { path.to_string() } else { format!("{path}_c") };
-        let disk = self.root.join(&compiled);
-        if disk.is_file() {
-            return Some(GameFile::Disk(disk));
+        if !self.root.as_os_str().is_empty() {
+            let disk = self.root.join(&compiled);
+            if disk.is_file() {
+                return Some(GameFile::Disk(disk));
+            }
         }
         let pak = self.pak.as_ref()?;
         let entry = pak.entry(&compiled)?;
-        let in_archive = entry.length == 0 || entry.archive == nades_source2::vpk::IN_DIRECTORY || pak.archive_path(entry.archive).is_file();
-        in_archive.then_some(GameFile::Pak(compiled))
+        held(pak, entry).then_some(GameFile::Pak(compiled))
+    }
+
+    /// A game file's path relative to the game folder: what the scene records.
+    pub fn name(&self, file: &GameFile) -> String {
+        match file {
+            GameFile::Disk(path) => self.relative(path),
+            GameFile::Pak(entry) => entry.clone(),
+        }
     }
 
     /// A game file's bytes.
@@ -159,6 +184,11 @@ impl GameIndex {
     pub fn relative(&self, path: &Path) -> String {
         path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().replace('\\', "/")
     }
+}
+
+/// Whether the depot holds an entry's bytes: in the directory file, or in a numbered archive that is there.
+fn held(pak: &Vpk, entry: &nades_source2::vpk::Entry) -> bool {
+    entry.length == 0 || entry.archive == nades_source2::vpk::IN_DIRECTORY || pak.archive_path(entry.archive).is_file()
 }
 
 /// The pack's format for a game texture, or none.
@@ -456,7 +486,7 @@ mod tests {
     fn an_image_name_finds_one_game_file_or_says_why_not() {
         let root = Path::new("/game/csgo");
         let index = GameIndex::of(root, &["materials/a/wall_color_psd_1.vtex_c", "materials/b/dup_tga_2.vtex_c", "materials/c/dup_tga_2.vtex_c"]);
-        assert_eq!(index.by_name("wall_color_psd_1.vtex"), ByName::Found(root.join("materials/a/wall_color_psd_1.vtex_c")));
+        assert_eq!(index.by_name("wall_color_psd_1.vtex"), ByName::Found(GameFile::Disk(root.join("materials/a/wall_color_psd_1.vtex_c"))));
         assert_eq!(index.by_name("dup_tga_2.vtex"), ByName::Ambiguous(2));
         assert_eq!(index.by_name("gone_psd_3.vtex"), ByName::Missing);
         assert_eq!(index.by_name("default_ao_tga_559f1ac6_orm_1658198406.png"), ByName::NotAGameName);
