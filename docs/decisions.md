@@ -901,3 +901,41 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Not checked:** the replay in the window by hand (the screen was locked overnight): the shell's panels, the fly
   camera taking over, the windowed frame time. Overlapping smokes are composited in turn, not in one march, so where two
   clouds interpenetrate the nearer simply covers the farther.
+
+## S31 · The grenade simulator: recorded data leaves the app, the scene file is its one port
+
+- **Decision (2026-10-27, the user's):** nades-sandbox is a generic CS2 map and grenade simulator (docs/simulator.md).
+  Map selection and placing throws stay; the lineup library and its filters, the data adapters (`crates/source-file`,
+  `crates/source-demo`, `check`, `tools/cs2_throws.py`, `--data`, `[data]`), the replay (M5), the viewpoints and
+  callouts from recorded players, `crates/model`'s data modules, the MCP tools about recorded throws (`lineups_list`, the
+  video of a recorded throw) and the benches comparing recorded throws with show-me-the-nades' web view (`cameras.py`,
+  `effects.py`, `tag_parity`, `replay_check.py`) leave. They belong to other applications. S24, S25, S28 and S30 and
+  docs/standalone-api.md stay as history.
+- **The scene file** (`nades_control::scene`, `"format": "nades-sandbox-scene"`, version 1) is the one generic port: a
+  map and its throws (feet, pitch, yaw, crouch, movement, click, start, an optional label). The app saves and opens it,
+  the MCP tools read and write it, offscreen runs and videos take it, and another application can write one to show its
+  throws here. It lives in `nades-control`, not in the physics crate, so its JSON names are its own (snake case,
+  defaults for everything but the grenade, spot and angles) whatever the physics' types become; the app maps them.
+- **A throw is simulated once per spot, angles and technique** (`sim::key`: everything but the start and the label),
+  per map, for the session: `nades_physics::release` then `fly` against the pack's collider, then
+  `nades_effects::smoke_grid` → `nades_scene::smoke::fill_cloud` → the lit volume, or `fire_flames` →
+  `nades_scene::fire::build_fire`, into a `nades_scene::stage::Stage` built from the simulated flight
+  (`stage::Simulated`; the recorded facts' `build_stage` went with the model's facts). The scene's clock places each:
+  the grenade leaves the hand at `start + release.t`, goes off at `start + detonation.t`, and its stage's own time is
+  seconds after that, as the replay's were. Simulations run on the rayon pool, each waiting for the collider, after the
+  first frame; the throw tool's preview arc runs `release` and `fly` alone on the window's thread when the aim changes.
+- **Drawing many throws:** the throw layer keeps the replay's way of drawing a moment of several stages
+  (`ThrowLayer::set_moment`: grenades in flight, bursts, molotovs' and incendiaries' sprites through their own bind
+  groups) and builds the arcs separately (`set_arcs`: the selected throw's and the aimed one's strong, the others faint,
+  each with a faint copy where walls hide it). The composite draws every smoke through the replay's per-cloud passes;
+  the single-cloud path went. The strongest light of the moment lights the map.
+- **Views:** free (the fly camera, which the throw tool throws from: the feet are the eye less 64, or 46 crouched); the
+  thrower's eye at release; following the grenade (140 units behind where it was a third of a second ago, looking where
+  it goes, then over what it left); an orbit opening on the result shot (`Stage::result_camera` with no recorded
+  viewers: a standing eye on the floor that sees the effect, else an overview). Clicking a spot (`sim::pick`, a ray
+  through the cursor against the collider, then the floor under the hit) stands the camera there.
+- **Evidence:** the first frame is unchanged (de_cache on screen 139.3 ms against 139.0 for c807555, medians of 7
+  alternated launches, load ≈18): the scene is parsed with the state, and nothing else of the simulator runs before
+  the first frame. Offscreen renders of every grenade kind on de_mirage, de_dust2 and de_inferno, the window driven
+  over app control through every view with the shell in the capture, and the MCP tools' tests. How right a flight or an
+  effect is belongs to S32 (physics) and S33 (effects).

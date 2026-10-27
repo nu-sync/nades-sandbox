@@ -1,11 +1,27 @@
 # nades-sandbox: specification
 
-A native app that shows a CS2 map and the grenades thrown on it, from the throws' own data, instantly. It reads
-CS2 demos, through its own reader, and `cs2-throws` files, the facts CS2 demos record, which any parser can write
-(docs/standalone-api.md); `show-me-the-nades` (a separate project, which keeps the analytics, guides and replays in its
-web app) is one optional producer. Its maps come from the game's own files, packed on this machine. It plays back whole
-rounds from demos.
+A native CS2 map and grenade simulator: pick a map, stand somewhere, aim, choose how to throw, and see the grenade fly
+through the map, bounce and go off, instantly ([docs/simulator.md](docs/simulator.md)). Its maps come from the game's own
+files, packed on this machine. Nothing in it depends on recorded matches; lineup libraries, statistics and demo analysis
+belong to other applications (`show-me-the-nades`, a separate project, keeps its own).
 
+Status: **the simulator** (2026-10-27, S31).
+- The recorded-data features are gone: the lineup library and its filters, the data adapters (cs2-throws files, the
+  demo reader, `check`, `--data`), the replay, the viewpoints and callouts from recorded players, `crates/model`'s data
+  modules, the MCP tools about recorded throws and the benches that compared recorded throws with the web view. The
+  decisions behind them (S24, S25, S28, S30) and docs/standalone-api.md stay as history.
+- The throw tool, the scene (list, select, re-aim, edit, duplicate, delete, start times), play, pause and scrub with
+  every grenade flying and going off at its own time, the four views (free, the thrower's eye, following the grenade,
+  an orbit of the result), the practice command, and scene files (JSON, `nades-sandbox-scene` version 1) to save and
+  open. Each throw is simulated once per spot, angles and technique on the thread pool, after the first frame: its
+  flight by `crates/physics` (S32), its smoke's grid and fire's flames by `crates/effects` (S33), drawn by the scene's
+  ports of the web view's smoke and fire.
+- `--scene f.json --time s --render out.png` draws a scene's moment offscreen and reports what each throw did; MCP tools
+  place and edit throws, play time and render images and videos of scenes.
+- The first frame is unchanged: de_cache on screen 139.3 ms from process start against 139.0 before the simulator
+  (medians of 7 alternated launches, load ≈18).
+
+Before it, **M5** (2026-10-26):
 Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
 - M5, the replay: a demo's round on the map in 3D with every player (where they stand and look, alive or dead, in
   their side's colour, faint through walls) and every grenade in flight, then its smoke, fire, flash or HE at its own
@@ -46,41 +62,37 @@ Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
 
 ## 1. What it is like to use
 
-You open it, and the map you last looked at is on screen in about a tenth of a second.
+You open it, and the map you last looked at is on screen in about a seventh of a second, with the throws you left on it.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ de_cache ▾  T · CT   smoke flash molotov HE   team ▾   player ▾   phase ▾   ⌕         │
+│ de_mirage ▾   Free  Thrower  Follow  Orbit   ☑ Arcs                                  │
 ├────────────────────┬───────────────────────────────────────────────┬─────────────────┤
-│ LINEUPS  118       │                                               │ Smoke · T       │
-│ TSpawn → Mid    23 │                                               │ ropz · Vitality │
-│ Rafters → B     15 │         the map, the thrower's eye,           │ run-jumpthrow   │
-│ Connector → G   13 │         the grenade's flight, its smoke       │ left click      │
-│ OutsideA → Cat  12 │                                               │ setpos … setang │
-│ …                  │                                               │ [copy]          │
-│                    │                                               │ Lineup Aim      │
-│                    │                                               │ Result Orbit    │
+│ THROW              │                                               │ Throw 1         │
+│ smoke flash HE …   │                                               │ smoke · jump    │
+│ stand walk run …   │        the map from where you stand,          │ feet, pitch/yaw │
+│ ☐ crouch  L M R    │        the preview arc as you aim,            │ Re-aim Dup Del  │
+│ starts at 0.0 s    │        the grenades flying and going off      │ goes off 1.9 s  │
+│ [Stand on a spot]  │                                               │ setpos … setang │
+│ [Throw (T)]        │                                               │ [copy]          │
+│ SCENE  3 throws    │                                               │                 │
+│ 1. smoke · 0.0 s   │                                               │                 │
 ├────────────────────┴───────────────────────────────────────────────┴─────────────────┤
-│ ◀ ▶  ────●───────────────────  4.0 s after it landed                  first frame 118 ms │
+│ Play  ────●───────────────────  2.40 / 21.3 s                         first frame 128 ms │
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **The lineup list** is ordered as `lineup_report` orders it, and cut by side, grenade, team, player and round phase,
-  like the web app's Lineups page.
-- **Picking a lineup** moves the camera, with no loading. You see it from:
-  - the thrower's eye at release, with the crosshair (Lineup);
-  - zoomed on the aim point (Aim);
-  - an opponent's eye, with the smoke, fire, flash or HE as the round had it (Result);
-  - anywhere you drag (Orbit).
-- **The time scrubber** plays the flight, the bloom and the fade; the arrow keys step lineups, 1–4 pick the views and
-  space plays.
-- **Copy** puts the practice command (`setpos`, `setang`) on the clipboard.
-- **Switching maps** shows the other map at its lineup in the next frame: every pool map stays on the GPU (0.37–1.43 GB
-  each, its textures in the game's own compressed blocks and its geometry), its lineups read and its lineup's stage
-  built ahead. A map that did not
-  fit the budget loads when picked, in about 1.5 s.
-- **No browser:** no page loads, no memory ceiling of a tab, no shader compiles on each visit.
-- **Later:** a round plays back with its players and every grenade.
+- **The throw tool** stands where the free camera stands (its eye 64 units over the feet, 46 crouched), or on a spot
+  clicked on the map, and aims where the camera looks; the preview arc follows the aim. T throws.
+- **The scene** lists every throw: select it to change its grenade, movement, crouch, click, start, feet or angles,
+  re-aim it from the camera, duplicate or delete it. Space plays the scene's clock; each grenade is thrown at its own
+  start, flies, bounces and goes off.
+- **Views** (1–4): free; the thrower's eye as it lets go; behind the grenade in flight, then over what it left; an orbit
+  of the result, opening on a shot that sees it.
+- **Copy** puts the selected throw's practice command (`setpos`, `setang`) on the clipboard.
+- **Scene files** save and open a map's throws as JSON; a file dropped on the window opens.
+- **Switching maps** shows the other map in the next frame: every pool map stays on the GPU (0.37–1.43 GB each), and
+  each keeps its own scene.
 
 ## 2. Why native, measured
 
@@ -97,16 +109,13 @@ cannot follow (show-me-the-nades' `docs/research/native-sandbox.md` and the meas
 
 ## 3. Scope
 
-**Now (M1–M4, standalone):** any official map, packed from the game's files (the seven pool maps checked against the
-game and the web view, de_vertigo packed beside them); the lineups and throws of CS2 demos and cs2-throws files; the
-four views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the practice command, every packed map
-resident.
-
-**M5:** demo replay, round by round, with players and every grenade (§10).
+**Now:** any official map, packed from the game's files (the seven pool maps checked against the game and the web view,
+de_vertigo packed beside them), every packed map resident; grenades placed, simulated and played (docs/simulator.md);
+scene files; agent control.
 
 **Not here:**
-- the analytics, map guides and 2D replay, which stay in the web app;
-- editing data;
+- lineup libraries, team and player statistics, demo analysis and replays: other applications, which can write a scene
+  file to show their throws here;
 - any distribution of Valve's assets: packs are built on this machine and stay there.
 
 ## 4. Decisions
@@ -121,7 +130,7 @@ The stack, with what each choice rests on. [docs/decisions.md](docs/decisions.md
 | UI | egui, drawn by egui-wgpu into the frame's last pass, input from egui-winit | 0.37 |
 | Engine | none: our own renderer over wgpu | |
 | Shaders | WGSL, checked by naga at build time, composed with naga_oil, a few uber-shaders with overridable constants | naga 30.0.1, naga_oil 0.23 |
-| Data | cs2-throws files: SQLite, bundled, read-only (`crates/source-file`); the config file in TOML, its folder from `directories` | rusqlite 0.41, toml 1, directories 6 |
+| Data | scene files in JSON (`crates/control`, serde); the config file in TOML, its folder from `directories` (until S31: cs2-throws files in SQLite, rusqlite) | serde_json 1, toml 1, directories 6 |
 | Assets | packs memory-mapped (memmap2), tables in postcard, LZ4 (lz4_flex), our own VTEX and VPK readers; meshopt for the export's geometry; when packing, Source 2 Viewer's CLI (export and decompiles, S9, S26), glTF-Transform through Bun (S29), DepotDownloader for `setup` | 0.9, 1.1, 0.14, 0.7; glTF-Transform 4.5.1 |
 | Maths, threads | glam, rayon | 0.34, 1.12 |
 | Profiling | start-up marks (JSON), wgpu-profiler (GPU timestamps; built on the same wgpu 30), tracing with Tracy | 0.28, 0.1 |
@@ -150,17 +159,16 @@ crates/render    wgpu device, passes, pipelines, uploads from packs, frame graph
 crates/pack      the per-map pack: format, writer, memory-mapped reader                   (format 2)
 crates/source2   CS2's files: VTEX textures (BC blocks, mips, cubes, volumes), VPK archives; later KV3
 crates/packer    `nades-pack <map>`: builds a map's pack from the export, the game's files and their entities
-crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
-                 (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
-crates/source-file  the cs2-throws file adapter: version 2 SQLite files, several merged, and `check`
-crates/source-demo  the demo adapter: `.dem` files read with awpy into cs2-throws files in the cache (S28)
+crates/model     CS2's own encodings it keeps: the smoke's voxel log, the release model's maths
+crates/physics   CS2's grenade throw: the release, the flight with its bounces, the detonation, the practice command (S32)
+crates/effects   what a grenade leaves: the smoke's voxel grid and the fire's flames, from the map's collider (S33)
 crates/config    where the settings come from (§8): flag, environment, config file, default
-crates/scene     a throw becomes a stage: CS2's cameras, the result shot through the map's collider, the smoke's cloud,
-                 volume and light, the fire, the timeline (ported number for number from the web view)
-crates/control   app control's protocol, and crates/mcp its MCP server (a separate workstream on the same app)
-                 the replay (M5): crates/model's `replay` (who is where at a tick), crates/sandbox's `replay.rs` (a
-                 round read, a moment on the GPU, its cameras), crates/render's `set_replay` and the composite's clouds
-tools/cs2_throws.py  the format's schema and reference writer (Python's standard library only)
+crates/scene     what the renderer draws of a throw: its stage (flight, cloud, fire, burst, result shot), CS2's cameras,
+                 the collider, the smoke's cloud, volume and light, the fire (ported number for number from the web view)
+crates/control   the scene file and app control's protocol; crates/mcp its MCP server
+                 the simulator: crates/sandbox's `scene.rs` (each map's scene, the clock, the tool, the views) and
+                 `sim.rs` (a throw through the physics and the effects into a stage; a moment of the scene on the GPU),
+                 crates/render's `set_arcs`, `set_moment` and the composite's clouds
 ```
 
 ### Start-up, on two threads, then three more
@@ -169,15 +177,14 @@ tools/cs2_throws.py  the format's schema and reference writer (Python's standard
 main      main ─ EventLoop (AppKit, ~30 ms) ─ launch (~14) ─ window + CAMetalLayer (~32) ─ surface ─┐
 loader    main ─ mmap pack ─ device (~3–14) ─ buffers and textures, pipelined (~40–60) ─ pipelines ─┴─ first frame ─ on screen
                                                                                                                     │
-data      the list (~100 ms), then every listed lineup's throw, the selected first ─────────────────────────────────┤
 collider  the pack's collider and its BVH (6–39 ms) ─────────────────────────────────────────────────────────────────────────┤
 effects   the game's smoke noise and fire flipbooks ─────────────────────────────────────────────────────────────────┘
-stages    each throw's stage on every core (rayon), once the collider is there
-maps      once the window shows: the other packed maps, one at a time, each drawn offscreen; their lists, stages (S19)
+throws    each throw simulated on every core (rayon), once the collider is there: its flight, its effect, its stage
+maps      once the window shows: the other packed maps, one at a time, each drawn offscreen (S19)
 ```
 
-- The first frame needs no data: it is drawn from the camera the last run left on that map (S16). Reading the list
-  before it made the window appear later.
+- The first frame needs no simulation: it is drawn from the camera the last run left on that map (S16), and the
+  scene's throws are simulated after it (S31).
 
 - The window and the map arrive together. Measured on M4's de_cache (medians of 9 from process start, load ≈10,
   `.runs/startup-20261026-163255/`):
@@ -198,11 +205,11 @@ maps      once the window shows: the other packed maps, one at a time, each draw
    and fog.
 2. The map in CS2's material families (S8). It is lit by its irradiance and directional lightmaps and its baked sun
    shadows, or by its light probes where the game does not lightmap (S9, S10), and fogged.
-   The shown throw's flight (its tube, marks and the grenade), a flash's or HE's burst and the lines to who it blinded
-   draw in the same pass; an effect's point light (fire, flash, HE) adds to the map's diffuse light.
+   The throws' arcs (tubes and marks), the grenades in flight and the flashes' and HEs' bursts draw in the same pass; the
+   strongest effect's point light (fire, flash, HE) adds to the map's diffuse light.
 3. The effects pass: additive, depth-feathered surfaces, and the fire's sprites and ground (`throw.wgsl`).
 4. The composite: the scene into the HDR target, with the smoke raymarched by a port of CS2's smoke shader against the
-   depth (`smoke.wgsl`); a still picture averages 16 jittered frames (S17).
+   depth (`smoke.wgsl`), one pass per smoke, the farthest first; a still picture averages 16 jittered frames (S17).
 5. Bloom (four levels), then present: exposure (a GPU reduction, never read back), the map's tone curve and its
    colour lookup table, into the 3D view's rectangle between the shell's panels.
 6. egui.
@@ -292,23 +299,17 @@ panel) has no native counterpart: it exists to work around the browser.
   in a replay;
 - facing masks on blend layers, which keep moss and dirt to the faces that point up (S10).
 
-## 8. Data
+## 8. Scenes
 
-- **Facts, derivations, tags** (docs/standalone-api.md §2): a source hands over facts only, as `crates/model` names
-  them; everything computed from them is the model's, one implementation for every source; a producer's own labels are
-  tags, shown and filterable, never interpreted.
-- **The source:** `crates/source-file` reads cs2-throws version 2 files read-only. Several files merge into one source,
-  each demo taken from the first file that has it; another major version is refused, naming both; unknown tables and
-  columns are ignored. A file written again (its size or modification time) is opened again, and the source's revision
-  changes: the app looks every 5 s and reads the list and the stages again. A file being written is `Busy`, retried
-  every half second.
-- **The library:** one `nades_model::Library` per map and revision, built on the data thread from the map's facts and
-  its place-labelled samples. A list is that library cut by side, grenade, team, player, round time, plant and tag, in
-  memory; a stage reads the throw's tracks and the samples of its viewpoint window (and, for a flash whose blinded
-  players have no position, the samples around its detonation).
-- **Where the data is:** `--data` (cs2-throws files, demos, folders of either), `NADES_SANDBOX_DATA`, the config file's
-  `[data] paths`, then the demo reader's cache
-  (`crates/config`, which the MCP server can share); `nades-sandbox check <file>` reports a file's problems and the features its facts allow.
+- **The scene file** (`crates/control/src/scene.rs`): `{"format": "nades-sandbox-scene", "version": 1, "map": …,
+  "throws": [{"grenade", "feet", "pitch", "yaw", "crouch", "movement", "click", "start", "label"}]}`. Feet in Hammer
+  units, angles as CS2's `setang` takes them, `start` in seconds on the scene's clock. A reader refuses a newer version;
+  a change of meaning is a new version.
+- **A throw's simulation** depends on everything but its start and label, and is kept per map for the session. The
+  scene's clock places each: its grenade leaves the hand at `start + release.t`, goes off at `start + detonation.t`, and
+  its effect runs on for the stage's duration.
+- **Where scenes live:** each map's scene in the remembered state (`state.json`, written on exit), and files wherever the
+  person saves them (`~/nades-scenes/<map>.json` by default).
 
 ## 9. Measured, and the targets
 
@@ -352,16 +353,17 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | **M2** ✓ | CS2 materials, directional lightmap and baked shadows, light probes, sky and skybox, fog, bloom, tone curve, lookup table, GPU exposure; offscreen renders from the in-game lineup shots' cameras | met: every pool map's render differs from the game's shot no more than the web view's, by blurred \|Δ\| whole and top half (S12; the skill's references read in place); de_cache on screen 172 ms from process start (median of 9); a 4.1 ms frame at 2880×1800 |
 | **M3** ✓ | the database: lineup list and filters; the four views; flight path; smoke from its voxel log; fire, flash, HE; time scrubber; result camera through the collider; practice command; a map selector; each map opening at one of its lineups | met: every view of 84 throws on the seven maps opens from the web view's camera, 0.0000 units apart (`bench/cameras.py`); the effects beside the web view's for 12 throws (`bench/effects.py`); a lineup switch shown in the next frame for 0.5 ms of the window's time; de_cache on screen 172 ms from process start (S16–S18) |
 | **M4** ✓ | every pool map packed and resident; map switch; macOS app bundle; a Windows build | met: a resident map shows in the next frame (42 of 42 picks; that frame 5.3 ms, 5.7 on a first visit, worst 8.9); all seven maps in one session, 6.2 GB of an 8 GiB budget, least recently shown let go beyond it; de_cache on screen 168.8 ms from process start, de_inferno 185.1 (medians of 9); `just bundle` runs from Finder; the workspace checks and lints clean for Windows (S19–S23) |
-| **M5** (built) | demo replay: pick a demo and a round; play, pause, scrub and speed (¼–4×); every player's position, view, life and side, every grenade in flight and its smoke, fire, flash or HE at its time, several smokes at once; a free camera, a player's eyes, a camera behind them; a lineup view from any throw of the round; players 16 a second (cs2-throws 2.1 `player_tracks`), else from the samples; `--replay` and `--bench-replay` offscreen | met offscreen: 11 moments on four maps rendered at chosen times, every living player (72 of 72) and the dead in view (4 of 4) drawn where the facts put them in their side's colour, each live effect seen at its point unless a wall hides it (`bench/replay_check.py`); a replay frame 3.9–4.5 ms median at 1444×1420 (p95 ≤ 5.2) with up to 8 throws live; the map's frame and every lineup view unchanged (3.45 ms either way; renders identical but GPU noise); no change on the first frame's path. Not yet: driving it in the window (the screen was locked, S30) |
+| **M6** (built) | the simulator (S31): the recorded-data features removed; the throw tool with a live preview arc; the scene (list, select, re-aim, edit, duplicate, delete, start times); play, pause and scrub with every grenade flying and going off (smoke through `smoke_grid` and `fill_cloud`, fire through `fire_flames` and `build_fire`, flash, HE, decoy); the views (free, thrower, follow, orbit); the practice command; scene files; MCP tools for scenes, throws, time, views, images and videos; `--scene … --render` offscreen | met: offscreen renders of placed throws, each grenade kind, on three maps; the window driven over app control (scene in, each view, captures with the shell); the first frame unchanged (139.3 ms against 139.0, medians of 7 alternated); tests in debug and release and clippy `-D warnings` clean. How right a flight or an effect is, is the physics' (S32) and the effects' (S33) |
+| **M5** (built, removed in M6) | demo replay: pick a demo and a round; play, pause, scrub and speed (¼–4×); every player's position, view, life and side, every grenade in flight and its smoke, fire, flash or HE at its time, several smokes at once; a free camera, a player's eyes, a camera behind them; a lineup view from any throw of the round; players 16 a second (cs2-throws 2.1 `player_tracks`), else from the samples; `--replay` and `--bench-replay` offscreen | met offscreen: 11 moments on four maps rendered at chosen times, every living player (72 of 72) and the dead in view (4 of 4) drawn where the facts put them in their side's colour, each live effect seen at its point unless a wall hides it (`bench/replay_check.py`); a replay frame 3.9–4.5 ms median at 1444×1420 (p95 ≤ 5.2) with up to 8 throws live; the map's frame and every lineup view unchanged (3.45 ms either way; renders identical but GPU noise); no change on the first frame's path. Not yet: driving it in the window (the screen was locked, S30) |
 
 ## 11. Rules
 
 - **Valve's assets stay on this machine.** Packs, exports and the game files live in the folders the settings name
   (docs/standalone-api.md §8: the packs folder, CS2's folder, the exports in the platform's cache). They are never
   committed, uploaded or shared; rendered images at most.
-- **The user's data is read, never written,** and never experimented on: tests write their own files
-  (`tools/cs2_throws.py fixture`), checks use a copy.
-- **Nothing waits for a human:** a missing pack is built, and a file being written is retried.
+- **Nothing reads recorded matches** (S31): throws come from the throw tool, scene files and the MCP tools; tests write
+  their own files.
+- **Nothing waits for a human:** a missing pack is built.
 
 ## 12. Risks and unknowns
 
@@ -393,9 +395,16 @@ first frame, both steady-frame benches and peak memory with the load average bes
   samples, two a second, when a file has none.
 
 
-## Agent control
+
 
 The local MCP has its own [specification and per-tool acceptance checks](docs/mcp-spec.md). It uses shared application
 commands and camera/state types, and supports map/camera operation, frame capture, diagnostics and headless map
 rendering and recorded-throw video. Its verification entry point is `just verify-mcp`; live M3 throw controls are a
 separate extension.
+
+## Agent control
+
+The local MCP has its own [specification and per-tool acceptance checks](docs/mcp-spec.md). It uses the shared
+application commands, camera, state and scene types, and supports map and camera operation, frame capture, diagnostics,
+the window's scene (read, replace, add, update and remove throws, the clock, the views), and headless images and videos
+of scenes. Its verification entry point is `just verify-mcp`.

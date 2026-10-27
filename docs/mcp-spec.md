@@ -43,14 +43,21 @@ repository checkout or a separate manual:
 3. `camera_set` uses that instance and a known CS2 pose. Its response supplies the actual applied camera and revision.
 4. `frame_capture` with that instance and `expected_revision` returns the rendered image and frame provenance.
 5. `view_render` accepts the returned map, camera, image dimensions and `render_time_seconds` to reproduce a base-map
-   view headlessly. V1 does not render the selected M3 throw/effects; capabilities and descriptions say so explicitly.
-   It does not change the visible instance. `diagnostics_get` explains errors or slow operations.
+   view headlessly, or a scene (map and throws) at a moment from a view of one of its throws. It does not change the
+   visible instance. `diagnostics_get` explains errors or slow operations.
+6. `scene_get`, `scene_set`, `throw_add`, `throw_update` and `throw_remove` read and change the window's scene;
+   `time_set` moves or plays its clock; `view_set` shows a throw's view (thrower, follow, orbit) or the free camera.
 
-`scene` describes the camera mode, selected lineup/throw, timeline position, playback and active effects when that
-application build exposes them. In a map-only view these fields explicitly indicate no selection/playback/effects.
-`scene.loading` and `scene.notice` distinguish pending data/stage work, empty results and data failures from map readiness.
-Scene readback does not advertise M3 control tools as implemented. No tool description implies GPU or FPS measurement
-from CPU submission samples; actual GPU timing remains explicitly unavailable until measured.
+`scene` in the state describes the camera mode (free, thrower, follow, orbit), the number of throws and the selected
+one, the clock and where it ends, playback and the effects showing (flight, smoke, fire, flash, he). `scene.loading`
+is true while a map switches in or throws are still being simulated; `scene.notice` explains failures. No tool
+description implies GPU or FPS measurement from CPU submission samples; actual GPU timing remains explicitly
+unavailable until measured.
+
+A scene is the scene file (`nades-sandbox-scene`, version 1, docs/simulator.md): a map and its throws, each the
+player's feet (Hammer units, Z up), pitch and yaw (degrees, positive pitch down, pitch within ±89), crouch, movement
+(stand, walk, run, jumpthrow, run_jumpthrow), click (left, middle, right), start (0–120 s on the scene's clock) and an
+optional label; at most 64 throws.
 
 ## Common contract
 
@@ -95,10 +102,16 @@ from CPU submission samples; actual GPU timing remains explicitly unavailable un
 | `map_open` | Running instance, map ID, optional camera. Preflight both inputs before stopping. Restart on new map; same map avoids restart. | New map is ready; restart yields a new ID and restarted=true; invalid preflight preserves the original. Failed launch reports actual failure. |
 | `camera_set` | Instance, absolute camera, optional expected revision. Reset held fly input. | Atomic pose readback within 0.01 Hammer units and 0.001°; reply identifies a presented frame at the applied revision. Invalid/stale requests do not mutate the view. |
 | `frame_capture` | Instance; include_ui defaults true; optional expected revision. Native physical window or cropped scene rectangle. | Decodable PNG from the reported frame/revision; scene-only copy occurs before UI in the same submission, with UI still presented normally; app stays open. Occlusion/readback failure is explicit. |
-| `view_render` | Base map, camera, width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; repeated fixed-input renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. M3 effects are explicitly unsupported. |
+| `view_render` | Map with a camera; or a scene on that map with `time_seconds`, a view (orbit by default, follow, thrower) of throw `throw` (the first by default) and arcs on or off, the camera optional. Width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; a scene's render reports each throw's release, bounces, detonation and effect; repeated fixed-input map renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. A scene on another map, without throws and without a camera, or naming a throw it lacks is refused before launching. |
 | `diagnostics_get` | Log limit defaults 50, maximum 200. | Bounded actual startup/frame/error/build/GPU diagnostics; failures remain inspectable; no image blobs, raw assets or fabricated metrics. |
-| `lineups_list` | Map, optional grenade (smoke, flash, he, molotov, incendiary, decoy) and destination substring. | Returns the lineups of the throws in the configured cs2-throws files (`NADES_SANDBOX_DATA` or the config file), with the sandbox's own lineup IDs, the producer's throw IDs, the landing callout and frequency; invalid inputs or unreadable data are explicit. |
-| `video_render` | Recorded throw, map, start/end seconds relative to detonation, fixed camera or keyframes, size and fps. | Returns a job ID immediately; uses one persistent headless renderer and FFmpeg H.264; live state is unchanged. |
+| `scene_get` | Instance. | The window's scene as a scene file, with the state. |
+| `scene_set` | Instance, scene, optional expected revision. Another map switches the window to it in place. | The scene read back equals the one set; status shows loading until its throws are simulated; an invalid scene does not change the window. |
+| `throw_add` | Instance, throw. Selects it. | The scene read back has it last. Invalid throws are refused without change. |
+| `throw_update` | Instance, index, throw. | The throw at the index is replaced; an index the scene lacks is refused. |
+| `throw_remove` | Instance, index. | The throw is gone and later ones move down. |
+| `time_set` | Instance, optional seconds (finite, ≥ 0), optional playing. | The clock reads back as set (clamped to the scene's end); effects showing then are reported. |
+| `view_set` | Instance, view (free, thrower, follow, orbit), optional throw index. | The camera mode reads back; a view of a throw the scene lacks is refused. |
+| `video_render` | A scene, start/end seconds on its clock, a fixed camera, keyframes or a view of one of its throws (follow by default), size and fps. | Returns a job ID immediately; uses one persistent headless renderer and FFmpeg H.264; live state is unchanged. |
 | `video_status` | Job ID from this MCP session. | Reports running/completed/failed/cancelled, rendered frame count, errors and final local MP4 path. |
 | `video_cancel` | Job ID. | Stops and reaps the owned renderer and encoder; polling reaches cancelled and no partial MP4 remains. |
 
@@ -108,17 +121,17 @@ offscreen requests rather than comparing unrelated frames.
 
 ## Headless video
 
-Discover a throw with `lineups_list` (up to 300 matching rows, with truncation reported), then call `video_render` and poll `video_status`. The default is 1280×720 at
-30 fps; dimensions are even and at most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total
-at most 1,800 frames. Times are seconds relative to detonation; negative values include the flight. Frames sample
-from the start at fixed 1/fps intervals before the end; the encoded duration is the frame count divided by fps. Omit camera
-information to use the recorded result camera, provide `camera` for a fixed pose, or supply `camera_keyframes` with
-increasing offsets in seconds from clip start. The first keyframe is at zero; yaw takes the shortest route.
-For example, an agent can call `lineups_list` with `{"map":"de_dust2","grenade":"molotov","destination":"BombsiteA"}`,
-then pass a returned `throw_id` to `video_render` with `{"map":"de_dust2","throw_id":"…","start_seconds":-1,
-"end_seconds":5}`. Poll `video_status` with the returned `job_id`; its completed response includes the local path.
+Call `video_render` with a scene and poll `video_status`. The default is 1280×720 at 30 fps; dimensions are even and at
+most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total at most 1,800 frames. Times are seconds
+on the scene's clock (each throw begins at its own start), from 0. Frames sample from the start at fixed 1/fps intervals
+before the end; the encoded duration is the frame count divided by fps. Omit camera information to follow `view`
+(follow, orbit or thrower) of throw `throw`, provide `camera` for a fixed pose, or supply `camera_keyframes` with
+increasing offsets in seconds from clip start. The first keyframe is at zero; yaw takes the shortest route. For example
+`{"scene":{"map":"de_dust2","throws":[{"grenade":"molotov","feet":[-400,1000,-57.8],"pitch":-12,"yaw":60}]},
+"start_seconds":0,"end_seconds":5,"view":"follow"}`. Poll `video_status` with the returned `job_id`; its completed
+response includes the local path.
 
-The renderer loads the stage once, emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
+The renderer simulates the scene once, , emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
 runs directory. It shares the single headless-worker limit with `view_render`. A job belongs to its MCP session;
 disconnect cancels running work, while completed files remain local. FFmpeg is required and a missing encoder is
 reported in the job failure. The output has no audio. Live video recording is not supported.

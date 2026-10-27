@@ -6,33 +6,21 @@ default:
 
 # --- Use ---
 
-# Open a packed map in the app; extra flags go to nades-sandbox (e.g. --data match.dem). Throws come from --data, NADES_SANDBOX_DATA or the config file.
+# Open the simulator on a packed map; extra flags go to nades-sandbox (e.g. --budget-mb 4000).
 run $map='de_cache' *args:
     cargo run --release --bin nades-sandbox -- --map "$map" {{ args }}
 
-# Open demos, cs2-throws files or a folder of either on a map (each demo is read once into the cache).
-open $data $map='de_cache' *args:
-    cargo run --release --bin nades-sandbox -- --map "$map" --data "$data" {{ args }}
+# Open a scene file (map and throws, docs/simulator.md) in the window, on its map.
+scene $file *args:
+    cargo run --release --bin nades-sandbox -- --scene "$file" {{ args }}
 
-# Replay a round of a demo in the window (pick it under Replay); with --time and --render, write that moment as a PNG.
-replay $demo $round='1' *args:
-    cargo run --release --bin nades-sandbox -- --data "$demo" --replay "$(basename "$demo" .dem)" --round "$round" {{ args }}
+# Simulate a scene file offscreen: its moment at `time` seconds as a PNG from a view (orbit, follow, thrower) of throw `throw`, and what each throw did as JSON.
+simulate $file $time='4' $output='scene.png' $view='orbit' $throw='0' *args: build
+    ./target/release/nades-sandbox --scene "$file" --time "$time" --render "$output" --view "$view" --throw "$throw" {{ args }}
 
-# Render a frame from a CS2 console camera (comma-separated position and angles).
+# Render the bare map from a CS2 console camera (comma-separated position and angles).
 render $output $setpos $setang $map='de_cache':
     cargo run --release --bin nades-sandbox -- --render "$output" --map "$map" --setpos "$setpos" --setang "$setang"
-
-# Render one throw's view offscreen: view is lineup, aim, result or orbit; time in seconds after the release.
-render-throw $output $throw $data $view='result' $time='4':
-    cargo run --release --bin nades-sandbox -- --render "$output" --throw "$throw" --data "$data" --view "$view" --time "$time"
-
-# Report a cs2-throws file's problems and the features its facts allow.
-check-data $file: build
-    ./target/release/nades-sandbox check "$file"
-
-# Write the cs2-throws fixture (the format's worked example) to a file.
-fixture $file:
-    python3 tools/cs2_throws.py fixture "$file"
 
 # --- Prepare maps (Valve's files stay on this machine) ---
 
@@ -61,7 +49,7 @@ pack $map='de_cache': build
 effects: build
     ./target/release/nades-pack --effects
 
-# Show the settings, the tools packing needs, the packed maps and the demo cache.
+# Show the settings, the tools packing needs and the packed maps.
 doctor:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -76,7 +64,7 @@ doctor:
     ok "Source 2 Viewer CLI ([tools] s2v)" "$(get s2v)"
     ok "DepotDownloader ([tools] depotdownloader)" "$(get depotdownloader)"
     ok "bunx (glTF-Transform)" "$(command -v bunx || true)"
-    ok "python3 (fixtures, benches)" "$(command -v python3 || true)"
+    ok "python3 (benches)" "$(command -v python3 || true)"
     ok "CS2 files ([assets] game)" "$(get game)"
     packs="$(get packs)"; packs="${NADES_SANDBOX_PACKS:-${packs:-}}"
     ok "packs folder" "$packs"
@@ -85,11 +73,6 @@ doctor:
         for p in "$packs"/*.pack; do [ -e "$p" ] && printf '  %-12s %s\n' "$(basename "$p" .pack)" "$(du -h "$p" | cut -f1)"; done
         ok "shared effects pack" "$packs/shared/effects.pack"
     fi
-    for d in "$HOME/Library/Caches/io.github.nu-sync.nades-sandbox/throws" "${XDG_CACHE_HOME:-$HOME/.cache}/nades-sandbox/throws"; do
-        [ -d "$d" ] && echo "demo cache: $d ($(ls "$d" | wc -l | tr -d ' ') files)"
-    done
-    data="${NADES_SANDBOX_DATA:-$(grep -A3 '^\[data\]' "${cfg:-/dev/null}" 2>/dev/null | sed -n 's/^paths *= *//p' || true)}"
-    echo "data:    ${data:-the demo cache only (pass --data, set NADES_SANDBOX_DATA, or [data] paths in the config)}"
 
 # Build the macOS app bundle (target/release/bundle/macos/Nades Sandbox.app), signed for this machine.
 bundle: build
@@ -157,20 +140,8 @@ startup $map='de_cache': build
 resident: build
     python3 bench/resident.py
 
-# Check replayed players and effects are drawn where the facts put them.
-replay-check +data: build
-    python3 bench/replay_check.py --data {{ data }}
-
 # --- Compare with show-me-the-nades (optional; its checkout is named, never assumed) ---
-
-# Every view's camera for 84 throws against its web view.
-cameras $nades: build
-    python3 bench/cameras.py --nades "$nades"
 
 # Compare rendered maps with the game's shots and the web view.
 realism $nades $note: build
     uv run bench/realism.py --nades "$nades" --note "$note"
-
-# Compare the sandbox's groups, techniques and callouts with a producer's tags (show-me-the-nades: nades).
-parity $file $ns='nades':
-    cargo run --release -p nades-source-file --example tag_parity -- "$file" --ns "$ns"

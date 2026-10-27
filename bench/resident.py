@@ -3,15 +3,15 @@
     python3 bench/resident.py [--map de_cache] [--runs 3] [--rounds 2] [--budget-mb N] [--binary target/release/nades-sandbox]
 
 Each run is one `nades-sandbox --bench-maps all:<rounds>`: the window opens on `--map`, the other packed maps are opened in
-the background and their lineups warmed, then every map is picked in turn, `--rounds` times, the first map last in
-each round. For each pick the run reports the frames drawn from the pick to the frame that shows the map at its
-lineup (1 when it was resident), that frame's own time on the window's thread with the GPU's share (frames are
+the background, then every map is picked in turn, `--rounds` times, the first map last in
+each round. For each pick the run reports the frames drawn from the pick to the frame that shows the map
+(1 when it was resident), that frame's own time on the window's thread with the GPU's share (frames are
 finished on the GPU, vsync off), and the process's footprint once it shows. The first round's picks are each map's
 first frame in the window; later rounds' are not.
 
 The load average (`sysctl -n vm.loadavg`) is recorded before every run. Evidence goes to .runs/resident-<time>/
-(runs.jsonl, results.json, report.md); nothing else is written. Point NADES_SANDBOX_DATA at a copy of the cs2-throws
-file and NADES_SANDBOX_STATE at a scratch file: the run reads the one and rewrites the other.
+(runs.jsonl, results.json, report.md); nothing else is written. Point NADES_SANDBOX_STATE at a scratch file: the run
+rewrites it.
 """
 
 from __future__ import annotations

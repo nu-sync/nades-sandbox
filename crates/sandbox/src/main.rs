@@ -24,7 +24,8 @@
 //! - `--scene <file.json> --time <s> --render <file.png> [--view orbit|follow|thrower] [--throw k] [--no-arcs]` draws a
 //!   moment of a scene file offscreen (or from `--setpos`/`--setang` in place of a view), its smokes averaged over 16
 //!   jittered frames, and prints what each throw did as JSON lines (offscreen.rs). `--render-video <request.json>`
-//!   streams a scene's clip as PNG frames on stdout, for the MCP server.
+//!   streams a scene's clip as PNG frames on stdout, for the MCP server. `--scene <file.json>` alone opens the scene in
+//!   the window, on its map.
 //! - `--bench-offscreen <n> [--size 2880x1800]` draws n frames offscreen from the bench camera, each finished on the GPU
 //!   before the next, and prints the median and 95th percentile per frame after the first 30: the steady frame where
 //!   no window can be shown.
@@ -196,7 +197,15 @@ fn run() -> Result<()> {
     // the map and the camera the last run left, unless told otherwise (benches start from the bench camera)
     let bench = args.screenshot.is_some() || args.bench_frames.is_some();
     let remembered = state::load().filter(|_| !bench);
-    let map = args.map.clone().or_else(|| remembered.as_ref().map(|r| r.map.clone())).unwrap_or_else(|| "de_cache".into());
+    // a scene file to open shows on its own map from the first frame
+    let opened = match &args.scene {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+            Some(nades_control::scene::Scene::parse(&text).map_err(|e| anyhow!("{}: {}", path.display(), e.message))?)
+        }
+        None => None,
+    };
+    let map = args.map.clone().or_else(|| opened.as_ref().map(|s| s.map.clone())).or_else(|| remembered.as_ref().map(|r| r.map.clone())).unwrap_or_else(|| "de_cache".into());
     let instance = nades_render::instance();
     // the loader warms the map up from the camera the first frame is drawn from
     let eye = remembered.as_ref().and_then(|r| r.camera_on(&map)).map(|(eye, pitch, yaw, fov)| Eye::from_cs(eye.map(|v| v as f32), pitch as f32, yaw as f32, fov as f32));
@@ -218,6 +227,10 @@ fn run() -> Result<()> {
         let _ = proxy.send_event(UserEvent::Wake);
     });
     let mut sandbox = app::Sandbox::new(&map, remembered, bench, egui::Rect::NOTHING);
+    if let Some(scene) = opened {
+        sandbox.scene.file = args.scene.as_ref().expect("a scene file").display().to_string();
+        sandbox.set_scene(scene);
+    }
     // the other maps open in the background after the first frame, except in runs that time one map
     // (NADES_SANDBOX_PRELOAD: 0 never, 1 always)
     sandbox.preload = match std::env::var("NADES_SANDBOX_PRELOAD").as_deref() {
