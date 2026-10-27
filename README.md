@@ -8,11 +8,12 @@ CS2 demos or from `cs2-throws` files, with a fly camera and offscreen rendering 
 
 ## Status
 
-**M4 (version 0.1.0).** Tested on Apple Silicon macOS. The renderer is working. Since M3 the window
+**M5 (version 0.1.0).** Tested on Apple Silicon macOS. The renderer is working. Since M3 the window
 is a lineup sandbox: the lineups of the throws in your data, each seen from the thrower's eye, zoomed on the aim
 point, from an opponent's eye or orbiting it, with the flight, smoke, fire, flash or HE, a time scrubber and the
 practice command to copy. Since M4 every packed map stays on the GPU within a memory budget, so picking another map
-shows it in the next frame, and `just bundle` makes a macOS app. The sandbox is now standalone: it reads CS2 demos
+shows it in the next frame, and `just bundle` makes a macOS app. Since M5 a demo's round replays with every player
+and grenade (`just replay`). The sandbox is standalone: it reads CS2 demos
 itself and packs any official map from the game's files. The workspace type-checks for Windows
 (`just check-windows`) but has not been run there; Linux is not verified.
 
@@ -68,17 +69,21 @@ python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite   # a small worked examp
 Pick a lineup on the left; the arrow keys step through them, 1–4 pick the Lineup, Aim, Result and Orbit views, space
 plays the time, and dragging turns the orbit. WASD, E/Q and the right mouse button fly a free camera.
 
-With just installed:
+With just installed, the whole workflow is a few commands (`just` lists them all):
 
 ```sh
-just                       # list commands
-just pack de_cache
-just run de_cache
-just check                 # justfile formatting, workspace tests and Clippy
-just test-local            # ignored tests against local game files, exports and packs
-just startup               # startup, steady frames and memory
-just bundle                # the macOS app: target/release/bundle/macos/Nades Sandbox.app
-just check-windows         # type-check and lint for Windows (DX12) from a Mac
+just doctor                       # settings, packing tools, packed maps, the demo cache: what is missing
+just maps                         # fetch and pack every pool map and the shared effects (once per machine)
+just map de_vertigo de_train      # any other official map: fetch and pack in one step
+just open match.dem de_inferno    # a demo's throws on its map (read once into the cache)
+just run de_cache --data ~/throws.sqlite   # any nades-sandbox flags pass through
+just replay match.dem 16          # replay round 16 (add --time 28.5 --render r16.png for one moment offscreen)
+just render-throw shot.png <throw id> throws.sqlite result 4
+just check-data throws.sqlite     # what a cs2-throws file allows
+just bundle                       # the macOS app: target/release/bundle/macos/Nades Sandbox.app
+just check                        # justfile formatting, tests and Clippy (warnings as errors)
+just startup                      # startup, steady frames and memory (window on screen)
+just check-windows                # type-check and lint for Windows (DX12) from a Mac
 ```
 
 The app opens the other packed maps in the background once its first frame is on screen, as long as they fit an 8 GiB budget
