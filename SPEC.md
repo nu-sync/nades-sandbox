@@ -2,10 +2,18 @@
 
 A native app that shows a CS2 map and the grenades thrown on it, from the throws' own data, instantly. It reads
 `cs2-throws` files, the facts CS2 demos record, which any parser can write (docs/standalone-api.md); `show-me-the-nades`
-(a separate project, which keeps the analytics, guides and replays in its web app) is one producer. Later it plays back
-whole rounds from demos.
+(a separate project, which keeps the analytics, guides and replays in its web app) is one producer. It plays back whole
+rounds from demos.
 
-Status: **M4 done** (2026-10-26).
+Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
+- M5, the replay: a demo's round on the map in 3D with every player (where they stand and look, alive or dead, in
+  their side's colour, faint through walls) and every grenade in flight, then its smoke, fire, flash or HE at its own
+  time; play, pause, scrub and speed; a free camera, a player's eyes or a camera behind them; a lineup view opened from
+  any throw in the round. Players move between points 16 a second (cs2-throws 2.1's `player_tracks`, which the demo
+  reader writes), else between their samples. Offscreen, `--replay` renders a moment and `--bench-replay` times the
+  frames: 3.9–4.5 ms median at 1444×1420 with up to 8 throws live, the moment's set-up 0.5–0.6 ms. Checked against the
+  facts in 11 moments on four maps: every living player drawn where its track puts it, in its side's colour
+  (`bench/replay_check.py`).
 - Every pool map stays on the GPU. Once the first frame is on screen the other six open in the background, one at a
   time, with their lineups read and their first stages built, all within 1.6–1.75 s of start-up. The seven hold 6.2 GB
   of an 8 GiB budget; a map that does not fit lets go of the one shown least recently (S19).
@@ -30,7 +38,6 @@ Status: **M4 done** (2026-10-26).
   curve and colour lookup table, each pool map differing from the game no more than the web view does (S12). M1 put
   the textured de_cache on screen in 111 ms; it was built twice, as our own renderer and with Bevy as the shell
   ([docs/m1-bakeoff.md](docs/m1-bakeoff.md)), and the user chose our own renderer (S7).
-- M5 (demo replay) is next.
 
 ## 1. What it is like to use
 
@@ -88,7 +95,7 @@ cannot follow (show-me-the-nades' `docs/research/native-sandbox.md` and the meas
 **Now (M1–M4):** the pool maps with their textured exports, the lineups and throws in cs2-throws files, the four
 views, the throw's flight, smoke, fire, flash and HE, the time scrubber, the practice command, every map resident.
 
-**Later (M5):** demo replay, round by round, with players and every grenade.
+**M5:** demo replay, round by round, with players and every grenade (§10).
 
 **Not here:**
 - the analytics, map guides and 2D replay, which stay in the web app;
@@ -144,7 +151,8 @@ crates/config    where the settings come from (§8): flag, environment, config f
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
 crates/control   app control's protocol, and crates/mcp its MCP server (a separate workstream on the same app)
-crates/replay    (M5) rounds from demos
+                 the replay (M5): crates/model's `replay` (who is where at a tick), crates/sandbox's `replay.rs` (a
+                 round read, a moment on the GPU, its cameras), crates/render's `set_replay` and the composite's clouds
 tools/cs2_throws.py  the format's schema and reference writer (Python's standard library only)
 ```
 
@@ -319,6 +327,7 @@ panel) has no native counterpart: it exists to work around the browser.
 | Pipelines at start-up | warm: none waited for (macOS's shader cache); ≈360–440 ms on the first launch after a shader change (M2's pipelines, in parallel), and 497–630 ms on the first launch of a binary at a new path or a new app bundle: the cache is the program's | |
 | Peak memory, de_cache | 2.07–2.19 GB footprint (M4; M3 2.07, M2 2.0; M1's 640 MB pack 0.72–0.75 GB): the textures as Metal allocates them 983 MB, the driver's first submission 119 MB and first render pass ≈200 MB, what drawing the map's triangles holds 170–360 MB, the window ≈150 MB; the upload's staging none (S20) | |
 | Pack build | 1.5–3.9 s a map (M2) | |
+| **Replay frame (M5)** | **3.9–4.5 ms** median at 1444×1420 offscreen, finished on the GPU, p95 4.2–5.2, worst 5.3–7.6 (600 frames of de_cache round 16, up to 8 throws live, 10 players; overview, behind a player, through their eyes); the moment's set-up on the CPU 0.50–0.58 ms: S30 | ≤ 8.3 ms: met |
 | Data: list | a map's first: 0.25–0.37 s on 247 demos (reading 180–275 ms, the rules 66–110 ms); each filter change after it 6–12 ms in memory (S24). M3's DuckDB read: 93–114 ms per change on ≈96 demos | off the first frame's path: met |
 
 Timing runs: `nades-sandbox --exit-after-first-frame` prints every stage as JSON. `python3 bench/startup.py` runs the
@@ -334,7 +343,7 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | **M2** ✓ | CS2 materials, directional lightmap and baked shadows, light probes, sky and skybox, fog, bloom, tone curve, lookup table, GPU exposure; offscreen renders from the in-game lineup shots' cameras | met: every pool map's render differs from the game's shot no more than the web view's, by blurred \|Δ\| whole and top half (S12; the skill's references read in place); de_cache on screen 172 ms from process start (median of 9); a 4.1 ms frame at 2880×1800 |
 | **M3** ✓ | the database: lineup list and filters; the four views; flight path; smoke from its voxel log; fire, flash, HE; time scrubber; result camera through the collider; practice command; a map selector; each map opening at one of its lineups | met: every view of 84 throws on the seven maps opens from the web view's camera, 0.0000 units apart (`bench/cameras.py`); the effects beside the web view's for 12 throws (`bench/effects.py`); a lineup switch shown in the next frame for 0.5 ms of the window's time; de_cache on screen 172 ms from process start (S16–S18) |
 | **M4** ✓ | every pool map packed and resident; map switch; macOS app bundle; a Windows build | met: a resident map shows in the next frame (42 of 42 picks; that frame 5.3 ms, 5.7 on a first visit, worst 8.9); all seven maps in one session, 6.2 GB of an 8 GiB budget, least recently shown let go beyond it; de_cache on screen 168.8 ms from process start, de_inferno 185.1 (medians of 9); `just bundle` runs from Finder; the workspace checks and lints clean for Windows (S19–S23) |
-| **M5** | demo replay: rounds with players and grenades over time | (specified then) |
+| **M5** (built) | demo replay: pick a demo and a round; play, pause, scrub and speed (¼–4×); every player's position, view, life and side, every grenade in flight and its smoke, fire, flash or HE at its time, several smokes at once; a free camera, a player's eyes, a camera behind them; a lineup view from any throw of the round; players 16 a second (cs2-throws 2.1 `player_tracks`), else from the samples; `--replay` and `--bench-replay` offscreen | met offscreen: 11 moments on four maps rendered at chosen times, every living player (72 of 72) and the dead in view (4 of 4) drawn where the facts put them in their side's colour, each live effect seen at its point unless a wall hides it (`bench/replay_check.py`); a replay frame 3.9–4.5 ms median at 1444×1420 (p95 ≤ 5.2) with up to 8 throws live; the map's frame and every lineup view unchanged (3.45 ms either way; renders identical but GPU noise); no change on the first frame's path. Not yet: driving it in the window (the screen was locked, S30) |
 
 ## 11. Rules
 
@@ -368,7 +377,8 @@ first frame, both steady-frame benches and peak memory with the load average bes
   and the packs and exports made there), wait for a Windows machine.
 - **The pack's geometry source:** the Source 2 Viewer export stays the input until a Rust reader for the game's meshes
   (VBIB in `vmdl`/`vwrld`) earns its cost.
-- **Replay data (M5):** awpy's full-tick states or the database's half-second samples, interpolated.
+- ~~**Replay data (M5)**~~ settled (S30): tracks 16 a second in cs2-throws 2.1, measured against every tick; the
+  samples, two a second, when a file has none.
 
 
 ## Agent control

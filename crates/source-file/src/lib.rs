@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use nades_model::features::Census;
 use nades_model::{
-    Blind, Demo, DemoId, Effect, Flame, Grenade, MapFacts, MapName, Pawn, Player, Revision, Round, Sample, Side, SmokeVoxels, SourceError, Tags, Throw, ThrowId, ThrowSource, Tick, Tracks, Vec3,
+    Blind, Demo, DemoId, Effect, Flame, Grenade, MapFacts, MapName, Pawn, Player, PlayerTrack, Revision, Round, Sample, Side, SmokeVoxels, SourceError, Tags, Throw, ThrowId, ThrowSource, Tick, TrackPoint, Tracks, Vec3,
 };
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params};
@@ -27,7 +27,7 @@ pub const FORMAT: &str = "cs2-throws";
 /// §3's schema for a new file, as docs/standalone-api.md and tools/cs2_throws.py have it (a test keeps the three the same).
 pub const SCHEMA: &str = include_str!("schema.sql");
 /// The version a writer of this schema puts in `meta`.
-pub const VERSION: &str = "2.0";
+pub const VERSION: &str = "2.1";
 /// §3's recommended page size for a writer.
 pub const PAGE_SIZE: u32 = 16384;
 /// The major version this reader reads; any 2.x.
@@ -54,6 +54,7 @@ const TABLES: &[(&str, usize, &[&str])] = &[
     ("flames", 7, &["throw", "slot", "x", "y", "z", "first_tick", "last_tick", "nx", "ny", "nz"]),
     ("blinds", 2, &["throw", "seconds", "player", "side", "x", "y", "z"]),
     ("player_samples", 8, &["demo", "tick", "player", "side", "x", "y", "z", "alive", "pitch", "yaw", "duck", "place"]),
+    ("player_tracks", 6, &["demo", "round", "player", "side", "points", "died_tick"]),
     ("demo_tags", 3, &["demo", "key", "value"]),
     ("throw_tags", 3, &["throw", "key", "value"]),
 ];
@@ -381,6 +382,35 @@ impl ThrowSource for FileSource {
         })
     }
 
+    fn player_tracks(&self, demo: &DemoId, round: u32) -> Result<Vec<PlayerTrack>, SourceError> {
+        self.with(|inner| {
+            let Some(&(i, _)) = inner.owners.get(demo.as_str()) else { return Ok(Vec::new()) };
+            let f = &inner.files[i];
+            let s = &f.schema;
+            if !s.has_table("player_tracks") {
+                return Ok(Vec::new());
+            }
+            let (who, players) = s.player("player_tracks", "k", "k.demo");
+            let died = s.cols("player_tracks", "k", &["died_tick"]);
+            let query = format!("select {who}, k.side, {died}, k.points from demos d cross join player_tracks k on k.demo = d.demo{players} where d.demo_id = ?1 and k.round = ?2 order by k.player");
+            let mut q = f.conn.prepare(&query).map_err(sql(&f.path))?;
+            let rows = q
+                .query_map(params![demo.as_str(), round], |r| {
+                    let points = match r.get_ref(4)? {
+                        ValueRef::Blob(b) => track_points(b),
+                        _ => None,
+                    };
+                    Ok((|| Some(PlayerTrack { player: Player { name: text_at(r, 0), steamid: steamid(r, 1) }, side: Side::parse(text_at(r, 2)?.as_str())?, died: int(r, 3).map(|t| Tick(t as i32)), points: points? }))())
+                })
+                .map_err(sql(&f.path))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.extend(row.map_err(sql(&f.path))?);
+            }
+            Ok(out)
+        })
+    }
+
     fn places(&self, map: &MapName) -> Result<Vec<(Vec3, String)>, SourceError> {
         self.with(|inner| {
             let mut out = Vec::new();
@@ -451,6 +481,22 @@ fn three(r: &Row, i: usize) -> Option<Vec3> {
 fn point(bytes: &[u8]) -> (Tick, Vec3) {
     let word = |k: usize| <[u8; 4]>::try_from(&bytes[k..k + 4]).expect("four bytes");
     (Tick(i32::from_le_bytes(word(0))), [f32::from_le_bytes(word(4)), f32::from_le_bytes(word(8)), f32::from_le_bytes(word(12))])
+}
+
+/// A track point's bytes: i32 tick, f32 x, y, z, pitch, yaw, little-endian.
+const TRACK_POINT: usize = 24;
+
+/// A track blob's points; None when its length is not a whole number of points.
+fn track_points(bytes: &[u8]) -> Option<Vec<TrackPoint>> {
+    bytes.len().is_multiple_of(TRACK_POINT).then(|| {
+        bytes
+            .chunks_exact(TRACK_POINT)
+            .map(|p| {
+                let f = |k: usize| f32::from_le_bytes(<[u8; 4]>::try_from(&p[k..k + 4]).expect("four bytes"));
+                TrackPoint { tick: Tick(i32::from_le_bytes(<[u8; 4]>::try_from(&p[0..4]).expect("four bytes"))), origin: [f(4), f(8), f(12)], pitch: f(16), yaw: f(20) }
+            })
+            .collect()
+    })
 }
 
 /// A flight blob's points; a length that is not a whole number of points is corrupt.
@@ -697,6 +743,9 @@ pub fn check(path: &Path) -> Result<Report, SourceError> {
             c.samples_with_place = count("select count(*) from player_samples s join places p on p.place = s.place where p.name <> ''")?;
         }
     }
+    if s.has_table("player_tracks") {
+        c.demos_with_tracks = count("select count(*) from demos d where exists (select 1 from player_tracks k where k.demo = d.demo)")?;
+    }
 
     let unlanded = report.census.throws - report.census.landed;
     let mut problem = |error: bool, n: u64, what: String| {
@@ -752,6 +801,14 @@ pub fn check(path: &Path) -> Result<Report, SourceError> {
     }
     if s.has_table("rounds") {
         problem(false, count("select count(*) from rounds where demo not in (select demo from demos)")?, "rounds of no demo in demos".into());
+    }
+    if s.has_table("player_tracks") {
+        problem(true, count(&format!("select count(*) from player_tracks where length(points) % {TRACK_POINT} <> 0 or points is null"))?, format!("player tracks that are not a whole number of {TRACK_POINT}-byte points"));
+        problem(true, count("select count(*) from player_tracks where side not in ('T', 'CT') or side is null")?, "player tracks with a side other than 'T' or 'CT'".into());
+        problem(false, players("player_tracks", "x.demo", "player_tracks x")?, "player tracks whose player is not in players".into());
+        if s.has_table("rounds") {
+            problem(false, count("select count(*) from player_tracks k where not exists (select 1 from rounds r where r.demo = k.demo and r.number = k.round)")?, "player tracks of no round in rounds".into());
+        }
     }
     if s.has_table("demo_tags") {
         problem(false, count("select count(*) from demo_tags where demo not in (select demo from demos)")?, "demo tags of no demo in demos".into());

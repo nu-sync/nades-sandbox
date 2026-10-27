@@ -86,7 +86,7 @@ stored in key order, so their keys are their only index.
 
 ```sql
 create table meta (key text primary key, value text not null);
--- required: format = 'cs2-throws', version = '2.0'; optional: producer (free text), created (ISO 8601, UTC)
+-- required: format = 'cs2-throws', version = '2.1' (or '2.0', without player_tracks); optional: producer, created
 
 create table demos (
     demo      integer primary key,  -- the file's own key for the demo; other tables refer to it by this
@@ -182,6 +182,17 @@ create table player_samples (    -- optional; any rate (viewpoints want 2 a seco
     primary key (demo, tick, player)
 ) without rowid;
 
+create table player_tracks (     -- optional (2.1): each player through each round, finer than samples, for replays
+    demo      integer not null,  -- demos.demo
+    round     integer not null,  -- rounds.number
+    player    integer not null,  -- players.player in this demo
+    side      text not null,     -- the player's m_iTeamNum in the round
+    died_tick integer,           -- the first tick the player was dead (m_lifeState), when they died
+    points    blob not null,     -- alive, from the round's freeze end: per point, little-endian i32 tick, f32 x, y, z
+                                 -- (the pawn's origin), f32 pitch, yaw (m_angEyeAngles); 16 a second recommended
+    primary key (demo, round, player)
+) without rowid;
+
 create table demo_tags (         -- optional; a producer's own labels of a demo
     demo  integer not null,      -- demos.demo
     key   text not null,         -- '<namespace>.<name>', e.g. 'hltv.event'
@@ -199,13 +210,15 @@ create index throw_tags_by_throw on throw_tags (throw);
 
 **Compatibility:**
 - A reader accepts any 2.x and ignores the tables and columns it does not know.
+- 2.1 (S30) adds the optional `player_tracks` for replays; a 2.0 file is a 2.1 file without it.
 - A producer bumps the major version for any change of meaning.
 - A reader refuses another major version and names both versions.
 
 **Size:** ≈340 MB per 100 demos, as measured for version 2.0: show-me-the-nades' export of 247 demos (116,480 throws,
 7.78 M player samples, twice a second in live rounds) is 830 MB. Player samples are 497 MB of it (64 bytes a row,
 most of it their six reals), throws with their flights 177 MB, smoke voxel logs 97 MB, flames 24 MB, tags 22 MB. One
-map's facts read in 0.14–0.21 s, 17% faster than from version 1.
+map's facts read in 0.14–0.21 s, 17% faster than from version 1. Version 2.1's `player_tracks` add 7.6 MB a demo at 16 points a second
+(45.6 MB for six ESL Pro League demos; their files go from 3.5 to 10–15 MB), and show-me-the-nades' export leaves them out.
 
 **Version 1** (2026-10-26, no outside users) repeated `demo_id`, the player's name and Steam id, and the place as
 text in every sample row, with a separate index over them: 2.47 GB for the same 247 demos, 77% of it samples. Version 2

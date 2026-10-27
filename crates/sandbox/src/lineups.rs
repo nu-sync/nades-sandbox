@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use glam::DVec3;
 use nades_control::SceneSummary;
-use nades_model::{Grenade, Library as MapLibrary, Lineup, LineupId, LineupQuery, Revision, ThrowId, ThrowSource};
+use nades_model::{DemoId, Grenade, Library as MapLibrary, Lineup, LineupId, LineupQuery, Revision, Side, ThrowId, ThrowSource};
 use nades_render::map::{FrameEffects, Map, PointLight};
 use nades_render::smoke::SmokeFrame;
 use nades_render::Gpu;
@@ -22,7 +22,8 @@ use nades_scene::stage::{Stage, ViewMode, build_stage};
 
 use crate::library::{Filter, Library, Prepared, Reply, Request, SharedCollider, read_library, read_stage};
 use crate::resident::{self, Resident};
-use crate::shell::Action;
+use crate::replay::{self, ReplayData};
+use crate::shell::{Action, ReplayAction, ReplayStatus};
 use crate::views::{self, Orbit};
 use crate::{shell, state};
 
@@ -143,6 +144,43 @@ pub fn print_cameras(source: &dyn ThrowSource, cases: &Path) -> Result<()> {
 pub enum Effect {
     LoadMap(String),
     Copy(String),
+    Replay(ReplayAction),
+}
+
+/// The replay in the window: what is picked, its data once read, and its clock.
+pub struct ReplayView {
+    pub demo: Option<DemoId>,
+    pub round: Option<u32>,
+    pub data: Option<Arc<ReplayData>>,
+    loading: Option<std::sync::mpsc::Receiver<Result<ReplayData>>>,
+    /// Seconds into the round.
+    pub seconds: f64,
+    pub playing: bool,
+    pub speed: f64,
+    /// The followed player (by track), and whether from behind rather than through their eyes.
+    pub follow: Option<usize>,
+    pub chase: bool,
+    /// The free camera's start: over the round's first moment.
+    overview: Option<CsView>,
+    pub failed: Option<String>,
+}
+
+impl ReplayView {
+    fn new() -> Self {
+        Self { demo: None, round: None, data: None, loading: None, seconds: 0.0, playing: false, speed: 1.0, follow: None, chase: false, overview: None, failed: None }
+    }
+
+    /// The tick now.
+    pub fn tick(&self) -> Option<f64> {
+        Some(self.data.as_ref()?.tick_at(self.seconds))
+    }
+
+    /// The followed player's camera now.
+    fn followed(&self) -> Option<CsView> {
+        let data = self.data.as_ref()?;
+        let state = nades_model::replay::player_at(&data.tracks[self.follow?], self.tick()?)?;
+        Some(if self.chase { replay::chase(&state) } else { replay::follow(&state) })
+    }
 }
 
 /// The lineups, the selection and the moment shown: everything but the window and the GPU.
@@ -185,6 +223,8 @@ pub struct Sandbox {
     pub data_checked: Instant,
     /// The lineups of the maps kept on the GPU beside the shown one, by map.
     pub kept: HashMap<String, MapLineups>,
+    /// A throw shown in place of its selected lineup's example (opened from the replay).
+    pub throw_override: Option<ThrowId>,
 }
 
 /// A map's lineups kept while another map is shown (its GPU map kept in [`Resident`]): its list for the filters, the
@@ -256,6 +296,7 @@ impl Sandbox {
             revision,
             data_checked: Instant::now(),
             kept: HashMap::new(),
+            throw_override: None,
         };
         // the list is read once the first frame is on screen (Lineups::after_first_frame): nothing on its way competes
         sandbox
@@ -267,7 +308,25 @@ impl Sandbox {
     }
 
     pub fn selected_prepared(&self) -> Option<&Arc<Prepared>> {
-        self.prepared.get(&self.selected_lineup()?.example)
+        let lineup = self.selected_lineup()?;
+        // a throw opened from the replay, while its lineup stays selected
+        let shown = self.throw_override.as_ref().filter(|t| self.facts.as_ref().and_then(|f| f.derived(t)).and_then(|d| d.lineup) == Some(lineup.id)).unwrap_or(&lineup.example);
+        self.prepared.get(shown)
+    }
+
+    /// Selects `throw`'s lineup and shows that throw rather than the lineup's example; false when it groups into none
+    /// listed.
+    pub fn show_throw(&mut self, throw: &ThrowId) -> bool {
+        let Some(lineup) = self.facts.as_ref().and_then(|f| f.derived(throw)).and_then(|d| d.lineup) else { return false };
+        if !self.lineups.iter().any(|l| l.id == lineup) {
+            return false;
+        }
+        self.select(lineup);
+        self.throw_override = Some(throw.clone());
+        if !self.prepared.contains_key(throw) {
+            self.library.send(Request::Prepare { map: self.filter.map.clone(), throws: vec![throw.clone()], collider: self.collider.clone(), toward_sun: self.toward_sun });
+        }
+        true
     }
 
     /// The selected stage when it is the one on the GPU.
@@ -421,6 +480,7 @@ impl Sandbox {
             return;
         }
         self.selected = Some(lineup);
+        self.throw_override = None;
         // not built yet: it goes first
         if let Some(l) = self.selected_lineup()
             && !self.prepared.contains_key(&l.example)
@@ -505,6 +565,7 @@ impl Sandbox {
                     }
                 }
             }
+            Action::Replay(a) => return Some(Effect::Replay(a)),
             Action::Copy(text) => {
                 self.copied_at = Some(Instant::now());
                 return Some(Effect::Copy(text));
@@ -633,11 +694,13 @@ pub struct Lineups {
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Demos dropped onto the window, read on a thread of their own.
     pub imports: Option<crate::imports::Imports>,
+    /// The replay, when it is open.
+    pub replay: Option<ReplayView>,
 }
 
 impl Lineups {
     pub fn new(sandbox: Sandbox, bench: bool, rect: egui::Rect) -> Self {
-        Self { sandbox, rect, actions: Vec::new(), effects: None, effects_files: None, resident: Resident::new(0), preload: !bench, shown_bytes: 0, picked: None, frame_parts: Vec::new(), warmed: Default::default(), loading: None, pending: None, last_key: None, accumulated: 0, dragging: None, bench, free: false, wake: None, imports: None }
+        Self { sandbox, rect, actions: Vec::new(), effects: None, effects_files: None, resident: Resident::new(0), preload: !bench, shown_bytes: 0, picked: None, frame_parts: Vec::new(), warmed: Default::default(), loading: None, pending: None, last_key: None, accumulated: 0, dragging: None, bench, free: false, wake: None, imports: None, replay: None }
     }
 
     /// After the first frame: the map's collider, and the game's flipbooks and smoke noise, on threads of their own.
@@ -681,6 +744,7 @@ impl Lineups {
     /// Takes what the threads have finished; true when the picture may change.
     pub fn receive(&mut self, gpu: &Gpu, map: &mut Map, name: &mut String) -> bool {
         let mut changed = self.sandbox.receive();
+        changed |= self.receive_replay();
         if let Some(imports) = &self.imports {
             if imports.take_added() {
                 self.sandbox.data_notice = None;
@@ -883,6 +947,7 @@ impl Lineups {
 
     /// The shell, laid out over `ui`; what it asks for is applied by [`Lineups::update`].
     pub fn ui(&mut self, ui: &mut egui::Ui, timings: String) {
+        let replay = self.replay_status();
         let s = &mut self.sandbox;
         let shown = s.shown_prepared().cloned();
         let timeline = shown.as_ref().map_or((-1.0, 1.0), |p| p.stage.timeline());
@@ -910,6 +975,7 @@ impl Lineups {
             copied,
             free: self.free,
             import: self.imports.as_ref().and_then(crate::imports::Imports::line),
+            replay,
         };
         let (actions, rect) = shell::show(ui, status);
         self.actions.extend(actions);
@@ -926,11 +992,197 @@ impl Lineups {
             match self.sandbox.apply(action) {
                 Some(Effect::Copy(text)) => ctx.copy_text(text),
                 Some(Effect::LoadMap(to)) => self.pick_map(gpu, map, name, to),
+                // closed: the lineups' stage goes back on the GPU
+                Some(Effect::Replay(action)) if self.replay_action(action.clone()) => {
+                    map.composite.set_cloud(&gpu.queue, None);
+                    show_stage(gpu, map, None);
+                }
+                Some(Effect::Replay(_)) => {}
                 None => {}
             }
         }
+        if self.replay.is_some() {
+            self.advance_replay(dt);
+            return;
+        }
         self.sync_stage(gpu, map);
         self.sandbox.advance(dt);
+    }
+
+    /// Picks up a round read on its thread; true when one came.
+    fn receive_replay(&mut self) -> bool {
+        let Some(r) = &mut self.replay else { return false };
+        let Some(answer) = r.loading.as_ref().and_then(|l| l.try_recv().ok()) else { return false };
+        r.loading = None;
+        match answer {
+            Ok(data) => {
+                eprintln!("replay: round {} of {}: {} players, {} throws, read in {:.0} ms", data.round.number, data.demo.file_name.as_deref().unwrap_or(&data.demo.id.0), data.tracks.len(), data.throws.len(), data.build_ms);
+                r.overview = Some(data.overview(data.tick_at(0.0)));
+                r.data = Some(Arc::new(data));
+                self.free = false;
+            }
+            Err(e) => r.failed = Some(format!("{e:#}")),
+        }
+        true
+    }
+
+    /// Plays the replay on by `dt` seconds of the window's time, at its speed, stopping at the end.
+    fn advance_replay(&mut self, dt: f64) {
+        if let Some(r) = &mut self.replay
+            && r.playing
+            && let Some(data) = &r.data
+        {
+            r.seconds = (r.seconds + dt * r.speed).min(data.length());
+            r.playing = r.seconds < data.length();
+        }
+    }
+
+    /// What the replay's controls asked for; true when the replay closed and its moment must leave the GPU.
+    fn replay_action(&mut self, action: ReplayAction) -> bool {
+        match action {
+            ReplayAction::Open => {
+                let mut view = ReplayView::new();
+                // the map's latest demo, its first round
+                view.demo = self.sandbox.facts.as_ref().and_then(|f| f.demos().iter().max_by_key(|d| d.played_at).map(|d| d.id.clone()));
+                self.replay = Some(view);
+                self.load_round();
+                return false;
+            }
+            ReplayAction::Close => {
+                self.replay = None;
+                self.sandbox.shown = None;
+                self.free = false;
+                self.last_key = None;
+                return true;
+            }
+            ReplayAction::Lineup(throw) => {
+                if self.sandbox.show_throw(&throw) {
+                    self.sandbox.view = ViewMode::Lineup;
+                    return self.replay_action(ReplayAction::Close);
+                }
+                if let Some(r) = &mut self.replay {
+                    r.failed = Some("That throw's lineup is not in the list: clear the filters.".into());
+                }
+                return false;
+            }
+            _ => {}
+        }
+        let Some(r) = &mut self.replay else { return false };
+        match action {
+            ReplayAction::Demo(demo) => {
+                r.demo = Some(demo);
+                r.round = None;
+                self.load_round();
+            }
+            ReplayAction::Round(number) => {
+                r.round = Some(number);
+                self.load_round();
+            }
+            ReplayAction::Play(on) => {
+                r.playing = on;
+                if on && r.data.as_ref().is_some_and(|d| r.seconds >= d.length() - 1e-3) {
+                    r.seconds = 0.0;
+                }
+            }
+            ReplayAction::Seek(seconds) => {
+                r.seconds = seconds;
+                r.playing = false;
+            }
+            ReplayAction::Speed(speed) => r.speed = speed,
+            ReplayAction::Follow(follow) => {
+                r.follow = follow;
+                self.free = false;
+            }
+            ReplayAction::Chase(chase) => {
+                r.chase = chase;
+                // a camera mode with no one followed follows the first player
+                if r.follow.is_none() {
+                    r.follow = r.data.as_ref().and_then(|d| d.roster().first().copied());
+                }
+                self.free = false;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Reads the picked round on a thread of its own (its first round when none is picked).
+    fn load_round(&mut self) {
+        let Some(r) = &mut self.replay else { return };
+        let (Some(demo), Some(library)) = (r.demo.clone(), self.sandbox.facts.clone()) else {
+            r.failed = Some("No demo on this map to replay.".into());
+            return;
+        };
+        let rounds = library.rounds_of(&demo);
+        let Some(number) = r.round.or_else(|| rounds.first().map(|x| x.number)) else {
+            r.failed = Some("This demo has no rounds.".into());
+            return;
+        };
+        r.round = Some(number);
+        (r.data, r.seconds, r.playing, r.follow, r.overview, r.failed) = (None, 0.0, false, None, None, None);
+        let (send, receive) = std::sync::mpsc::channel();
+        r.loading = Some(receive);
+        let source = self.sandbox.library.source.clone();
+        let collider = self.sandbox.collider.clone();
+        let toward_sun = self.sandbox.toward_sun;
+        let wake = self.wake.clone();
+        std::thread::Builder::new()
+            .name("replay".into())
+            .spawn(move || {
+                let collider = collider.wait_for(Duration::from_secs(10));
+                let _ = send.send(ReplayData::read(source.as_ref(), &library, &demo, number, collider.as_deref(), toward_sun));
+                if let Some(wake) = wake {
+                    wake();
+                }
+            })
+            .expect("a replay thread");
+    }
+
+    /// The replay's status for the shell.
+    fn replay_status(&self) -> Option<ReplayStatus> {
+        let r = self.replay.as_ref()?;
+        let facts = self.sandbox.facts.as_ref();
+        let mut demos: Vec<(DemoId, String, Option<i64>)> = facts.map_or_else(Vec::new, |f| f.demos().iter().map(|d| (d.id.clone(), d.file_name.clone().unwrap_or_else(|| d.id.0[..12.min(d.id.0.len())].to_string()), d.played_at)).collect());
+        demos.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.cmp(&b.1)));
+        let rounds = match (facts, &r.demo) {
+            (Some(f), Some(d)) => f
+                .rounds_of(d)
+                .iter()
+                .map(|x| {
+                    let throws = f.throws().filter(|(t, _)| &t.demo == d && t.round == Some(x.number)).count();
+                    let won = x.winner.map_or(String::new(), |w| format!(" · {} win", w.name()));
+                    (x.number, format!("Round {}{won} · {throws} throws", x.number))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut status = ReplayStatus { demos: demos.into_iter().map(|(id, name, _)| (id, name)).collect(), demo: r.demo.clone(), rounds, round: r.round, follow: r.follow, chase: r.chase, seconds: r.seconds, playing: r.playing, speed: r.speed, ..Default::default() };
+        status.note = r.failed.clone().or_else(|| r.loading.as_ref().map(|_| "Reading the round…".into()));
+        if let Some(data) = &r.data {
+            status.length = data.length();
+            if !data.smooth && status.note.is_none() {
+                status.note = Some("This file has no player tracks: the players move between their samples, two a second.".into());
+            }
+            status.throws = data
+                .throws
+                .iter()
+                .map(|t| {
+                    let at = data.seconds_at(t.throw.tick.0);
+                    (t.throw.id.clone(), format!("{:>5.1} s  {} {}", at, t.stage.grenade.name(), t.throw.player.name.as_deref().unwrap_or("?")), at, t.lineup)
+                })
+                .collect();
+            let now = data.at(data.tick_at(r.seconds));
+            status.players = data
+                .roster()
+                .into_iter()
+                .map(|i| {
+                    let track = &data.tracks[i];
+                    let alive = now.players.iter().find(|s| s.player == track.player).is_some_and(|s| s.alive);
+                    (i, track.player.name.clone().unwrap_or_else(|| "?".into()), track.side == Side::Ct, alive)
+                })
+                .collect();
+        }
+        Some(status)
     }
 
     /// Puts the selected lineup's stage on the GPU when it is built and not shown yet; true when it switched.
@@ -964,12 +1216,36 @@ impl Lineups {
     /// The camera this frame draws from, unless the person or app control took it (`free`): the view's, or the one the
     /// last run left.
     pub fn camera(&self) -> Option<CsView> {
-        if self.bench || self.free { None } else { self.sandbox.camera() }
+        if self.bench || self.free {
+            return None;
+        }
+        match &self.replay {
+            Some(r) => r.followed().or(r.overview),
+            None => self.sandbox.camera(),
+        }
     }
 
     /// Readies what the frame from `eye` into targets of `size` draws of the throw; None when the picture is already
     /// final (every jittered smoke frame averaged in) and nothing needs drawing.
     pub fn frame(&mut self, gpu: &Gpu, map: &mut Map, eye: &nades_render::View, size: (u32, u32), force: bool) -> Option<FrameEffects> {
+        if let Some(r) = &self.replay {
+            // a paused replay averages its smokes' jittered frames as a still lineup view does
+            let tick = r.tick().unwrap_or(0.0);
+            let q = eye.rotation;
+            let key = [eye.eye.x.to_bits(), eye.eye.y.to_bits(), eye.eye.z.to_bits(), q.x.to_bits(), q.y.to_bits(), q.z.to_bits(), eye.fov_y.to_bits(), (tick as f32).to_bits(), size.0 ^ (size.1 << 16)];
+            self.accumulated = if self.last_key == Some(key) { (self.accumulated + 1).min(nades_render::smoke::ACCUMULATE) } else { 0 };
+            self.last_key = Some(key);
+            if !force && self.accumulated >= nades_render::smoke::ACCUMULATE {
+                return None;
+            }
+            let Some(data) = r.data.clone() else {
+                map.throw.set_replay(&gpu.device, &gpu.queue, &[], &[], eye, size);
+                map.composite.set_clouds(&gpu.device, &gpu.queue, &[]);
+                return Some(FrameEffects::default());
+            };
+            let looking = r.follow.filter(|_| !r.chase && !self.free);
+            return Some(replay::show(gpu, map, &data, tick, r.follow, looking, eye, size, self.accumulated));
+        }
         let s = &self.sandbox;
         let shown = s.shown_prepared().cloned();
         let stage = shown.as_ref().map(|p| &p.stage);
@@ -994,6 +1270,9 @@ impl Lineups {
 
     /// Whether frames must keep coming: a playing scrubber, a smoke still averaging, a copy note fading, a map loading.
     pub fn animating(&self) -> bool {
+        if let Some(r) = &self.replay {
+            return r.playing || r.loading.is_some() || self.accumulated < nades_render::smoke::ACCUMULATE;
+        }
         let smoke = self.sandbox.shown_prepared().is_some_and(|p| p.stage.cloud.is_some()) && self.sandbox.time > 0.0;
         self.sandbox.animating() || (smoke && self.accumulated < nades_render::smoke::ACCUMULATE) || self.loading.is_some() || self.pending.is_some() || self.picked.is_some()
     }
@@ -1086,16 +1365,6 @@ pub fn render_throw(source: &dyn ThrowSource, throw: &str, map: Option<&str>, vi
     map.throw.flight_visible = matches!(view, ViewMode::Result | ViewMode::Orbit);
     let eye = views::of(&views::camera(view, &prepared.stage, &prepared.result, None));
     eprintln!("{throw} on {map_name}: {} view at {t:.2} s, built in {:.1} ms (light {:.1} ms)", view.name(), prepared.build_ms, prepared.light_ms);
-    let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("render"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: crate::OFFSCREEN_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
     let frames = if prepared.stage.cloud.is_some() && t > 0.0 { nades_render::smoke::ACCUMULATE } else { 1 };
     for k in 0..frames {
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("render") });
@@ -1103,26 +1372,7 @@ pub fn render_throw(source: &dyn ThrowSource, throw: &str, map: Option<&str>, vi
         map.render(&gpu.queue, &mut encoder, &targets, &eye, 0.0, &frame_effects(Some(&prepared.stage), t, k));
         gpu.queue.submit([encoder.finish()]);
     }
-    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("render") });
-    {
-        let target = output.create_view(&Default::default());
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("present"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(crate::CLEAR), store: wgpu::StoreOp::Store } })],
-            ..Default::default()
-        });
-        map.present(&mut pass, &targets);
-    }
-    let row = crate::row_bytes(width);
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("render"), size: u64::from(row * height), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-    encoder.copy_texture_to_buffer(
-        output.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-    );
-    gpu.queue.submit([encoder.finish()]);
-    gpu.wait_idle();
-    crate::write_png(&gpu, &buffer, width, height, out, [0, 1, 2])
+    crate::write_frame(&gpu, &map, &targets, (width, height), out)
 }
 
 /// `--bench-maps`: each map in turn, picked as the shell's selector picks it, timed from the pick to the frame that
@@ -1422,6 +1672,63 @@ mod tests {
         assert!(lineups.ready_for(2), "the second lineup is not shown, so its stage is not waited for");
         lineups.sandbox.prepared.remove(&examples[0]);
         assert!(!lineups.ready_for(2), "the first is shown after the last");
+    }
+
+    #[test]
+    fn a_round_is_replayed_followed_and_left_for_a_throws_lineup_view() {
+        let (woke, wakes) = std::sync::mpsc::channel();
+        let woke = Arc::new(std::sync::Mutex::new(woke));
+        let sender = woke.clone();
+        let library = Library::start(fixture_source(), move || {
+            let _ = sender.lock().unwrap().send(());
+        });
+        let mut s = Sandbox::start("de_mirage", None, library);
+        s.collider = SharedCollider::build("nades-sandbox-test-no-pack".into(), || {});
+        s.library.send(Request::List(s.filter.clone()));
+        let started = Instant::now();
+        while s.facts.is_none() || s.lineups.is_empty() {
+            assert!(started.elapsed() < Duration::from_secs(20));
+            let _ = wakes.recv_timeout(Duration::from_millis(200));
+            s.receive();
+        }
+        let mut lineups = Lineups::new(s, false, egui::Rect::NOTHING);
+        let sender = woke.clone();
+        lineups.wake = Some(Arc::new(move || {
+            let _ = sender.lock().unwrap().send(());
+        }));
+        assert!(!lineups.replay_action(ReplayAction::Open));
+        assert_eq!(lineups.replay.as_ref().unwrap().demo.as_ref().map(|d| d.0.as_str()), Some("fixture-demo-2"), "the latest demo");
+        lineups.replay_action(ReplayAction::Demo(DemoId("fixture-demo-1".into())));
+        let started = Instant::now();
+        while lineups.replay.as_ref().unwrap().data.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(20), "{:?}", lineups.replay.as_ref().unwrap().failed);
+            let _ = wakes.recv_timeout(Duration::from_millis(200));
+            lineups.receive_replay();
+        }
+        let status = lineups.replay_status().unwrap();
+        assert_eq!((status.round, status.rounds.len(), status.note.as_deref()), (Some(1), 2, None));
+        // apEX from his track, ZywOo and ropz from their samples; the round's six throws in order
+        assert_eq!(status.players.iter().map(|p| (p.1.as_str(), p.2)).collect::<Vec<_>>(), [("ropz", false), ("apEX", true), ("ZywOo", true)]);
+        assert_eq!(status.throws.iter().map(|t| t.0.as_str()).collect::<Vec<_>>(), ["m1-window-a", "m1-jungle-jump", "m1-molly", "m1-flash", "m1-he", "m1-decoy"]);
+        let data = lineups.replay.as_ref().unwrap().data.clone().unwrap();
+        assert_eq!((data.start, data.smooth), (1000, true));
+        // played on at half speed, then followed through apEX's eyes
+        lineups.replay_action(ReplayAction::Speed(0.5));
+        lineups.replay_action(ReplayAction::Play(true));
+        lineups.advance_replay(4.0);
+        assert_eq!(lineups.replay.as_ref().unwrap().seconds, 2.0);
+        let apex = status.players[1].0;
+        lineups.replay_action(ReplayAction::Follow(Some(apex)));
+        let eye = lineups.camera().unwrap();
+        assert!((eye.eye.x - (-450.0 + 128.0 * 0.1)).abs() < 1e-3, "tick 1128: 12.8 units on from Window, not {}", eye.eye.x);
+        assert_eq!((eye.eye.z, eye.yaw), (-200.0 + nades_scene::camera::EYE_STANDING, -30.0));
+        // he died at tick 3000: 31.25 s in, he lies where he last stood
+        lineups.replay_action(ReplayAction::Seek(40.0));
+        assert!(!lineups.replay_status().unwrap().players[1].3);
+        // the window smoke's lineup view, that very throw rather than its lineup's example
+        assert!(lineups.replay_action(ReplayAction::Lineup(ThrowId("m1-window-a".into()))));
+        assert!(lineups.replay.is_none());
+        assert_eq!((lineups.sandbox.selected, lineups.sandbox.throw_override.as_ref().map(|t| t.as_str())), (Some(LineupId(1)), Some("m1-window-a")));
     }
 
     #[test]

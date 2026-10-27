@@ -45,6 +45,7 @@ mod imports;
 mod control;
 mod library;
 mod lineups;
+mod replay;
 mod resident;
 mod shell;
 mod state;
@@ -115,6 +116,11 @@ struct Args {
     budget_mb: Option<u64>,
     data: Vec<PathBuf>,
     packs: Option<PathBuf>,
+    replay: Option<String>,
+    round: Option<u32>,
+    replay_camera: Option<String>,
+    replay_layers: Option<String>,
+    bench_replay: Option<u32>,
 }
 
 /// Numbers separated by commas: `1,2,3`.
@@ -129,6 +135,11 @@ fn args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--replay" => args.replay = Some(it.next().context("--replay needs a demo: its id, the id's start, or its file's name")?),
+            "--round" => args.round = Some(it.next().and_then(|n| n.parse().ok()).context("--round needs a round number")?),
+            "--replay-camera" => args.replay_camera = Some(it.next().context("--replay-camera needs overview, top or a player's name")?),
+            "--replay-layers" => args.replay_layers = Some(it.next().context("--replay-layers needs all, players, effects or map")?),
+            "--bench-replay" => args.bench_replay = Some(it.next().and_then(|n| n.parse().ok()).filter(|&n| n > 0).context("--bench-replay needs a count of frames")?),
             "--data" => args.data.push(it.next().context("--data needs a demo, a cs2-throws file, or a folder of them")?.into()),
             "--packs" => args.packs = Some(it.next().context("--packs needs a folder")?.into()),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
@@ -198,6 +209,10 @@ fn run() -> Result<()> {
     }
     if let Some(cases) = &args.cameras {
         return lineups::print_cameras(config::source(&args.data)?.as_ref(), cases);
+    }
+    if let Some(demo) = &args.replay {
+        let request = replay::Request { demo: demo.clone(), round: args.round.context("--replay needs --round")?, time: args.time.unwrap_or(0.0), camera: args.replay_camera.clone(), map: args.map.clone(), layers: args.replay_layers.clone() };
+        return replay::render(config::source(&args.data)?.as_ref(), &request, args.size.unwrap_or((1138, 640)), args.render.as_deref(), args.bench_replay);
     }
     if let (Some(out), Some(throw)) = (&args.render, &args.throw) {
         return lineups::render_throw(config::source(&args.data)?.as_ref(), throw, args.map.as_deref(), args.view, args.time, args.size.unwrap_or((1138, 640)), out);
@@ -408,6 +423,40 @@ fn bench_offscreen(args: &Args, frames: usize) -> Result<()> {
 
 /// Writes a copied frame (rows padded to 256 bytes, four bytes a texel) as an 8-bit RGB PNG; `order` picks red, green
 /// and blue from each texel.
+/// `targets`' frame through the present pass into a texture of `size`, written as a PNG.
+fn write_frame(gpu: &Gpu, map: &Map, targets: &nades_render::map::Targets, (width, height): (u32, u32), out: &Path) -> Result<()> {
+    let output = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("render"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("render") });
+    {
+        let target = output.create_view(&Default::default());
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("present"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(CLEAR), store: wgpu::StoreOp::Store } })],
+            ..Default::default()
+        });
+        map.present(&mut pass, targets);
+    }
+    let row = row_bytes(width);
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("render"), size: u64::from(row * height), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    encoder.copy_texture_to_buffer(
+        output.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    gpu.wait_idle();
+    write_png(gpu, &buffer, width, height, out, [0, 1, 2])
+}
+
 fn write_png(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, height: u32, path: &Path, order: [usize; 3]) -> Result<()> {
     let bytes = encode_png(gpu, buffer, width, height, order)?;
     std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
@@ -1129,6 +1178,9 @@ impl View {
         // a map with no lineup's view yet stays clear, rather than drawn from another map's camera
         let show_map = shown.is_some() || self.lineups.bench || self.lineups.free;
         let eye = self.camera.view();
+        if self.lineups.replay.is_some() {
+            self.map.ready_replay(&self.gpu.device, &self.targets);
+        }
         let Some(effects) = self.lineups.frame(&self.gpu, &mut self.map, &eye, size, first || capture) else {
             // the picture is final (its smoke averaged): nothing to draw
             return Ok(false);

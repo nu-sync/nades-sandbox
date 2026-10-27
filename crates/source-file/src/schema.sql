@@ -1,5 +1,5 @@
 create table meta (key text primary key, value text not null);
--- required: format = 'cs2-throws', version = '2.0'; optional: producer (free text), created (ISO 8601, UTC)
+-- required: format = 'cs2-throws', version = '2.1' (or '2.0', without player_tracks); optional: producer, created
 
 create table demos (
     demo      integer primary key,  -- the file's own key for the demo; other tables refer to it by this
@@ -93,6 +93,17 @@ create table player_samples (    -- optional; any rate (viewpoints want 2 a seco
     alive  integer not null,     -- m_lifeState
     place  integer,              -- places.place: m_szLastPlaceName
     primary key (demo, tick, player)
+) without rowid;
+
+create table player_tracks (     -- optional (2.1): each player through each round, finer than samples, for replays
+    demo      integer not null,  -- demos.demo
+    round     integer not null,  -- rounds.number
+    player    integer not null,  -- players.player in this demo
+    side      text not null,     -- the player's m_iTeamNum in the round
+    died_tick integer,           -- the first tick the player was dead (m_lifeState), when they died
+    points    blob not null,     -- alive, from the round's freeze end: per point, little-endian i32 tick, f32 x, y, z
+                                 -- (the pawn's origin), f32 pitch, yaw (m_angEyeAngles); 16 a second recommended
+    primary key (demo, round, player)
 ) without rowid;
 
 create table demo_tags (         -- optional; a producer's own labels of a demo

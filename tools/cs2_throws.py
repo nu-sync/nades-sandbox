@@ -30,11 +30,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 FORMAT = "cs2-throws"
-VERSION = "2.0"
+VERSION = "2.1"
 
 SCHEMA = """
 create table meta (key text primary key, value text not null);
--- required: format = 'cs2-throws', version = '2.0'; optional: producer (free text), created (ISO 8601, UTC)
+-- required: format = 'cs2-throws', version = '2.1' (or '2.0', without player_tracks); optional: producer, created
 
 create table demos (
     demo      integer primary key,  -- the file's own key for the demo; other tables refer to it by this
@@ -128,6 +128,17 @@ create table player_samples (    -- optional; any rate (viewpoints want 2 a seco
     alive  integer not null,     -- m_lifeState
     place  integer,              -- places.place: m_szLastPlaceName
     primary key (demo, tick, player)
+) without rowid;
+
+create table player_tracks (     -- optional (2.1): each player through each round, finer than samples, for replays
+    demo      integer not null,  -- demos.demo
+    round     integer not null,  -- rounds.number
+    player    integer not null,  -- players.player in this demo
+    side      text not null,     -- the player's m_iTeamNum in the round
+    died_tick integer,           -- the first tick the player was dead (m_lifeState), when they died
+    points    blob not null,     -- alive, from the round's freeze end: per point, little-endian i32 tick, f32 x, y, z
+                                 -- (the pawn's origin), f32 pitch, yaw (m_angEyeAngles); 16 a second recommended
+    primary key (demo, round, player)
 ) without rowid;
 
 create table demo_tags (         -- optional; a producer's own labels of a demo
@@ -254,6 +265,15 @@ class Writer:
         self.db.execute("insert into player_samples values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (demo, tick, key, side, *origin, pitch, yaw, duck, int(alive), self.place(place)))
 
+    def track(self, demo_id: str, round: int, side: str, points, player=None, steamid=None, died_tick=None) -> None:
+        """One player through one round, for replays: `points` is [(tick, (x, y, z), pitch, yaw), ...] while alive."""
+        demo = self.demos[demo_id]
+        key = self.player(demo, player, steamid)
+        if key is None:
+            raise ValueError(f"{demo_id} round {round}: a track needs a player name or a Steam id")
+        blob = b"".join(struct.pack("<ifffff", tick, *origin, pitch, yaw) for tick, origin, pitch, yaw in points)
+        self.db.execute("insert into player_tracks values (?, ?, ?, ?, ?, ?)", (demo, round, key, side, died_tick, blob))
+
     def tag(self, subject: str, key: str, value: str) -> None:
         """A label of a demo (by its demo_id) or a throw (by its throw_id), written after its subject."""
         if subject in self.demos:
@@ -365,6 +385,9 @@ def fixture(path: Path | str) -> None:
         for tick in range(500, 2500, 32):
             w.sample(d2, tick, "CT", (-700.0, -900.0, -200.0), alive=True, player="flameZ", pitch=5.0, yaw=10.0, place="Window")
         w.sample(d3, 700, "T", (900.0, 2500.0, 128.0), alive=True, player="someone", place="Banana")
+
+        # Replay tracks, 16 a second: apEX walks from Window towards A and dies at tick 3000.
+        w.track(d1, 1, "CT", [(tick, (-450.0 + (tick - 1000) * 0.1, -700.0, -200.0), 0.0, -30.0) for tick in range(1000, 3000, 4)], player="apEX", died_tick=3000)
 
 
 def main(argv: list[str]) -> int:

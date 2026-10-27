@@ -23,7 +23,7 @@ pub use extract::{Facts, extract};
 
 /// What wrote a file, as `meta.producer` says it. The reader's revision goes up whenever what it extracts changes, so a
 /// cached file from an older one is parsed again.
-pub const PRODUCER: &str = concat!("nades-sandbox ", env!("CARGO_PKG_VERSION"), " demo reader 1 (awpy 3.1)");
+pub const PRODUCER: &str = concat!("nades-sandbox ", env!("CARGO_PKG_VERSION"), " demo reader 2 (awpy 3.1)");
 
 /// Whether `path` names a demo file.
 pub fn is_demo(path: &Path) -> bool {
@@ -146,6 +146,8 @@ fn rows(tx: &Transaction, facts: &Facts, sha256: &str, demo: &Path) -> Result<()
     who.extend(facts.throws.iter().map(|t| (t.steamid, t.player.clone())));
     who.extend(facts.blinds.iter().map(|b| (b.steamid, b.player.clone())));
     who.extend(facts.samples.iter().map(|s| (Some(s.steamid), s.player.clone())));
+    let tracks = round_tracks(facts);
+    who.extend(tracks.iter().map(|t| (Some(t.steamid), t.player.clone())));
     let mut ordered: Vec<Who> = who.into_iter().filter(|(s, n)| s.is_some() || n.is_some()).collect();
     ordered.sort_by(|a, b| (a.0.is_none(), a.0, a.1.is_none(), &a.1).cmp(&(b.0.is_none(), b.0, b.1.is_none(), &b.1)));
     let mut players: HashMap<Who, i64> = HashMap::new();
@@ -256,5 +258,49 @@ fn rows(tx: &Transaction, facts: &Facts, sha256: &str, demo: &Path) -> Result<()
     for s in &facts.samples {
         insert.execute(params![s.tick, player(Some(s.steamid), &s.player), s.side, s.pos[0], s.pos[1], s.pos[2], at(s.eye, 0), at(s.eye, 1), s.duck, s.alive, place(&s.place)])?;
     }
+    let mut insert = tx.prepare("insert into player_tracks (demo, round, player, side, died_tick, points) values (1, ?1, ?2, ?3, ?4, ?5)")?;
+    for t in &tracks {
+        let Some(key) = player(Some(t.steamid), &t.player) else { continue };
+        insert.execute(params![t.round, key, t.side, t.died, t.points])?;
+    }
     Ok(())
+}
+
+/// One player's track through one round, as `player_tracks` stores it.
+struct RoundTrack {
+    round: i32,
+    steamid: u64,
+    player: Option<String>,
+    side: &'static str,
+    died: Option<i32>,
+    points: Vec<u8>,
+}
+
+/// The track points by round and player: alive ones as 24-byte points, and the first tick seen dead.
+fn round_tracks(facts: &Facts) -> Vec<RoundTrack> {
+    let mut out: Vec<RoundTrack> = Vec::new();
+    let mut at: HashMap<(i32, u64), usize> = HashMap::new();
+    for p in &facts.tracks {
+        let Some(round) = facts.rounds.iter().filter(|r| r.freeze_end.is_some_and(|f| f <= p.tick) && p.tick <= r.end).map(|r| r.number).max() else { continue };
+        let i = *at.entry((round, p.steamid)).or_insert_with(|| {
+            out.push(RoundTrack { round, steamid: p.steamid, player: p.player.clone(), side: p.side, died: None, points: Vec::new() });
+            out.len() - 1
+        });
+        let t = &mut out[i];
+        if t.died.is_some() {
+            continue;
+        }
+        if !p.alive {
+            t.died = Some(p.tick);
+            continue;
+        }
+        let eye = p.eye.unwrap_or_default();
+        t.points.extend(p.tick.to_le_bytes());
+        for v in [p.pos[0], p.pos[1], p.pos[2], eye[0], eye[1]] {
+            t.points.extend(v.to_le_bytes());
+        }
+    }
+    out.retain(|t| !t.points.is_empty());
+    out.sort_by_key(|t| (t.round, t.steamid));
+    out
 }

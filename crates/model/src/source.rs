@@ -4,7 +4,7 @@
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
-use crate::facts::{DemoId, MapFacts, MapName, Sample, ThrowId, Tick, Tracks, Vec3};
+use crate::facts::{DemoId, MapFacts, MapName, PlayerTrack, Sample, ThrowId, Tick, Tracks, Vec3};
 
 /// Changes whenever the source's data does, so the app reloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +24,12 @@ pub trait ThrowSource: Send + Sync {
     fn samples(&self, demo: &DemoId, ticks: RangeInclusive<Tick>) -> Result<Vec<Sample>, SourceError>;
     /// A map's place-labelled sample points of living players: for landing callouts.
     fn places(&self, map: &MapName) -> Result<Vec<(Vec3, String)>, SourceError>;
+    /// One round's players at the finer rate replays want (cs2-throws 2.1's `player_tracks`); empty when the source has
+    /// none, and a replay then follows the samples.
+    fn player_tracks(&self, demo: &DemoId, round: u32) -> Result<Vec<PlayerTrack>, SourceError> {
+        let _ = (demo, round);
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

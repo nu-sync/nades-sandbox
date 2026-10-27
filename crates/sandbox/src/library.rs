@@ -139,6 +139,17 @@ impl SharedCollider {
         shared
     }
 
+    /// The collider, waiting for its build at most `timeout`; None when it is not built by then or the map has no mesh.
+    pub fn wait_for(&self, timeout: Duration) -> Option<Arc<Collider>> {
+        let (slot, ready) = &*self.0;
+        let mut built = slot.lock().expect("collider slot");
+        let started = Instant::now();
+        while built.is_none() && started.elapsed() < timeout {
+            (built, _) = ready.wait_timeout(built, Duration::from_millis(100)).expect("collider slot");
+        }
+        built.clone().flatten()
+    }
+
     /// The collider, waiting for the build (at most ten seconds); None when the map has no mesh.
     fn wait(&self, shutdown: &Shutdown) -> Option<Arc<Collider>> {
         let (slot, ready) = &*self.0;

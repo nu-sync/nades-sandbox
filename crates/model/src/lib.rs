@@ -21,6 +21,7 @@ pub mod fixture;
 pub mod library;
 pub mod lineups;
 pub mod places;
+pub mod replay;
 pub mod smoke;
 pub mod source;
 pub mod technique;

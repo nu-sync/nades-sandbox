@@ -91,6 +91,10 @@ fn tracks_come_with_the_effect_their_grenade_leaves() {
     assert_eq!((jump.flight.len(), jump.effect), (0, Effect::Smoke(None)));
     assert_eq!(source.tracks(&id("nothing")).unwrap(), None);
     assert_eq!(source.map_of(&id("i3-minimum")).unwrap(), Some(MapName("de_inferno".into())));
+    // the replay's track
+    let tracks = source.player_tracks(&DemoId("fixture-demo-1".into()), 1).unwrap();
+    assert_eq!((tracks.len(), tracks[0].player.name.as_deref(), tracks[0].died, tracks[0].points.len()), (1, Some("apEX"), Some(Tick(3000)), 500));
+    assert_eq!((tracks[0].points[10].tick, tracks[0].points[10].origin, tracks[0].points[10].yaw), (Tick(1040), [-446.0, -700.0, -200.0], -30.0));
 }
 
 #[test]
@@ -98,11 +102,11 @@ fn check_finds_no_problem_and_counts_what_the_fixture_holds() {
     let dir = scratch("check");
     let report = check(&fixture(&dir)).unwrap();
     assert!(report.errors.is_empty() && report.warnings.is_empty(), "{:?} {:?}", report.errors, report.warnings);
-    assert!(report.meta.contains(&("format".into(), "cs2-throws".into())) && report.meta.contains(&("version".into(), "2.0".into())));
+    assert!(report.meta.contains(&("format".into(), "cs2-throws".into())) && report.meta.contains(&("version".into(), "2.1".into())));
     let c = report.census;
     assert_eq!((c.demos, c.throws, c.landed, c.with_flight, c.with_view, c.with_release, c.airborne, c.airborne_with_takeoff), (3, 11, 11, 3, 3, 3, 1, 1));
     assert_eq!((c.smokes, c.smokes_with_voxels, c.fires, c.fires_with_flames, c.flashes, c.blinds), (5, 2, 2, 2, 2, 2));
-    assert_eq!((c.demos_with_rounds, c.demos_with_samples, c.samples, c.samples_with_place), (2, 3, 403, 403));
+    assert_eq!((c.demos_with_rounds, c.demos_with_samples, c.samples, c.samples_with_place, c.demos_with_tracks), (2, 3, 403, 403, 1));
     // an empty file is a file with nothing in it; a damaged one is named
     let empty = dir.join("empty.sqlite");
     write("schema", &empty);

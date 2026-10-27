@@ -20,6 +20,8 @@ cargo clippy --release --workspace --all-targets
 python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite     # the format's worked example (the tests read it too)
 cargo run --release -p nades-source-file --example tag_parity -- <export> nades   # groups, techniques, callouts vs a producer's tags
 cargo run --release -p nades-source-demo --example import -- <cache> <demo or folder>   # demos read into cs2-throws files, timed
+cargo run --release -p nades-source-demo --example replay_measure -- <demo>   # replay data: interpolation error and size per rate (S30)
+python3 bench/replay_check.py --data <cs2-throws files>     # the replay's players and effects where the facts put them (S30)
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
 cargo run --release -p nades-packer --example physics_vs_awpy -- de_cache   # the pack's collider against awpy's mesh
@@ -67,7 +69,8 @@ packs, exports and game files. For anything on the start-up path, run `python3 b
 medians with the targets in SPEC.md §9 (with `NADES_SANDBOX_DATA` on a copy and `NADES_SANDBOX_STATE` on a scratch
 file, so the runs neither read the user's file nor move the user's remembered view). For anything that changes a
 throw's cameras or effects, run `python3 bench/cameras.py --nades <checkout>` and `uv run bench/effects.py --nades
-<checkout>`; for anything that changes a derivation, the `tag_parity` example on a show-me-the-nades export. For
+<checkout>`; for anything that changes a derivation, the `tag_parity` example on a show-me-the-nades export; for anything in the
+replay (`replay.rs`, `set_replay`, the composite's clouds), `python3 bench/replay_check.py` and `--bench-replay`. For
 anything that changes how maps are kept, loaded or switched, run `python3 bench/resident.py` (the same copy and scratch
 file) and compare it with SPEC.md §9; for anything platform-specific, `just check-windows`. For anything that changes
 how a map looks, run `uv run bench/realism.py --nades <checkout> --note …`, which compares every map with the in-game
