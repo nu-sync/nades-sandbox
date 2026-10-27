@@ -22,6 +22,7 @@ pub struct Staged {
     pub map: Map,
     pub targets: Targets,
     pub placed: Vec<Placed>,
+    pub collider: Option<nades_scene::collider::Collider>,
 }
 
 /// Puts `scene`'s map on the GPU for frames of `size`, and simulates its throws against the map's collider.
@@ -49,7 +50,7 @@ pub fn stage(scene: &Scene, (width, height): (u32, u32), arcs: Option<Option<usi
         let arcs: Vec<_> = placed.iter().enumerate().map(|(k, (b, _))| b.arc(strong == Some(k))).collect();
         map.throw.set_arcs(&gpu.device, &arcs);
     }
-    Ok(Staged { gpu, map, targets, placed })
+    Ok(Staged { gpu, map, targets, placed, collider })
 }
 
 /// What a throw did, as one JSON object.
@@ -72,9 +73,9 @@ pub fn report(k: usize, b: &sim::Built, start: f64) -> serde_json::Value {
 }
 
 /// The camera `view` of throw `k` shows at `t` on the scene's clock.
-fn view_camera(placed: &[Placed], view: ViewName, k: usize, t: f64) -> Result<Eye> {
-    let (b, start) = placed.get(k).with_context(|| format!("the scene has no throw {k} (it has {})", placed.len()))?;
-    let camera = sim::views::camera(view, b, b.local(*start, t), None).context("the free view needs --setpos and --setang")?;
+fn view_camera(s: &Staged, view: ViewName, k: usize, t: f64) -> Result<Eye> {
+    let (b, start) = s.placed.get(k).with_context(|| format!("the scene has no throw {k} (it has {})", s.placed.len()))?;
+    let camera = sim::views::camera(view, b, b.local(*start, t), None, s.collider.as_ref()).context("the free view needs --setpos and --setang")?;
     Ok(views::of(&camera))
 }
 
@@ -115,7 +116,7 @@ pub fn render(shot: Shot<'_>) -> Result<()> {
     }
     let mut eye = match shot.setpos {
         Some((setpos, [pitch, yaw], height)) => Eye::from_setpos(setpos, pitch, yaw, height),
-        None => view_camera(&s.placed, shot.view.unwrap_or(ViewName::Orbit), k, shot.time)?,
+        None => view_camera(&s, shot.view.unwrap_or(ViewName::Orbit), k, shot.time)?,
     };
     if let Some(fov) = shot.fov {
         eye.fov_y = fov.to_radians();
@@ -161,7 +162,7 @@ pub fn render_video(path: &Path) -> Result<()> {
                 live.set_pose(&camera);
                 live.view()
             }
-            None => view_camera(&s.placed, view, request.throw.unwrap_or(0), t)?,
+            None => view_camera(&s, view, request.throw.unwrap_or(0), t)?,
         };
         draw(&mut s, &eye, t, elapsed as f32);
         let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });

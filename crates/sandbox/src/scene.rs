@@ -236,9 +236,9 @@ impl SceneState {
     }
 
     /// The camera the view shows now, if a throw's view is up and the throw is simulated.
-    pub fn camera(&self) -> Option<CsView> {
+    pub fn camera(&self, collider: Option<&nades_scene::collider::Collider>) -> Option<CsView> {
         let (t, b) = self.viewed()?;
-        sim::views::camera(self.view, b, b.local(t.start, self.time), self.orbit.as_ref())
+        sim::views::camera(self.view, b, b.local(t.start, self.time), self.orbit.as_ref(), collider)
     }
 
     /// Adds `t` and selects it.
@@ -389,7 +389,7 @@ mod tests {
         // the view of the selected throw: the orbit opens over what it left, at its fullest
         s.show_view(ViewName::Orbit, Some(0));
         assert_eq!(s.selected, Some(0));
-        assert!(s.camera().is_some() && s.orbit.is_some() && !s.playing);
+        assert!(s.camera(None).is_some() && s.orbit.is_some() && !s.playing);
         s.show_view(ViewName::Follow, None);
         assert!(s.playing && s.time == 0.0);
         s.advance(100.0);

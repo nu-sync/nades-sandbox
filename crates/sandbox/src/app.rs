@@ -470,7 +470,7 @@ impl Sandbox {
         if self.bench || self.free {
             return None;
         }
-        self.scene.camera().or(self.remembered)
+        self.scene.camera(self.collider.get().as_deref()).or(self.remembered)
     }
 
     /// Readies what the frame from `eye` into targets of `size` draws of the scene; None when the picture is already

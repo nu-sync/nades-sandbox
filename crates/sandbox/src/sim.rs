@@ -160,8 +160,8 @@ pub mod views {
     }
 
     /// Behind the grenade while it flies, looking where it goes; once it has gone off, from where it was a moment
-    /// before, over what it left.
-    pub fn follow(b: &Built, local: f64) -> CsView {
+    /// before, over what it left. With the collider, the camera stays on the grenade's side of any wall.
+    pub fn follow(b: &Built, local: f64, collider: Option<&Collider>) -> CsView {
         let flight = b.stage.flight.as_ref();
         let points = &b.path.points;
         let at = |tau: f64| -> DVec3 {
@@ -183,18 +183,24 @@ pub mod views {
         let mut back = now - behind;
         back.z = back.z.max(-40.0);
         let back = if back.length() < 1.0 { (now - b.stage.thrower.eye).normalize_or(DVec3::X) } else { back.normalize() };
-        let eye = now - back * 140.0 + DVec3::Z * 36.0;
-        let look = if local < 0.0 { ahead + (ahead - now) * 4.0 } else { b.stage.focus };
+        let mut eye = now - back * 140.0 + DVec3::Z * 30.0;
+        if let Some(c) = collider {
+            let away = eye - now;
+            if let Some(d) = c.hit_distance(now, away.normalize_or_zero(), away.length()) {
+                eye = now + away.normalize_or_zero() * (d - 8.0).max(4.0);
+            }
+        }
+        let look = if local < 0.0 { ahead + (ahead - now) * 1.5 } else { b.stage.focus };
         let (pitch, yaw) = angles_to(eye, look);
         CsView { eye, pitch, yaw, fov: vertical_fov() }
     }
 
     /// `view` of `b` at its local time, `orbit` once it moves.
-    pub fn camera(view: ViewName, b: &Built, local: f64, orbit: Option<&Orbit>) -> Option<CsView> {
+    pub fn camera(view: ViewName, b: &Built, local: f64, orbit: Option<&Orbit>, collider: Option<&Collider>) -> Option<CsView> {
         match view {
             ViewName::Free => None,
             ViewName::Thrower => Some(b.stage.thrower),
-            ViewName::Follow => Some(follow(b, local)),
+            ViewName::Follow => Some(follow(b, local, collider)),
             ViewName::Orbit => Some(orbit.map_or_else(|| result(b), Orbit::view)),
         }
     }
@@ -308,10 +314,10 @@ mod tests {
     #[test]
     fn the_follow_view_trails_the_grenade_and_ends_over_what_it_left() {
         let b = simulate(&SceneThrow::new(Grenade::Flash, [0.0, 0.0, 0.0], -20.0, 90.0), None, DVec3::Z);
-        let flying = views::follow(&b, -0.5);
+        let flying = views::follow(&b, -0.5, None);
         // behind it, so looking roughly the way it was thrown (+y)
         assert!(nades_scene::camera::forward(flying.pitch, flying.yaw).y > 0.5, "{flying:?}");
-        let after = views::follow(&b, 1.0);
+        let after = views::follow(&b, 1.0, None);
         let towards = (b.stage.focus - after.eye).normalize();
         assert!(nades_scene::camera::forward(after.pitch, after.yaw).dot(towards) > 0.99);
     }
