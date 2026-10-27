@@ -18,8 +18,11 @@
 //! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
 //!   averaged over 16 jittered frames. `--cameras <cases.json>` prints the cameras each `{"throw": id}`'s views open
 //!   with (bench/cameras.py compares them with the web view's). `--bench-switch <n>` switches lineups every frame, n
-//!   times, once their stages are built, and prints what each switching frame cost. It needs the window on screen: it
-//!   stops with an error when the window gives no frame to draw into for 5 s (hidden or covered).
+//!   times, once their stages are built, and prints what each switching frame cost; a list that comes back empty is an
+//!   error. The timed benches (`--bench-switch`, `--bench-frames`, `--bench-maps`) need the window on screen: each
+//!   stops with an error ("needs the window on screen") when the window gives no frame to draw into for 5 s, or macOS
+//!   says it is hidden or covered for 5 s, and `--bench-frames` and `--bench-maps` stop at once when it hides the window
+//!   mid-measurement, since a hidden window's frames wait for the window server (about 1 s each).
 //! - `--exit-after-first-frame` prints the start-up marks as one JSON line once the first frame is presented and macOS
 //!   reports the window visible (`window:visible`), whichever comes last, and exits.
 //! - `--screenshot <file.png>` writes that frame (the bench camera) as an 8-bit sRGB PNG at the window's physical size.
@@ -246,7 +249,7 @@ fn run() -> Result<()> {
         Ok("1") => true,
         _ => !bench && !args.exit_after_first_frame && args.bench_switch.is_none(),
     };
-    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, lineups: Some(lineups), wake, switching: None, unpresented: None, maps_bench: None, exit_deadline: None };
+    let mut app = App { args, instance, loader: Some(loader), view: None, failure: None, bench: Vec::new(), visible: false, control, ready_sent: false, lineups: Some(lineups), wake, switching: None, unpresented: None, maps_bench: None, exit_deadline: None, hidden_since: Some(Instant::now()) };
     app.maps_bench = app.args.bench_maps.clone().map(lineups::MapsBench::new);
     event_loop.run_app(&mut app)?;
     if let Some(view) = &mut app.view
@@ -506,6 +509,9 @@ struct App {
     maps_bench: Option<lineups::MapsBench>,
     /// `--exit-after-first-frame`: when to stop waiting for the frame's time on the display.
     exit_deadline: Option<Instant>,
+    /// Since when macOS has said the window is hidden or covered (from the start until it first shows it): the timed
+    /// benches stop when it stays so for `BENCH_PATIENCE`, since a hidden window's frames wait for the window server.
+    hidden_since: Option<Instant>,
 }
 
 impl App {
@@ -572,7 +578,16 @@ impl App {
     fn bench_switch(&mut self, event_loop: &ActiveEventLoop) {
         let (Some(n), Some(view)) = (self.args.bench_switch, self.view.as_mut()) else { return };
         // the loop may still deliver frames after the exit asked for: the bench has reported, or failed
-        if event_loop.exiting() || !view.lineups.ready_for(n) {
+        if event_loop.exiting() {
+            return;
+        }
+        // a list that came back empty (no data, or a filter matching none) has nothing to switch between
+        if let Some(why) = view.lineups.nothing_to_switch() {
+            self.failure = Some(anyhow!("--bench-switch has no lineups to switch between on {}: {why}", view.name));
+            event_loop.exit();
+            return;
+        }
+        if !view.lineups.ready_for(n) {
             return;
         }
         let record = self.switching.get_or_insert_with(Vec::new);
@@ -752,8 +767,24 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(size) => view.resize(size.width, size.height),
             // the first frame may have been drawn before the window was on screen
-            WindowEvent::Occluded(true) => view.window_visible = false,
+            WindowEvent::Occluded(true) => {
+                view.window_visible = false;
+                self.hidden_since.get_or_insert_with(Instant::now);
+                // what a timed bench has measured so far was measured on screen; from here on it would not be
+                let timing = if !self.bench.is_empty() {
+                    Some(("--bench-frames", format!("after {} frames", self.bench.len())))
+                } else {
+                    self.maps_bench.as_ref().and_then(lineups::MapsBench::picking).map(|map| ("--bench-maps", format!("while {map} was being picked")))
+                };
+                if let Some((flag, when)) = timing
+                    && !event_loop.exiting()
+                {
+                    self.failure = Some(anyhow!("{flag} needs the window on screen, and macOS hid or covered it {when}: a hidden window's frames wait for the window server, so the timings would be wrong"));
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Occluded(false) => {
+                self.hidden_since = None;
                 view.window_visible = true;
                 view.window.request_redraw();
                 if !self.visible {
@@ -822,13 +853,24 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         if let Some(view) = &mut self.view {
-            // the switch bench draws every frame it can: a window that gives it none (hidden or covered) would keep it
-            // waiting for ever
-            if self.args.bench_switch.is_some() && view.last_frame.elapsed() > BENCH_PATIENCE && !event_loop.exiting() {
-                let why = if view.window_visible { "though macOS says it is visible" } else { "macOS says it is hidden or covered" };
-                self.failure = Some(anyhow!("--bench-switch needs the window on screen, and it gave no frame to draw into for {} s ({why})", BENCH_PATIENCE.as_secs()));
-                event_loop.exit();
-                return;
+            // the timed benches draw every frame they can: a window that gives them none (hidden or covered), or gives
+            // them only what the window server hands a hidden window, would keep them waiting for ever or time it
+            let timed = [(self.args.bench_switch.is_some(), "--bench-switch"), (self.args.bench_frames.is_some(), "--bench-frames"), (self.maps_bench.is_some(), "--bench-maps")].into_iter().find_map(|(on, flag)| on.then_some(flag));
+            if let Some(flag) = timed
+                && !event_loop.exiting()
+            {
+                let starved = view.last_frame.elapsed() > BENCH_PATIENCE;
+                let hidden = self.hidden_since.is_some_and(|since| since.elapsed() > BENCH_PATIENCE);
+                if starved || hidden {
+                    let why = match (starved, view.window_visible) {
+                        (true, true) => format!("it gave no frame to draw into for {} s, though macOS says it is visible", BENCH_PATIENCE.as_secs()),
+                        (true, false) => format!("it gave no frame to draw into for {} s (macOS says it is hidden or covered)", BENCH_PATIENCE.as_secs()),
+                        (false, _) => format!("macOS has said it is hidden or covered for {} s", BENCH_PATIENCE.as_secs()),
+                    };
+                    self.failure = Some(anyhow!("{flag} needs the window on screen, and {why}"));
+                    event_loop.exit();
+                    return;
+                }
             }
             if view.fly.moving() || self.args.bench_frames.is_some() || self.args.bench_switch.is_some() || view.lineups.animating() {
                 view.window.request_redraw();

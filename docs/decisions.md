@@ -723,3 +723,18 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   the export itself needs the packer to read an uncompressed glTF and compute the averages, the next step. The sky
   record differs in one point: `export_map.py` wrote it only once the sky texture decompiled to EXR; the packer needs
   the texture in an archive the depot holds.
+
+## S26 · The timed benches stop when the window is not on screen
+
+- **Decision:** `--bench-frames`, `--bench-maps` and `--bench-switch` end with an error that says the window "needs
+  the window on screen" when it gives no frame to draw into for 5 s, or macOS says it is hidden or covered for 5 s
+  (from launch until it first shows it, too); `--bench-frames` and `--bench-maps` end at once when macOS hides the window
+  while they measure. `--bench-switch` with an empty list (no data, or a filter matching none) is an error as soon as
+  the list arrives. `bench/startup.py` reads that error as it read its 120 s timeout (`timed_out`).
+- **Why:** a hidden window's drawables come from the window server about once a second, so a bench either never ended
+  (`--bench-frames`: 600 frames at 1 Hz) or recorded the wait as a frame (`--bench-maps`: a 1,004 ms frame), and the
+  switch bench waited for a list it would never have (the bench-switch fix's follow-ups, 2026-10-26).
+- **Evidence** (screen locked, so every window hidden; watchdog caps 40 s, 5 GB): the new binary exits 1 after 5.1–5.5 s
+  for `--bench-frames 200`, `--bench-maps de_mirage,de_cache` and `--bench-switch 20`, and after 0.11 s for
+  `--bench-switch 20` on an empty data folder; main's binary ran `--bench-frames` and `--bench-maps` until killed at
+  15 s. Not run tonight: the same benches with a window on screen (the screen stayed locked).

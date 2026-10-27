@@ -821,6 +821,12 @@ impl Lineups {
 
     /// Whether everything the switch bench needs is in: the game's effects, and the built stages of the `n + 1` lineups
     /// it shows, the selected one and the `n` after it (switching to one not built would ask for its stage then).
+    /// Why the switch bench cannot run: the list came back empty.
+    pub fn nothing_to_switch(&self) -> Option<String> {
+        let s = &self.sandbox;
+        (s.list_ms.is_some() && s.lineups.is_empty()).then(|| s.notice.clone().unwrap_or_else(|| "the list is empty".into()))
+    }
+
     pub fn ready_for(&self, n: usize) -> bool {
         let s = &self.sandbox;
         let at = s.selected.and_then(|id| s.lineups.iter().position(|l| l.id == id)).unwrap_or(0);
@@ -1142,6 +1148,11 @@ impl MapsBench {
         Self { plan, settle, started: Instant::now(), settled_ms: None, opening: Vec::new(), asked: None, done: Vec::new() }
     }
 
+    /// The map being picked and timed, if one is.
+    pub fn picking(&self) -> Option<&str> {
+        self.asked.as_ref().map(|a| a.map.as_str())
+    }
+
     /// One step, after a frame (`drew`: one was drawn, taking `frame_ms` of the window's time); the report once every
     /// map has been shown.
     pub fn step(&mut self, lineups: &mut Lineups, shown_map: &str, drew: bool, frame_ms: f64) -> Option<String> {
@@ -1395,6 +1406,19 @@ mod tests {
         assert!(lineups.ready_for(2), "the second lineup is not shown, so its stage is not waited for");
         lineups.sandbox.prepared.remove(&examples[0]);
         assert!(!lineups.ready_for(2), "the first is shown after the last");
+    }
+
+    #[test]
+    fn the_switch_bench_says_when_the_list_came_back_empty() {
+        let library = Library::start(Arc::new(nades_model::fixture::Memory::default()), || {});
+        let s = Sandbox::start("de_cache", None, library);
+        let mut lineups = Lineups::new(s, false, egui::Rect::NOTHING);
+        assert_eq!(lineups.nothing_to_switch(), None, "no list yet: wait for it");
+        lineups.sandbox.list_ms = Some(1.0);
+        lineups.sandbox.notice = Some("No lineups match these filters.".into());
+        assert_eq!(lineups.nothing_to_switch().as_deref(), Some("No lineups match these filters."));
+        lineups.sandbox.lineups = vec![lineup(1)];
+        assert_eq!(lineups.nothing_to_switch(), None);
     }
 
     #[test]
