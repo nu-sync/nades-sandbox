@@ -18,6 +18,7 @@ nades-pack = { path = "crates/pack" }
 nades-source2 = { path = "crates/source2" }
 nades-model = { path = "crates/model" }
 nades-source-file = { path = "crates/source-file" }
+nades-config = { path = "crates/config" }
 nades-packer = { path = "crates/packer" }
 nades-scene = { path = "crates/scene" }
 

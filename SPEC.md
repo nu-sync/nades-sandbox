@@ -137,6 +137,7 @@ crates/packer    `nades-pack <map>`: builds a map's pack from the export, the ga
 crates/model     the sandbox's vocabulary and rules, no I/O: CS2's facts, the ThrowSource port, the derivations
                  (technique, grouping, practice, round time, callouts, viewpoints), the voxel log's decoder, Library (S24)
 crates/source-file  the cs2-throws file adapter: version 1 SQLite files, several merged, and `check`
+crates/config    where the settings come from (§8): flag, environment, config file, default
 crates/scene     a throw becomes a stage: CS2's cameras, the result shot through awpy's collider, the smoke's cloud,
                  volume and light, the fire, the timeline (ported number for number from the web view)
 crates/control   app control's protocol, and crates/mcp its MCP server (a separate workstream on the same app)
@@ -282,7 +283,7 @@ panel) has no native counterpart: it exists to work around the browser.
   memory; a stage reads the throw's tracks and the samples of its viewpoint window (and, for a flash whose blinded
   players have no position, the samples around its detonation).
 - **Where the data is:** `--data`, `NADES_SANDBOX_DATA`, the config file's `[data] paths`, then the demo reader's cache
-  (`config.rs`); `nades-sandbox check <file>` reports a file's problems and the features its facts allow.
+  (`crates/config`, which the MCP server can share); `nades-sandbox check <file>` reports a file's problems and the features its facts allow.
 
 ## 9. Measured, and the targets
 

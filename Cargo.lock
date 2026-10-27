@@ -1759,6 +1759,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nades-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "nades-model",
+ "nades-source-file",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "nades-control"
 version = "0.1.0"
 dependencies = [
@@ -1847,12 +1859,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "directories",
  "egui",
  "egui-wgpu",
  "egui-winit",
  "glam",
  "libc",
+ "nades-config",
  "nades-control",
  "nades-model",
  "nades-pack",
@@ -1863,7 +1875,6 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "toml",
  "wgpu",
  "winit",
 ]

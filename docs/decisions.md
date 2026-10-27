@@ -604,8 +604,8 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   viewpoints; the voxel log's decoder (ported from its `tracks.rs` and `voxels.rs` with their tests). A producer's own
   labels are tags: shown, filterable, never interpreted. `crates/data`, DuckDB and the `show-me-the-nades` path
   dependency are gone, and `crates/sandbox/tests/standalone.rs` checks that no path dependency leaves the workspace and
-  that nothing names a sibling checkout. `--data` (then `NADES_SANDBOX_DATA`, the config file, the default) names the
-  files; `nades-sandbox check` reports a file's problems and the features its facts allow; `tools/cs2_throws.py` writes
+  that nothing names a sibling checkout. `--data` (then `NADES_SANDBOX_DATA`, the config file, the default; `crates/config`,
+  which the MCP server can share) names the files; `nades-sandbox check` reports a file's problems and the features its facts allow; `tools/cs2_throws.py` writes
   the schema and a fixture with Python's standard library, which the tests read.
 - **Why:** the reviewed proposal (docs/standalone-api.md, revision 2): anyone's demos, from any producer, on any map.
   Revision 1's "facts with the producer's labels" let one producer define what every filter means.
@@ -632,8 +632,8 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   the source for); `Derived::of` (one throw without its map).
 - **Evidence:**
   - Tests: model 30 (the ports' own included), the file adapter 7 (5 read the Python fixture: facts, tracks, `check`,
-    merging and refusing version 2, a file written again), the app's 22 (one lists the fixture and builds every stage
-    through the data thread) and its 2 standalone checks, the scene's 21; Clippy clean.
+    merging and refusing version 2, a file written again), the app's 20 (one lists the fixture and builds every stage
+    through the data thread) and its 2 standalone checks, the settings' 2, the scene's 21; Clippy clean.
   - The fixture through the binary: `check` reports no problems and its feature table; `--cameras` and
     `--render --throw` read it.
   - **Parity with show-me-the-nades**, on its export of an APFS copy of `nades.duckdb` (247 demos, 116,480 throws,

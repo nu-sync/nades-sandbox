@@ -11,7 +11,7 @@
 //! noise are read after it.
 //!
 //! - `--data <file or folder>` (repeatable) names the cs2-throws files to read; else `NADES_SANDBOX_DATA`, else
-//!   `[data] paths` in the config file, else the demo adapter's cache (`config.rs`).
+//!   `[data] paths` in the config file, else the demo adapter's cache (nades-config).
 //! - `check <file>...` prints each cs2-throws file's problems and which features its facts allow (`check.rs`).
 //! - `--map <name>` draws `~/.cache/nades/packs/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file).
 //! - `--throw <id> [--view result] [--time s]` with `--render`: one throw's view as the sandbox shows it, its smoke
@@ -34,7 +34,6 @@
 mod camera;
 mod check;
 mod clock;
-mod config;
 mod control;
 mod library;
 mod lineups;
@@ -54,6 +53,7 @@ use camera::{Camera, Fly};
 use base64::Engine as _;
 use nades_control::{AppCommand, AppMessage, AppState, ControlError, ControlOutput, FrameMetrics, Viewport};
 use control::{Control, UserEvent};
+use nades_config as config;
 use nades_pack::Pack;
 use nades_render::map::{FrameEffects, Map, Targets};
 use nades_render::{Gpu, View as Eye};

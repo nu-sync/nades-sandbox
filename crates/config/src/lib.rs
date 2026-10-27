@@ -1,7 +1,8 @@
-//! Where the throws come from (docs/standalone-api.md §8): `--data <file or folder>` (repeatable), else
-//! `NADES_SANDBOX_DATA` (paths separated as the platform separates PATH), else `[data] paths` in `config.toml` in the
-//! platform's config folder, else the demo adapter's cache folder. A flag beats the environment, which beats the file,
-//! which beats the default. No default names another project's folder.
+//! Where the sandbox's settings come from (docs/standalone-api.md §8), for the app and its MCP server alike. The throws:
+//! `--data <file or folder>` (repeatable), else `NADES_SANDBOX_DATA` (paths separated as the platform separates PATH),
+//! else `[data] paths` in `config.toml` in the platform's config folder, else the demo adapter's cache folder. A flag
+//! beats the environment, which beats the file, which beats the default. No default names another project's folder.
+//! (The packs, the collider and the effects keep their `~/.cache/nades` paths until maps come from the game's files.)
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
