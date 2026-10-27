@@ -7,7 +7,7 @@ CT blue more blue than red). Each live smoke, fire and grenade in flight is look
 
     python3 bench/replay_check.py --data <cs2-throws files or folder> [--packs DIR] [--cases cases.json]
 
-The default cases are eleven moments of five rounds on four maps of the ESL Pro League S24 demos (S30). Evidence goes to
+The default cases are eleven moments of four rounds, one on each of four maps, of the ESL Pro League S24 demos (S30). Evidence goes to
 .runs/replay-<time>/: each case's four PNGs, its facts (JSON) and report.md."""
 
 from __future__ import annotations
