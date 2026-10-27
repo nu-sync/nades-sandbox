@@ -11,7 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use nades_pack::scene::{AlphaMode, Semantic, TextureFormat, TextureSource};
 use nades_packer::{Flags, Inputs, Report, build};
 
-const USAGE: &str = "usage: nades-pack <map> | --effects   [--packs <dir>] [--game <dir>] [--s2v <Source2Viewer-CLI>] [--export <glb>] [--unpacked <game/csgo>] [--out <pack>]";
+const USAGE: &str = "usage: nades-pack <map> | --effects | setup <map>... [--depotdownloader <path>]   [--packs <dir>] [--game <dir>] [--s2v <Source2Viewer-CLI>] [--bunx <bunx>] [--export <glb>] [--unpacked <game/csgo>] [--work <dir>] [--out <pack>]";
 
 fn main() -> Result<()> {
     let started = Instant::now();
@@ -23,28 +23,61 @@ fn main() -> Result<()> {
     let mut flags = Flags::default();
     let mut moved: Vec<(String, PathBuf)> = Vec::new();
     while let Some(flag) = args.next() {
+        if target == "setup" && !flag.starts_with('-') {
+            moved.push(("map".into(), PathBuf::from(flag)));
+            continue;
+        }
         let value = PathBuf::from(args.next().with_context(|| format!("{flag} needs a value\n{USAGE}"))?);
         match flag.as_str() {
             "--packs" => flags.packs = Some(value),
             "--game" => flags.game = Some(value),
             "--s2v" | "--cli" => flags.s2v = Some(value),
-            "--export" | "--unpacked" | "--out" => moved.push((flag, value)),
+            "--bunx" => flags.bunx = Some(value),
+            "--depotdownloader" => flags.depotdownloader = Some(value),
+            "--export" | "--unpacked" | "--work" | "--out" => moved.push((flag, value)),
             _ => bail!("unknown flag {flag}\n{USAGE}"),
         }
     }
     if target == "--effects" {
         return effects(&flags, moved, started);
     }
+    if target == "setup" {
+        return setup(&flags, moved, started);
+    }
     let mut inputs = Inputs::with(&target, &flags)?;
     for (flag, value) in moved {
         match flag.as_str() {
-            "--export" => inputs.export = value,
+            "--export" => inputs.export = Some(value),
             "--unpacked" => inputs.unpacked = Some(value),
+            "--work" => inputs.work = value,
             _ => inputs.out = value,
         }
     }
     let report = build(&inputs)?;
     print(&inputs, &report, started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `setup <map>...`: what each map needs, fetched from Steam's CS2 depot into the game folder.
+fn setup(flags: &Flags, moved: Vec<(String, PathBuf)>, started: Instant) -> Result<()> {
+    let maps: Vec<String> = moved.iter().filter(|(f, _)| f == "map").map(|(_, m)| m.to_string_lossy().into_owned()).collect();
+    if maps.is_empty() {
+        bail!("usage: nades-pack setup <map>... [--depotdownloader <DepotDownloader>]\n{USAGE}");
+    }
+    let tool = nades_config::asset(nades_config::Asset::DepotDownloader, flags.depotdownloader.as_deref())?
+        .context("DepotDownloader is not set: pass --depotdownloader <path>, or set NADES_SANDBOX_DEPOTDOWNLOADER or [tools] depotdownloader")?
+        .path;
+    for map in maps {
+        let mut inputs = Inputs::with(&map, flags)?;
+        if let Some((_, work)) = moved.iter().find(|(f, _)| f == "--work") {
+            inputs.work = work.clone();
+        }
+        let done = nades_packer::setup::run(&inputs, &tool)?;
+        println!("setup {map}: {} file(s) fetched in {:.1} s; export rounds (label, could not load, in pak01): {:?}", done.fetched.len(), started.elapsed().as_secs_f64(), done.rounds);
+        for line in &done.fetched {
+            println!("  fetched {line}");
+        }
+    }
     Ok(())
 }
 
@@ -79,7 +112,21 @@ fn print(inputs: &Inputs, r: &Report, seconds: f64) {
     let s = &r.scene;
     let st = &s.stats;
     println!("{}: {} ({}) in {seconds:.2} s", inputs.map, inputs.out.display(), mb(r.file_size));
-    println!("  source: game build {}, export {} (fnv1a {})", r.source.game_build, inputs.export.display(), r.source.export_hash);
+    println!("  source: game build {}, export {} (fnv1a {})", r.source.game_build, inputs.glb().display(), r.source.export_hash);
+    for (label, e) in &r.exported {
+        println!(
+            "  exported {label}: {} ({:.1} s export, {:.1} s layers, {:.1} s glTF-Transform); layered: {} environment, {} lightmapped ({} with a second layer, {} a third); {} files the CLI could not load",
+            e.glb.display(),
+            e.seconds[0],
+            e.seconds[1],
+            e.seconds[2],
+            e.layered[0],
+            e.layered[1],
+            e.layered[2],
+            e.layered[3],
+            e.failed_to_load.len()
+        );
+    }
     println!(
         "  draws {} and 3D skybox {} ({} instanced, {} instances), {} triangles drawn, {} vertices stored",
         st.draws, st.skybox_draws, st.instanced_draws, st.instances, st.triangles, st.vertices

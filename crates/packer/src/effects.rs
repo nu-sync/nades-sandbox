@@ -18,6 +18,8 @@ use anyhow::{Context as _, Result, bail, ensure};
 use nades_pack::effects::{Effects, Flipbook, NOISE_SIZE};
 use nades_source2::vpk::Vpk;
 
+use crate::resample;
+
 /// The fire systems' flipbooks the view draws (show-me-the-nades D24).
 pub const FLIPBOOKS: [&str; 4] = ["fire_small_sim_a", "fire_small_sim_b", "fire_small_sim_b_desat", "fire_small_sim_a_v02"];
 pub const FLIPBOOK_DIR: &str = "materials/particle/fire_small_sim";
@@ -158,97 +160,9 @@ fn flipbook(src: &Path, name: &str) -> Result<Flipbook> {
     Ok(Flipbook { name: name.to_string(), cell: CELL, columns: columns as u32, rows: rows as u32, sequences, rgba })
 }
 
-/// Pillow's fixed point: 32 − 8 − 2 bits.
-const PRECISION: u32 = 22;
-
-fn lanczos_kernel(x: f64) -> f64 {
-    let sinc = |x: f64| if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
-    if -3.0 < x && x < 3.0 { sinc(x) * sinc(x / 3.0) } else { 0.0 }
-}
-
-/// Pillow's `precompute_coeffs` and `normalize_coeffs_8bpc`: each output texel's first input texel and its weights.
-fn coefficients(input: usize, output: usize) -> Vec<(usize, Vec<i32>)> {
-    let scale = input as f64 / output as f64;
-    let filterscale = scale.max(1.0);
-    let support = 3.0 * filterscale;
-    (0..output)
-        .map(|xx| {
-            let center = (xx as f64 + 0.5) * scale;
-            let ss = 1.0 / filterscale;
-            let xmin = ((center - support + 0.5) as i64).max(0) as usize;
-            let xmax = ((center + support + 0.5) as i64).min(input as i64) as usize - xmin;
-            let mut k: Vec<f64> = (0..xmax).map(|x| lanczos_kernel((x as f64 + xmin as f64 - center + 0.5) * ss)).collect();
-            let ww: f64 = k.iter().sum();
-            if ww != 0.0 {
-                for w in &mut k {
-                    *w /= ww;
-                }
-            }
-            let fixed = k.iter().map(|&w| if w < 0.0 { (-0.5 + w * f64::from(1u32 << PRECISION)) as i32 } else { (0.5 + w * f64::from(1u32 << PRECISION)) as i32 }).collect();
-            (xmin, fixed)
-        })
-        .collect()
-}
-
-fn clip8(ss: i64) -> u8 {
-    (ss >> PRECISION).clamp(0, 255) as u8
-}
-
-/// Pillow's `MULDIV255`.
-fn muldiv255(a: u32, b: u32) -> u8 {
-    let t = a * b + 128;
-    (((t >> 8) + t) >> 8) as u8
-}
-
-/// `Image.resize((w, h), Image.LANCZOS)` of an RGBA image: premultiplied (RGBa), horizontal then vertical, back to
-/// straight alpha.
+/// `Image.resize((w, h), Image.LANCZOS)` of an RGBA frame.
 fn lanczos(image: &Image, width: usize, height: usize) -> Vec<u8> {
-    let premultiplied: Vec<u8> = image.rgba.chunks_exact(4).flat_map(|p| [muldiv255(u32::from(p[0]), u32::from(p[3])), muldiv255(u32::from(p[1]), u32::from(p[3])), muldiv255(u32::from(p[2]), u32::from(p[3])), p[3]]).collect();
-    let half = 1i64 << (PRECISION - 1);
-    let mut current = premultiplied;
-    let (mut w, h0) = (image.width, image.height);
-    if width != w {
-        let k = coefficients(w, width);
-        let mut out = vec![0u8; width * h0 * 4];
-        for y in 0..h0 {
-            for (xx, (xmin, weights)) in k.iter().enumerate() {
-                for c in 0..4 {
-                    let mut ss = half;
-                    for (x, &wt) in weights.iter().enumerate() {
-                        ss += i64::from(current[(y * w + xmin + x) * 4 + c]) * i64::from(wt);
-                    }
-                    out[(y * width + xx) * 4 + c] = clip8(ss);
-                }
-            }
-        }
-        current = out;
-        w = width;
-    }
-    if height != h0 {
-        let k = coefficients(h0, height);
-        let mut out = vec![0u8; w * height * 4];
-        for (yy, (ymin, weights)) in k.iter().enumerate() {
-            for x in 0..w {
-                for c in 0..4 {
-                    let mut ss = half;
-                    for (y, &wt) in weights.iter().enumerate() {
-                        ss += i64::from(current[((ymin + y) * w + x) * 4 + c]) * i64::from(wt);
-                    }
-                    out[(yy * w + x) * 4 + c] = clip8(ss);
-                }
-            }
-        }
-        current = out;
-    }
-    for p in current.chunks_exact_mut(4) {
-        let a = u32::from(p[3]);
-        if a != 0 && a != 255 {
-            for c in &mut p[..3] {
-                *c = ((255 * u32::from(*c)) / a).min(255) as u8;
-            }
-        }
-    }
-    current
+    resample::resize_rgba(&image.rgba, (image.width, image.height), (width, height), resample::Filter::Lanczos)
 }
 
 #[cfg(test)]
@@ -259,24 +173,6 @@ mod tests {
     fn a_sheet_lists_its_sequences_frames() {
         let mks = "// Reconstructed with Source 2 Viewer\n\n\nsequence 0\nframe a_seq0_0.png 1\nframe a_seq0_1.png 1\n\nsequence 1\nloop\nframe a_seq1_0.png 1\n";
         assert_eq!(sheet(mks), vec![vec!["a_seq0_0.png".to_string(), "a_seq0_1.png".into()], vec!["a_seq1_0.png".into()]]);
-    }
-
-    #[test]
-    fn the_resize_keeps_a_flat_image_flat_and_weights_sum_to_one() {
-        let flat = Image { width: 300, height: 90, rgba: [200u8, 100, 50, 255].repeat(300 * 90) };
-        let out = lanczos(&flat, 128, 128);
-        assert!(out.chunks_exact(4).all(|p| p == [200, 100, 50, 255]));
-        for (_, k) in coefficients(300, 128).iter().chain(&coefficients(90, 128)) {
-            let sum: i64 = k.iter().map(|&w| i64::from(w)).sum();
-            assert!((sum - (1 << PRECISION)).abs() <= k.len() as i64);
-        }
-        // transparent texels do not bleed their colour: premultiplied
-        let mut half = [255u8, 0, 0, 255].repeat(8 * 8);
-        for p in half.chunks_exact_mut(4).skip(32) {
-            p.copy_from_slice(&[0, 255, 0, 0]);
-        }
-        let out = lanczos(&Image { width: 8, height: 8, rgba: half }, 4, 4);
-        assert!(out.chunks_exact(4).all(|p| p[3] == 0 || p[1] == 0), "{out:?}");
     }
 
     #[test]

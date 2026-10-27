@@ -21,12 +21,16 @@
 
 pub mod effects;
 pub mod entities;
+pub mod export;
 pub mod geometry;
 pub mod gltf;
 pub mod lump;
+pub mod ojson;
 pub mod materials;
 pub mod physics;
 pub mod post;
+pub mod resample;
+pub mod setup;
 pub mod textures;
 pub mod world;
 
@@ -50,9 +54,14 @@ use crate::textures::{ByName, CHUNK_TARGET, Fill, GameFile, GameIndex, Planned};
 pub struct Inputs {
     /// e.g. `de_cache`.
     pub map: String,
-    /// The Source 2 Viewer export: `<map>.glb`; the files beside it (`<map>.post.json`, `<map>.lut.bin`,
-    /// `<map>.sky.json`, `<map>.skybox.json`, `<map>.skybox.glb`) are read from the same folder.
-    pub export: PathBuf,
+    /// A geometry export made elsewhere (`--export <map>.glb`, as show-me-the-nades' `export_map.py` made them), its
+    /// 3D skybox's `<map>.skybox.glb` beside it. None: the packer makes both itself ([`export`]) in `work`.
+    pub export: Option<PathBuf>,
+    /// Where the packer makes the exports: `exports/` in the platform's cache folder.
+    pub work: PathBuf,
+    /// Bun's `bunx`, which runs glTF-Transform for the export (`--bunx`, `NADES_SANDBOX_BUNX`, `[tools] bunx`, else the
+    /// PATH's).
+    pub bunx: Option<PathBuf>,
     /// CS2's files: the folder holding `game/csgo` (an install, or DepotDownloader's folder, whose manifests name the
     /// game build), with the maps' VPKs in `game/csgo/maps` and `pak01` in `game/csgo` (`--game`, `NADES_SANDBOX_GAME`,
     /// `[assets] game`).
@@ -73,25 +82,27 @@ pub struct Flags {
     pub packs: Option<PathBuf>,
     pub game: Option<PathBuf>,
     pub s2v: Option<PathBuf>,
+    pub bunx: Option<PathBuf>,
+    pub depotdownloader: Option<PathBuf>,
 }
 
 impl Inputs {
-    /// The settings' places for `map`: the export in show-me-the-nades' maps folder until the packer exports the
-    /// geometry itself (`--export`), the rest from the settings.
+    /// The settings' places for `map`.
     pub fn for_map(map: &str) -> Result<Self> {
         Self::with(map, &Flags::default())
     }
 
     pub fn with(map: &str, flags: &Flags) -> Result<Self> {
-        let home = std::env::var_os("HOME").context("HOME is not set")?;
-        let cache = Path::new(&home).join(".cache/nades");
         let packs = nades_config::packs(flags.packs.as_deref())?;
         let game = nades_config::asset(nades_config::Asset::Game, flags.game.as_deref())?
             .with_context(|| "CS2's files are not set: pass --game <folder holding game/csgo>, or set NADES_SANDBOX_GAME or [assets] game in the config file".to_string())?;
         let cli = nades_config::asset(nades_config::Asset::S2v, flags.s2v.as_deref())?;
+        let bunx = nades_config::asset(nades_config::Asset::Bunx, flags.bunx.as_deref())?;
         Ok(Self {
             map: map.to_string(),
-            export: cache.join("maps").join(format!("{map}.glb")),
+            export: None,
+            work: nades_config::exports_dir(),
+            bunx: bunx.map(|s| s.path),
             game: game.path,
             unpacked: None,
             cli: cli.map(|s| s.path),
@@ -117,9 +128,14 @@ impl Inputs {
         format!("maps/{}/lightmaps/irradiance.vtex_c", self.map)
     }
 
+    /// The map's export: the one given, else the packer's own.
+    pub fn glb(&self) -> PathBuf {
+        self.export.clone().unwrap_or_else(|| self.work.join(format!("{}.glb", self.map)))
+    }
+
     /// A file beside the export: `<map><suffix>`.
     pub fn beside(&self, suffix: &str) -> PathBuf {
-        self.export.with_file_name(format!("{}{suffix}", self.map))
+        self.glb().with_file_name(format!("{}{suffix}", self.map))
     }
 
     pub fn pak(&self) -> PathBuf {
@@ -154,6 +170,8 @@ pub struct Report {
     pub game_files: usize,
     /// The CLI's decompiles for the entity lumps, the skies' materials and the post-processing.
     pub decompiled: u32,
+    /// The exports the packer made (label and what each did); none when one was given.
+    pub exported: Vec<(String, export::Exported)>,
     pub pak_entries: usize,
     /// Each base colour image decoded from the export, and why no game file stood for it.
     pub fallbacks: Vec<String>,
@@ -164,6 +182,30 @@ pub struct Report {
 /// FNV-1a, 64-bit: a stable hash of the export, so a changed export rebuilds its pack.
 pub fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The map's and its 3D skybox's exports, made by the packer ([`export`]).
+fn make_exports(inputs: &Inputs, pak: Option<&Vpk>, prefab: Option<&str>) -> Result<Vec<(String, export::Exported)>> {
+    let cli = inputs.cli().with_context(|| format!("the geometry export needs Source 2 Viewer's CLI: {} (or pass --export <map>.glb)", no_cli(inputs)))?;
+    let bunx = inputs.bunx.as_deref().filter(|b| b.is_file()).context("the geometry export needs Bun's bunx for glTF-Transform: install Bun, or set --bunx, NADES_SANDBOX_BUNX or [tools] bunx (or pass --export <map>.glb)")?;
+    let pak = pak.with_context(|| format!("the geometry export needs {}", inputs.pak().display()))?;
+    std::fs::create_dir_all(&inputs.work).with_context(|| format!("creating {}", inputs.work.display()))?;
+    let mut maps = vec![inputs.map.as_str()];
+    maps.extend(prefab.filter(|p| inputs.map_vpk(p).is_file()));
+    let gameinfo = export::stage(&inputs.game, &inputs.work.join(format!(".stage-{}", inputs.map)), &maps)?;
+    let exporter = export::Exporter { cli, bunx, game: &inputs.game, work: inputs.work.clone() };
+    let mut done = Vec::new();
+    for (k, name) in maps.iter().enumerate() {
+        let label = if k == 0 { inputs.map.clone() } else { format!("{}.skybox", inputs.map) };
+        let made = exporter.make(&gameinfo, pak, &inputs.pak(), name, &label)?;
+        done.push((label, made));
+    }
+    // a skybox export left from another time would be read as this one's
+    if prefab.is_none() {
+        let _ = std::fs::remove_file(inputs.beside(".skybox.glb"));
+    }
+    let _ = std::fs::remove_dir_all(inputs.work.join(format!(".stage-{}", inputs.map)));
+    Ok(done)
 }
 
 /// Why there is no CLI to run.
@@ -298,7 +340,6 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
         clock = Instant::now();
     };
 
-    let (map, export_hash) = Export::open(&inputs.export)?;
     // the entity lumps, the skies' materials and the post-processing, decompiled by the CLI
     let pak = if inputs.pak().is_file() { Some(Vpk::open(&inputs.pak()).with_context(|| format!("the game's archive {}", inputs.pak().display()))?) } else { None };
     let lump = match inputs.cli() {
@@ -310,6 +351,14 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     };
     let record = |value: &serde_json::Value| (!value.is_null()).then(|| value.clone());
     let skybox_file: Option<post::SkyboxFile> = record(&lump.skybox).map(serde_json::from_value).transpose().context("the 3D skybox's record")?;
+    stage("the entity lumps, skies and post-processing");
+    // the geometry: the export given, else the packer's own from the game's files
+    let exported = match &inputs.export {
+        Some(_) => None,
+        None => Some(make_exports(inputs, pak.as_ref(), skybox_file.as_ref().map(|f| f.prefab.as_str()))?),
+    };
+    stage("the geometry export");
+    let (map, export_hash) = Export::open(&inputs.glb())?;
     let skybox_glb = inputs.beside(".skybox.glb");
     let sky_export = match (&skybox_file, skybox_glb.is_file()) {
         (Some(_), true) => Some(Export::open(&skybox_glb)?.0),
@@ -676,6 +725,7 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
         game_meshes: asked_game.then(|| (meshes.values().filter(|&&l| l).count(), meshes.len())),
         game_files: game.len(),
         decompiled: lump.runs,
+        exported: exported.unwrap_or_default(),
         pak_entries: game.pak_entries(),
         fallbacks,
         missing,

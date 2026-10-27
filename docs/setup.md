@@ -10,19 +10,11 @@ The workspace builds on its own (`cargo build --release`): no path dependency le
 
 ## Preparation pipeline
 
-The current exporter is `scripts/export_map.py` in the separate `show-me-the-nades` project. That project is
-not part of this public preview. If you already have that checkout, run these commands there:
-
-```sh
-uv run scripts/export_map.py de_cache
-```
-
-The exporter obtains the map's dependencies from Steam, runs Source 2 Viewer, and prepares the compressed GLB,
-material metadata, skybox and post-processing inputs. It uses uv, Bun, Source 2 Viewer and DepotDownloader;
-the first export downloads several GB. Use its default cache paths for the commands below.
-
-For readers without the exporter, standalone asset preparation is a known limitation of this source preview.
-A generic GLB export may omit the companion metadata and compression expected by this packer.
+`nades-pack` builds a map's pack from CS2's own files alone, with three public tools: Source 2 Viewer's CLI (the
+export, the decompiles), Bun's `bunx` (glTF-Transform 4.5.1, which compresses the geometry export) and, to fetch a map
+from Steam, DepotDownloader. `nades-pack setup <map>` fetches what a map needs into the game folder (anonymously, from
+the CS2 depot, pinned to the build the folder already holds; a pool map is a few hundred MB, the first one more for the
+shared archives); `nades-pack <map>` then builds its pack. show-me-the-nades' `export_map.py` is no longer needed.
 
 ## Input layout
 
@@ -33,7 +25,9 @@ the platform's config folder (on macOS `~/Library/Application Support/io.github.
 |---|---|---|---|---|
 | packs | `--packs <dir>` | `NADES_SANDBOX_PACKS` | `[assets] packs` | where packs go and the viewer reads them; default `packs/` in the platform's cache folder |
 | CS2's files | `nades-pack --game <dir>` | `NADES_SANDBOX_GAME` | `[assets] game` | the folder holding `game/csgo`: an install, or DepotDownloader's folder (its manifests name the build); no default |
-| Source 2 Viewer's CLI | `nades-pack --s2v <path>` | `NADES_SANDBOX_S2V` | `[tools] s2v` | exports the map's physics, decompiles its entities, skies, post-processing and the fire's flipbooks, and says which meshes are lightmapped; no default |
+| Source 2 Viewer's CLI | `nades-pack --s2v <path>` | `NADES_SANDBOX_S2V` | `[tools] s2v` | exports the map's geometry and physics, decompiles its entities, skies, post-processing, layer textures and the fire's flipbooks, and says which meshes are lightmapped; no default |
+| Bun's `bunx` | `nades-pack --bunx <path>` | `NADES_SANDBOX_BUNX` | `[tools] bunx` | runs glTF-Transform on the geometry export; default the PATH's |
+| DepotDownloader | `nades-pack setup --depotdownloader <path>` | `NADES_SANDBOX_DEPOTDOWNLOADER` | `[tools] depotdownloader` | fetches a map's files from Steam; no default |
 
 ```toml
 [assets]
@@ -42,18 +36,21 @@ game = "~/.cache/nades/cs2/depot"
 
 [tools]
 s2v = "~/.cache/nades/tools/s2v-master/Source2Viewer-CLI"
+depotdownloader = "~/.cache/nades/tools/depotdownloader/DepotDownloader"
 ```
 
 From the game folder the packer reads `game/csgo/maps/<map>.vpk` (and the 3D skybox prefab's VPK beside it) and
 `game/csgo/pak01_dir.vpk` with its numbered archives; with the CLI it decompiles what it needs into a scratch folder of
-its own. The one input still made by show-me-the-nades' `export_map.py` is the geometry: `~/.cache/nades/maps/<map>.glb`
-and `<map>.skybox.glb` (`--export` moves it). Use Source 2 Viewer's master build (`s2v-master`, as `export_map.py`
-does): its decompiled flipbook frames are the ones the web view's fire was made from (decisions S26).
+its own. The geometry export (`<map>.glb`, `<map>.skybox.glb`) is made in `exports/` in the platform's cache folder
+(`--work` moves it; `--export <map>.glb` takes one made elsewhere instead). Use Source 2 Viewer's master build
+(`s2v-master`, as `export_map.py` did): its decompiled flipbook frames are the ones the web view's fire was made from
+(decisions S26), and the exports it makes are byte for byte `export_map.py`'s (S28).
 
 Return to this checkout, then build the packs and open a map:
 
 ```sh
 cargo build --release
+./target/release/nades-pack setup de_vertigo # once a map: fetch what it needs from Steam (the pool maps are there)
 ./target/release/nades-pack de_cache        # every map you want
 ./target/release/nades-pack --effects       # once: the smoke noise and fire flipbooks, <packs>/shared/effects.pack
 ./target/release/nades-sandbox --map de_cache

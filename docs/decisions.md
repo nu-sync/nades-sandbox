@@ -771,3 +771,44 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   for `--bench-frames 200`, `--bench-maps de_mirage,de_cache` and `--bench-switch 20`, and after 0.11 s for
   `--bench-switch 20` on an empty data folder; main's binary ran `--bench-frames` and `--bench-maps` until killed at
   15 s. Not run tonight: the same benches with a window on screen (the screen stayed locked).
+
+## S28 · The geometry export, made by the packer
+
+- **Decision:** `nades-pack <map>` makes the map's geometry export itself (`crates/packer/src/export.rs`), step for
+  step as show-me-the-nades' `export_map.py` made it, and `nades-pack setup <map>` fetches a map's files
+  (`setup.rs`). What remains of show-me-the-nades in a pack's inputs is nothing; three public tools remain (Source 2
+  Viewer's CLI, Bun for glTF-Transform 4.5.1, DepotDownloader).
+  - **Stage:** a folder of links: `gameinfo.gi` (a copy), the maps' VPKs, `pak01_dir.vpk` with the archives the game
+    folder holds, `game/core`'s files, and no `shaders_vulkan_*` (core's or csgo's). The exports were made before the
+    shader directory reached the depot (2026-10-25 19:14, after the last export at 14:54, for `cs2_effects.py`); with
+    the directory and not its archives the CLI fails on maps whose materials ask a shader (Nuke: no glTF at all).
+  - **Export:** `export_map.py`'s arguments (`-d --gltf_export_format gltf --gltf_export_materials
+    --gltf_textures_adapt --gltf_export_extras --game … --threads 8`). The CLI exits 2 on its side export of the
+    physics mesh, which wants the shaders; the map's glTF is what is read.
+  - **Layers:** `layer_textures` ported line for line, with its Pillow resizes (`resample.rs`: box and bilinear beside
+    the Lanczos of S26, and Pillow 13's pass order: vertical first when the height shrinks by more than twice what the
+    width does; without it 4 of 7 maps' averages differed in the 4th place), SHA-1 names and the glTF edited with its
+    key order kept (`ojson.rs`), since glTF-Transform keeps `extras` as they come.
+  - **Compress:** `bunx --bun @gltf-transform/cli@4.5.1 optimize … --texture-compress webp --texture-size 1024`, then
+    `meshopt --quantize-texcoord 14 --quantize-generic 16`.
+  - **Setup:** DepotDownloader, anonymous, app 730, depot 2347770, `-manifest` pinned to the one the game folder holds
+    (the current one, 67499503218971311, at the time), so fetched files never mix builds. With `pak01` mounted, the CLI
+    passes over a file whose archive is missing in silence (de_mirage without `pak01_013`: 620 files written of 626,
+    no message), so setup exports without it, as `export_map.py` did, fetches the archives holding what the CLI could
+    not load, unpacks those files into its stage and repeats (at most 8 rounds); then the layer textures', the sky's,
+    the post-processing's and the effects' archives.
+- **Rejected for now:** reading the meshes from the VPKs directly. Source 2 Viewer's export is deterministic (the same
+  glTF and bin, byte for byte, as export_map.py's of the day before) and takes 0.7–7 s a map; a reader of CS2's
+  meshes, materials and world nodes would have to reproduce glTF-Transform's welding, instancing, joining and
+  quantization to keep the packs the same.
+- **Evidence** (2026-10-26):
+  - All 7 pool maps: `<map>.glb` and `<map>.skybox.glb` byte for byte `export_map.py`'s, and the packs byte for byte
+    the installed ones (`cmp`). A pack takes 14 s (Mirage) to 3.4 min (Cache: 1,015 materials, the layer step's
+    decompiles and resizes), most of it the layer step and glTF-Transform.
+  - de_vertigo, never exported before: `nades-pack setup de_vertigo` fetched its VPK, its 3D skybox prefab
+    (`prefabs/de_vertigo/skybox2`) and one `pak01` archive (102) in 42 s, export rounds 189 → 407 → 33 → 0 files the
+    CLI could not load; `nades-pack de_vertigo` built a 450 MB pack in 14 s with nothing missing (179 base colours by
+    name, 170 material textures from the game, sky, post-processing, 69 probe volumes, collider of 66,048 triangles),
+    and it renders offscreen (`--render` from both spawns).
+  - `bench/realism.py --note "geometry export made by nades-pack (U3b)"` on the rebuilt packs: headline 5.3 / 10.3 /
+    6.2, as before; 5 of 7 renders byte for byte the last run's (`.runs/realism-20261026-232937`).

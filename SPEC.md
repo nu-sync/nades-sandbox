@@ -200,8 +200,8 @@ maps      once the window shows: the other packed maps, one at a time, each draw
 ## 6. The pack (format 2)
 
 `<packs>/<map>.pack`, built by `nades-pack <map>` (`crates/packer`) in 2.5–6.5 s from:
-- the Source 2 Viewer export in `~/.cache/nades/maps`: geometry, and materials with their `vmat` parameters, and the 3D
-  skybox (`<map>.skybox.glb`);
+- the geometry export the packer makes (S28): Source 2 Viewer's glTF of the map and of its 3D skybox's prefab
+  (geometry, and materials with their `vmat` parameters), `export_map.py`'s layer step, glTF-Transform's compression;
 - the game's own files (the `[assets] game` folder, docs/standalone-api.md §8):
   - textures as BC blocks, from `pak01` (or files unpacked from it);
   - each map's lightmaps and light probes, from its VPK;

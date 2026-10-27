@@ -231,7 +231,9 @@ esac
     std::fs::set_permissions(&cli, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let inputs = Inputs {
         map: "de_test".into(),
-        export: root.join("maps/de_test.glb"),
+        export: Some(root.join("maps/de_test.glb")),
+        work: root.join("exports"),
+        bunx: None,
         game: root.join("depot"),
         unpacked: Some(game.clone()),
         cli: Some(cli),

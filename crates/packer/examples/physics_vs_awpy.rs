@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let map = args.next().context("usage: physics_vs_awpy <map> [<awpy .mesh>]")?;
     let inputs = Inputs::for_map(&map)?;
-    let awpy_path = args.next().map(PathBuf::from).unwrap_or_else(|| inputs.export.with_file_name(format!("{map}.mesh")));
+    let awpy_path = args.next().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(format!(".cache/nades/maps/{map}.mesh")));
     let started = Instant::now();
     let p = physics::of_map(inputs.cli().with_context(|| nades_packer::no_cli(&inputs))?, &inputs.vpk(), &map, &std::env::temp_dir())?;
     let seconds = started.elapsed().as_secs_f64();

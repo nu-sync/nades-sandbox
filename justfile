@@ -35,6 +35,10 @@ bundle: build
 pack $map='de_cache':
     cargo run --release -p nades-packer -- "$map"
 
+# Fetch what a map needs from Steam's CS2 depot (DepotDownloader), once before its first pack.
+setup +maps:
+    cargo run --release -p nades-packer -- setup {{maps}}
+
 # Build the shared effects pack (the smoke noise and the fire's flipbooks) from the game's pak01.
 effects:
     cargo run --release -p nades-packer -- --effects

@@ -400,7 +400,10 @@ Workshop maps use the same VPK layout, so they work once the packer reads VPKs d
 **Status (step 3, decisions S26):** the collider (byte for byte awpy's mesh, from the map's physics), the shared
 effects pack, the entity lumps, the sky and post-processing records and the textures now come from the game's files,
 with Source 2 Viewer's CLI run by the packer; the §8 settings for packs, CS2's files and the CLI are in. The geometry
-export (`<map>.glb`, `<map>.skybox.glb`) is still `export_map.py`'s.
+export (`<map>.glb`, `<map>.skybox.glb`) is the packer's own too (S28): Source 2 Viewer's export from a staged game
+folder, `export_map.py`'s layer step ported, glTF-Transform 4.5.1; `nades-pack setup <map>` fetches a map's files with
+DepotDownloader. Every pool map's pack rebuilds byte for byte, and de_vertigo, never exported before, packs. Reading
+the meshes from the VPKs directly, without the CLI and Bun, is what remains.
 
 ## 8. Configuration
 
@@ -410,6 +413,8 @@ export (`<map>.glb`, `<map>.skybox.glb`) is still `export_map.py`'s.
 | packs | `--packs <dir>` | `NADES_SANDBOX_PACKS` | `[assets] packs` | `packs/` in the platform's cache folder |
 | CS2's files | `nades-pack --game <dir>` | `NADES_SANDBOX_GAME` | `[assets] game` | none; the setup command asks |
 | Source 2 Viewer's CLI | `nades-pack --s2v <path>` | `NADES_SANDBOX_S2V` | `[tools] s2v` | none until the packer reads VPKs directly |
+| Bun's `bunx` (glTF-Transform) | `nades-pack --bunx <path>` | `NADES_SANDBOX_BUNX` | `[tools] bunx` | the PATH's |
+| DepotDownloader | `nades-pack setup --depotdownloader <path>` | `NADES_SANDBOX_DEPOTDOWNLOADER` | `[tools] depotdownloader` | none |
 
 A flag beats the environment, which beats the file, which beats the default. The platform folders come from the
 `directories` crate (under `~/Library` on macOS). No default names another project's folder; the existing

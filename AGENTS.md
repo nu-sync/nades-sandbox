@@ -21,6 +21,7 @@ python3 tools/cs2_throws.py fixture /tmp/fixture.sqlite     # the format's worke
 cargo run --release -p nades-source-file --example tag_parity -- <export> nades   # groups, techniques, callouts vs a producer's tags
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
+./target/release/nades-pack setup de_vertigo                # fetch a map's files from Steam (DepotDownloader), once
 cargo run --release -p nades-packer --example physics_vs_awpy -- de_cache   # the pack's collider against awpy's mesh
 cargo run --release -p nades-packer --example lump_vs_export -- de_cache    # entities, post, sky, skybox against export_map.py's
 cargo run --release -p nades-packer --example effects_vs_web                # the effects against cs2_effects.py's

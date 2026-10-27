@@ -183,12 +183,12 @@ fn quoted_after(text: &str, key: &str, prefix: &str, suffix: &str) -> Option<Str
 }
 
 /// An env_sky's material: `skyname (resource_name:)?"….vmat"`.
-fn skyname(block: &str) -> Option<String> {
+pub fn skyname(block: &str) -> Option<String> {
     quoted_after(block, "skyname", "resource_name:", ".vmat")
 }
 
 /// The first `resource_name:"….<ext>"` in a value.
-fn resource(value: &str, ext: &str) -> Option<String> {
+pub fn resource(value: &str, ext: &str) -> Option<String> {
     let mut rest = value;
     while let Some(at) = rest.find("resource_name:\"") {
         rest = &rest[at + "resource_name:\"".len()..];

@@ -13,8 +13,13 @@ use nades_pack::scene::{AlphaMode, Scene, Semantic, TextureFormat, TextureSource
 use nades_packer::{Inputs, gltf, textures};
 use rayon::prelude::*;
 
+/// de_cache's inputs; its export the one the packer made (`nades-pack de_cache`), or `NADES_PACK_EXPORT`.
 fn inputs() -> Inputs {
-    Inputs::for_map("de_cache").unwrap()
+    let mut inputs = Inputs::for_map("de_cache").unwrap();
+    if let Some(glb) = std::env::var_os("NADES_PACK_EXPORT") {
+        inputs.export = Some(glb.into());
+    }
+    inputs
 }
 
 fn open() -> (Pack, Scene) {
@@ -234,7 +239,7 @@ fn lightmap_coordinates_agree_across_uv_seams() {
 fn base_colour_blocks_match_the_exports_images() {
     let (pack, scene) = open();
     let i = inputs();
-    let glb = std::fs::read(&i.export).unwrap();
+    let glb = std::fs::read(i.glb()).unwrap();
     let parts = gltf::split(&glb).unwrap();
     let doc = gltf::parse(parts.json).unwrap();
     let buffers = gltf::buffers(&doc, parts.bin).unwrap();

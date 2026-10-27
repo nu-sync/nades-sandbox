@@ -24,7 +24,9 @@ fn file(path: &Path) -> Value {
 fn main() -> Result<()> {
     let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     for map in std::env::args().skip(1) {
-        let inputs = Inputs::for_map(&map)?;
+        let mut inputs = Inputs::for_map(&map)?;
+        // export_map.py's files are beside its export
+        inputs.export = Some(home.join(format!(".cache/nades/maps/{map}.glb")));
         let cli = inputs.cli().with_context(|| nades_packer::no_cli(&inputs))?;
         let pak = nades_source2::vpk::Vpk::open(&inputs.pak())?;
         let started = std::time::Instant::now();
