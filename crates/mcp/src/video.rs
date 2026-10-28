@@ -304,10 +304,11 @@ impl VideoJobs {
                 "-an",
                 "-c:v",
                 "libx264",
+                // x264 `faster` at CRF 19: two thirds of `medium`'s CPU for the same look under the size's cap (S41)
                 "-preset",
-                "medium",
+                "faster",
                 "-crf",
-                "20",
+                "19",
                 "-maxrate",
                 &format!("{kbits}k"),
                 "-bufsize",
