@@ -148,25 +148,18 @@ impl Sequence {
         let chased = if away.x.hypot(away.y) > 32.0 { away.y.atan2(away.x) } else { (thrower.eye.y - focus.y).atan2(thrower.eye.x - focus.x) };
         let chased = (chased / std::f64::consts::TAU * BEARINGS as f64).rem_euclid(BEARINGS as f64);
         let seen = |k: f64| collider.is_none_or(|c| pull_clear(c, end_eye, circle.at(k)));
-        let sweep = match circle.longest_run() {
-            // once round, clockwise, from the bearing nearest the chase's end that it can reach in a straight line
-            Some((_, BEARINGS)) => {
-                let from = (0..=BEARINGS / 2).flat_map(|d| [chased.round() - d as f64, chased.round() + d as f64]).find(|&k| seen(k)).unwrap_or(chased.round());
-                Some(Sweep { from, steps: -(BEARINGS as f64) })
-            }
-            // the open arc, from its end nearer the chase's
-            Some((first, n)) => {
-                let (a, b) = (first as f64, (first + n) as f64);
-                let gap = |k: f64| ((k - chased).rem_euclid(BEARINGS as f64)).min((chased - k).rem_euclid(BEARINGS as f64));
-                Some(if gap(a) <= gap(b) { Sweep { from: a, steps: n as f64 } } else { Sweep { from: b, steps: -(n as f64) } })
-            }
-            None => None,
-        };
+        // once round, clockwise, from the bearing nearest the chase's end that it can reach in a straight line
+        // (and where the bloom shows from), so the bloom is watched from where it shows
+        let marks = effect_marks(focus, &body);
+        let shows = |k: f64| collider.is_none_or(|c| eye_fits(c, focus, &marks, &body, f.clear, circle.at(k)));
+        let near = || (0..=BEARINGS / 2).flat_map(|d| [chased.round() - d as f64, chased.round() + d as f64]);
+        let from = near().find(|&k| seen(k) && shows(k)).or_else(|| near().find(|&k| shows(k))).or_else(|| near().find(|&k| seen(k))).unwrap_or(chased.round());
+        let sweep = Some(Sweep { from, steps: -(BEARINGS as f64) });
         let pull = sweep.as_ref().map(|s| circle.at(s.at(0.0))).map(|to| collider.map_or(Pull::Straight(to), |c| Pull::plan(c, end_eye, to)));
-        let mut sequence = Self { thrower, spot, aim, zoom, release, detonate, bloom, end: bloom + turn, released_at: b.path.release.t, start, air, chase_eyes, chase_looks, raw_looks, focus, marks: effect_marks(focus, &body), circle, sweep, pull, turn, shifts: Vec::new() };
-        // last, every pose after the release moved off the surfaces its near plane would cut, eased
+        let mut sequence = Self { thrower, spot, aim, zoom, release, detonate, bloom, end: bloom + turn, released_at: b.path.release.t, start, air, chase_eyes, chase_looks, raw_looks, focus, marks, circle, sweep, pull, turn, shifts: Vec::new() };
+        // last, every pose of the chase and the pull moved off the surfaces its near plane would cut, eased
         if let Some(c) = collider {
-            let n = ((sequence.end - release) * RATE).ceil() as usize + 1;
+            let n = ((bloom - release) * RATE).ceil() as usize + 1;
             let shifts: Vec<DVec3> = (0..n)
                 .map(|i| {
                     let (view, _) = sequence.pose(release + i as f64 / RATE);
@@ -217,10 +210,11 @@ impl Sequence {
     /// The camera and its look target, moved off the surfaces its near plane would cut.
     fn shot(&self, v: f64) -> (CsView, Option<DVec3>) {
         let (mut view, target) = self.pose(v);
-        if v >= self.release && !self.shifts.is_empty() {
+        if v >= self.release && v < self.bloom && !self.shifts.is_empty() {
             let f = ((v - self.release) * RATE).clamp(0.0, (self.shifts.len() - 1) as f64);
             let i = (f.floor() as usize).min(self.shifts.len().saturating_sub(2));
-            let shift = self.shifts[i].lerp(self.shifts[(i + 1).min(self.shifts.len() - 1)], f - i as f64);
+            // easing out over the pull's last half second into the turn, which is let be
+            let shift = self.shifts[i].lerp(self.shifts[(i + 1).min(self.shifts.len() - 1)], f - i as f64) * smoothstep((self.bloom - v) / 0.5);
             if shift != DVec3::ZERO {
                 let look = view.eye + forward(view.pitch, view.yaw) * 100.0;
                 view.eye += shift;
@@ -268,12 +262,12 @@ impl Sequence {
         (CsView { eye, pitch, yaw, fov: vertical_fov() }, Some(self.focus))
     }
 
-    /// Every frame from the release on, at `fps`, checked against what the map draws (`sight`): the video seconds
+    /// The chase's and the pull's frames, at `fps`, checked against what the map draws (`sight`): the video seconds
     /// where the near plane cuts into a surface, and where a surface stands between the eye and the grenade or the
-    /// effect. Before the release the eye is the player's own, where the lineup puts it.
+    /// effect. Before the release the eye is the player's own; the turn may pass through walls (S36).
     pub fn audit(&self, sight: &Collider, fps: f64) -> Audit {
         let first = (self.release * fps).ceil() as usize;
-        let frames = (self.end * fps).ceil() as usize;
+        let frames = (self.bloom * fps).ceil() as usize;
         let mut audit = Audit { frames: frames - first.min(frames), ..Audit::default() };
         for i in first..frames {
             let v = i as f64 / fps;
@@ -497,188 +491,36 @@ impl Track {
     }
 }
 
-/// The turn: a circle round the effect, for each of BEARINGS bearings how far out and how high the eye is (S36).
-/// Every bearing has its places at each of HEIGHTS: the furthest distance out to the frame's radius (pulling in short
-/// of the first wall) at which the eye passes [`eye_fits`]. The turn is the cheapest way once round through those
-/// places, a bearing at a time, never more than one height up or down a step, and only where the eye passes
-/// `eye_fits` the whole way from one bearing to the next; it prefers low and far out, and staying level. When no way
-/// goes all round, the turn is the longest such arc.
+/// The turn: one level circle round the effect at the frame's radius, the same height all the way round, so it turns
+/// smoothly; the walls it passes through are let be (the user's call, S36). Its height is the lowest up to 42° at
+/// which most bearings see the effect from a clear place ([`eye_fits`]).
 struct Circle {
     focus: DVec3,
-    reach: Vec<f64>,
-    height: Vec<f64>,
-    /// Whether the eye is clear the whole way from each bearing to the next.
-    open: Vec<bool>,
+    radius: f64,
+    height: f64,
 }
 
-/// The heights a turn may take, as elevations at the frame's radius, degrees; and the distances tried at each, as
-/// shares of the radius.
-const HEIGHTS: [f64; 10] = [10.0, 16.0, 22.0, 28.0, 35.0, 42.0, 50.0, 58.0, 67.0, 76.0];
-const PULLS: [f64; 8] = [1.0, 0.88, 0.76, 0.65, 0.55, 0.46, 0.38, 0.3];
-/// Checks between one bearing and the next.
-const BETWEEN: usize = 4;
-/// The highest a turn goes, as an elevation at the frame's radius, unless it cannot turn far that low; and the fewest
-/// steps an arc that low must turn (90°).
-const LOW_TOP: f64 = 42.0;
-const MIN_ARC: usize = 18;
+/// The heights a turn may take, as elevations at the frame's radius, degrees.
+const HEIGHTS: [f64; 6] = [10.0, 16.0, 22.0, 28.0, 35.0, 42.0];
 
 impl Circle {
     fn new(focus: DVec3, radius: f64, map: Option<&Collider>, body: &[DVec3], clear: f64) -> Self {
         use rayon::prelude::*;
         let heights: Vec<f64> = HEIGHTS.iter().map(|e| radius * e.to_radians().tan()).collect();
-        let Some(c) = map else {
-            return Self { focus, reach: vec![radius; BEARINGS], height: vec![heights[2]; BEARINGS], open: vec![true; BEARINGS] };
-        };
+        let Some(c) = map else { return Self { focus, radius, height: heights[2] } };
         let marks = effect_marks(focus, body);
-        let fits = |eye: DVec3| eye_fits(c, focus, &marks, body, clear, eye);
-        let at = |k: f64, r: f64, h: f64| {
-            let a = k / BEARINGS as f64 * std::f64::consts::TAU;
-            focus + DVec3::new(r * a.cos(), r * a.sin(), h)
-        };
-        let levels = heights.len();
-        // each bearing's place at each height, if any
-        let place: Vec<Vec<Option<f64>>> = (0..BEARINGS)
-            .into_par_iter()
-            .map(|k| heights.iter().map(|&h| PULLS.iter().map(|p| radius * p).find(|&r| fits(at(k as f64, r, h)))).collect())
-            .collect();
-        // whether the eye can go from bearing k at height i to the next at height j
-        let step: Vec<Vec<bool>> = (0..BEARINGS * levels * 3)
-            .into_par_iter()
-            .map(|n| {
-                let (k, i, d) = (n / (levels * 3), n / 3 % levels, n % 3);
-                let Some(j) = (i + d).checked_sub(1).filter(|j| *j < levels) else { return vec![false] };
-                let next = (k + 1) % BEARINGS;
-                let (Some(a), Some(b)) = (place[k][i], place[next][j]) else { return vec![false] };
-                vec![(1..BETWEEN).all(|s| {
-                    let w = s as f64 / BETWEEN as f64;
-                    fits(at(k as f64 + w, lerp(a, b, w), lerp(heights[i], heights[j], w)))
-                })]
-            })
-            .collect();
-        let can = |k: usize, i: usize, j: usize| j + 1 >= i && j <= i + 1 && step[(k * levels + i) * 3 + (j + 1 - i)][0];
-        let cost = |k: usize, i: usize| i as f64 + 2.0 * (1.0 - place[k][i].unwrap_or(0.0) / radius);
-        // once round from bearing 0, through heights up to `top`: the cheapest closed way, as each bearing's height
-        let closed = |top: usize| {
-            let mut best: Option<(f64, Vec<usize>)> = None;
-            for s in (0..=top).filter(|&s| place[0][s].is_some()) {
-                let mut total: Vec<Option<(f64, Vec<usize>)>> = (0..levels).map(|i| (i == s).then(|| (cost(0, s), vec![s]))).collect();
-                for k in 0..BEARINGS {
-                    let next = (k + 1) % BEARINGS;
-                    total = (0..levels)
-                        .map(|j| {
-                            (0..=top)
-                                .filter(|_| j <= top)
-                                .filter_map(|i| {
-                                    let (c0, way) = total[i].as_ref()?;
-                                    can(k, i, j).then(|| (c0 + 0.5 * i.abs_diff(j) as f64 + if next == 0 { 0.0 } else { cost(next, j) }, way))
-                                })
-                                .min_by(|a, b| a.0.total_cmp(&b.0))
-                                .map(|(c1, way)| (c1, [way.as_slice(), &[j]].concat()))
-                        })
-                        .collect();
-                }
-                if let Some((c1, way)) = total[s].take()
-                    && best.as_ref().is_none_or(|(b, _)| c1 < *b)
-                {
-                    best = Some((c1, way));
-                }
-            }
-            best.map(|(_, way)| way)
-        };
-        // the longest arc through heights up to `top`, as its first bearing and each step's height
-        let arc = |top: usize| {
-            let mut longest: Option<(usize, Vec<usize>)> = None;
-            for (k0, places) in place.iter().enumerate() {
-                for s in (0..=top).filter(|&s| places[s].is_some()) {
-                    let mut layers: Vec<Vec<Option<usize>>> = vec![(0..levels).map(|i| (i == s).then_some(i)).collect()];
-                    for n in 0..BEARINGS - 1 {
-                        let k = (k0 + n) % BEARINGS;
-                        let prev = &layers[n];
-                        let layer: Vec<Option<usize>> = (0..levels).map(|j| (0..=top).filter(|&i| j <= top && prev[i].is_some() && can(k, i, j)).min_by_key(|&i| i.abs_diff(j) * 10 + i)).collect();
-                        if layer.iter().all(Option::is_none) {
-                            break;
-                        }
-                        layers.push(layer);
-                    }
-                    if longest.as_ref().is_none_or(|(_, way)| layers.len() > way.len()) {
-                        // the lowest height the arc ends at, then the way back from it
-                        let mut j = (0..levels).find(|&j| layers[layers.len() - 1][j].is_some()).unwrap_or(s);
-                        let mut way = vec![j];
-                        for n in (1..layers.len()).rev() {
-                            j = layers[n][j].unwrap_or(j);
-                            way.push(j);
-                        }
-                        way.reverse();
-                        longest = Some((k0, way));
-                    }
-                }
-            }
-            longest
-        };
-        let full = |way: Vec<usize>| Self {
-            focus,
-            reach: (0..BEARINGS).map(|k| place[k][way[k]].unwrap_or(radius)).collect(),
-            height: (0..BEARINGS).map(|k| heights[way[k]]).collect(),
-            open: vec![true; BEARINGS],
-        };
-        let part = |(k0, way): (usize, Vec<usize>)| {
-            let mut circle = Self { focus, reach: vec![radius; BEARINGS], height: vec![heights[0]; BEARINGS], open: vec![false; BEARINGS] };
-            for (n, j) in way.iter().enumerate() {
-                let k = (k0 + n) % BEARINGS;
-                circle.reach[k] = place[k][*j].unwrap_or(radius);
-                circle.height[k] = heights[*j];
-                circle.open[k] = n + 1 < way.len();
-            }
-            circle
-        };
-        // low and part of the way round frames the effect better than high and all of it: a whole turn only up to
-        // LOW_TOP, else the longest arc up to it when it turns far enough, else whatever goes furthest
-        let low = HEIGHTS.iter().rposition(|e| *e <= LOW_TOP).unwrap_or(0);
-        if let Some(way) = closed(low) {
-            return full(way);
-        }
-        let low_arc = arc(low);
-        if low_arc.as_ref().is_some_and(|(_, way)| way.len() > MIN_ARC) {
-            return part(low_arc.expect("an arc"));
-        }
-        if let Some(way) = closed(levels - 1) {
-            return full(way);
-        }
-        arc(levels - 1).or(low_arc).map_or(Self { focus, reach: vec![radius; BEARINGS], height: vec![heights[0]; BEARINGS], open: vec![false; BEARINGS] }, part)
+        let seen = |h: f64| (0..BEARINGS).into_par_iter().filter(|&k| eye_fits(c, focus, &marks, body, clear, Self { focus, radius, height: h }.at(k as f64))).count();
+        let counts: Vec<usize> = heights.iter().map(|&h| seen(h)).collect();
+        let most = counts.iter().copied().max().unwrap_or(0);
+        // the lowest within a few bearings of the best
+        let pick = counts.iter().position(|&n| n + 4 >= most).unwrap_or(2);
+        Self { focus, radius, height: heights[pick] }
     }
 
     /// The eye at a bearing counted in steps (0 to BEARINGS round the circle).
     fn at(&self, k: f64) -> DVec3 {
-        let f = k.rem_euclid(BEARINGS as f64);
-        let i = f.floor() as usize % BEARINGS;
-        let j = (i + 1) % BEARINGS;
-        let w = f - f.floor();
-        let (r, h) = (lerp(self.reach[i], self.reach[j], w), lerp(self.height[i], self.height[j], w));
-        let a = f / BEARINGS as f64 * std::f64::consts::TAU;
-        self.focus + DVec3::new(r * a.cos(), r * a.sin(), h)
-    }
-
-    /// The longest run of open steps, as (first step, steps): the whole circle when every step is open.
-    fn longest_run(&self) -> Option<(usize, usize)> {
-        if self.open.iter().all(|o| *o) {
-            return Some((0, BEARINGS));
-        }
-        let first_shut = self.open.iter().position(|o| !o)?;
-        let mut best: Option<(usize, usize)> = None;
-        let mut run = 0;
-        for i in 1..=BEARINGS {
-            let k = (first_shut + i) % BEARINGS;
-            if self.open[k] {
-                run += 1;
-                let begin = (k + BEARINGS + 1 - run) % BEARINGS;
-                if best.is_none_or(|(_, n)| run > n) {
-                    best = Some((begin, run));
-                }
-            } else {
-                run = 0;
-            }
-        }
-        best
+        let a = k / BEARINGS as f64 * std::f64::consts::TAU;
+        self.focus + DVec3::new(self.radius * a.cos(), self.radius * a.sin(), self.height)
     }
 }
 
@@ -830,11 +672,9 @@ mod tests {
             let turn = s.sweep.as_ref().map_or("none".to_string(), |w| format!("{:.0}° from {:.0}", w.steps.abs() * 5.0, w.from * 5.0));
             let pull = match s.pull { Some(Pull::Straight(_)) => "straight", Some(Pull::Rising(..)) => "rising", Some(Pull::Cut(_)) => "cut", None => "none" };
             println!(
-                "{map} {grenade:?}: planned {planned:.0} ms, turn {turn}, height {:.0}–{:.0}, reach {:.0}–{:.0}, pull {pull}; {} frames: clipped {} hidden {} (detonate {:.2} bloom {:.2})",
-                s.circle.height.iter().cloned().fold(f64::INFINITY, f64::min),
-                s.circle.height.iter().cloned().fold(0.0, f64::max),
-                s.circle.reach.iter().cloned().fold(f64::INFINITY, f64::min),
-                s.circle.reach.iter().cloned().fold(0.0, f64::max),
+                "{map} {grenade:?}: planned {planned:.0} ms, turn {turn}, height {:.0}, radius {:.0}, pull {pull}; {} frames: clipped {} hidden {} (detonate {:.2} bloom {:.2})",
+                s.circle.height,
+                s.circle.radius,
                 a.frames,
                 a.clipped.len(),
                 a.hidden.len(),

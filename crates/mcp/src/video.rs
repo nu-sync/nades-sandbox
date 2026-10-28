@@ -32,7 +32,7 @@ pub struct VideoStatus {
     pub reports: Vec<nades_control::scene::ThrowReport>,
     /// The JSON beside the finished video: the scene, the stills and the reports.
     pub report_path: Option<String>,
-    /// A lineup video's camera checked frame by frame against what the map draws, from the release on.
+    /// A lineup video's camera checked frame by frame against what the map draws: the chase and the pull-out.
     pub camera: Option<nades_control::video::CameraAudit>,
     /// The finished MP4's size, megabytes.
     pub megabytes: Option<f64>,

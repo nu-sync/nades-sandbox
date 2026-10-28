@@ -50,19 +50,17 @@ The chase and the turn port show-me-the-nades' `web/app/src/scene/flight.ts` (it
   ceiling); eye and look Gaussian-smoothed (σ 0.08 s, 0.14 s); it leaves the thrower's eye over `LEAVE` 0.5 s. Round
   a corner the eye closes in (`CLOSER`: 1 down to 0.15 of the lag) until `chase_fits` (10 units from every surface,
   the grenade in sight); where smoothing cuts a corner the sample falls back to the path, else is `nudge`d off the wall.
-- **Turn** (`Circle::new`, S36): radius 400 (smoke, clear 100 of every voxel), 320 (fire, clear 40), 360 (else). Each
-  of 72 bearings × 10 heights (`HEIGHTS`, 10–76° at the radius) gets the furthest distance (`PULLS`, 1 down to 0.3 of
-  the radius) where `eye_fits`: map under it, 24 units from every surface, `clear` of the effect, and the effect in
-  sight (`sees_effect`: its middle, or two of its `effect_marks`, 70% out to its extremes). The turn is a search over
-  those places, a bearing at a time, at most one height step between bearings, and every move between neighbours
-  checked at 4 points: the cheapest whole circle up to 42° (`LOW_TOP`), else the longest arc that low if it turns
-  90° or more (`MIN_ARC`), else any whole circle, else the longest arc. The camera moves evenly along it (`Sweep`), from
-  the bearing nearest where the chase ended that it reaches in a line, or from the arc's nearer end.
+- **Turn** (`Circle::new`, S36): one level circle, once round, clockwise, at an even pace (`Sweep`): radius 400 (smoke,
+  clear 100 of every voxel), 320 (fire, clear 40), 360 (else), the same height all the way round, the lowest of
+  `HEIGHTS` (10–42° at the radius) within four bearings of the one where most of the 72 bearings see the effect from a
+  clear place (`eye_fits`: map under it, 24 units from every surface, `clear` of the effect, the effect in sight via
+  `sees_effect`: its middle or two of its `effect_marks`). It may pass through walls (the user's call). It starts at
+  the bearing nearest where the chase ended that shows the effect and is reachable in a line, else that shows it.
 - **Pull** (`Pull`): from the chase's end to the turn's start, straight if a tube of 12 is clear, else up then across,
   else a cut.
-- **Last pass** (`clear_of_near`): every pose from the release on, 120 a second, is pushed off any surface its near
+- **Last pass** (`clear_of_near`): every pose of the chase and the pull, 120 a second, is pushed off any surface its near
   plane (4 units, `near_corners`) or 10 units round it would meet; the shifts are eased and kept at least as large.
-- **Audit** (`Sequence::audit`, `Shot::audit`): every frame from the release on, at the video's fps: `clipped` where
+- **Audit** (`Sequence::audit`, `Shot::audit`): every frame of the chase and the pull, at the video's fps: `clipped` where
   a ray to the near plane's middle or a corner meets what the map draws; `hidden` where the grenade (chase) or the
   effect (`sees_effect`) is out of sight. It goes in the render's JSON (`camera`) and the `lineup_render` summary.
   `cargo test --release -p nades-sandbox lineup_probe -- --ignored --nocapture` audits a set of lineups without

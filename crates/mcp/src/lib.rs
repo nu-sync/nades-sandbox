@@ -873,9 +873,9 @@ impl NadesMcp {
                 status.duration_seconds,
                 status.megabytes.map_or(String::new(), |mb| format!(", {mb:.1} MB")),
                 status.camera.as_ref().map_or(String::new(), |c| if c.clipped.is_empty() {
-                    format!("; the camera clear of the map in all {} frames after the release", c.frames)
+                    format!("; the camera clear of the map in all {} frames of the chase and the pull-out", c.frames)
                 } else {
-                    format!("; the camera cuts into the map in {} of {} frames after the release (at {:.2?} s)", c.clipped.len(), c.frames, &c.clipped[..c.clipped.len().min(5)])
+                    format!("; the camera cuts into the map in {} of {} frames of the chase and the pull-out (at {:.2?} s)", c.clipped.len(), c.frames, &c.clipped[..c.clipped.len().min(5)])
                 })
             ),
             ("running", _) => format!("Rendering job {}: poll video_status.", status.job_id),

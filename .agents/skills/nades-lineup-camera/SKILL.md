@@ -34,8 +34,9 @@ Call the MCP tool `lineup_render` once:
 - Defaults: 1920×1080, 60 fps, length from the airtime and the effect (a smoke about 26 s, rendered in about 35 s).
   `width: 640, height: 360, fps: 20` is a draft in a few seconds. `seconds` sets the length. `max_megabytes` caps
   the MP4 (default 25, under a phone's 30 MB).
-- The summary says whether the camera stayed clear of the map in every frame after the release (`video.camera`:
-  `clipped` and `hidden` seconds); before the release the eye is the lineup's own.
+- The summary says whether the camera stayed clear of the map in every frame of the chase and the pull-out
+  (`video.camera`: `clipped` and `hidden` seconds); before the release the eye is the lineup's own, and the 360° turn
+  may pass through walls.
 - It waits, then returns the MP4 path, five stills beside it (`<name>-aim.png`, `-aim_point`, `-flight`, `-bloom`,
   `-result`), `<name>.json` (scene, stills, what the throw did) and the detonation's time and place.
 - Renders run one at a time per server (`busy` is retryable); several lineups render by calling it again.

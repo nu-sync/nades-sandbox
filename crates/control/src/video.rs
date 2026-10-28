@@ -64,7 +64,8 @@ pub struct VideoRequest {
 /// The size an MP4 keeps under when none is asked for, megabytes.
 pub const DEFAULT_MAX_MEGABYTES: f64 = 25.0;
 
-/// A lineup video's camera checked frame by frame against what the map draws (S36), from the release on.
+/// A lineup video's camera checked frame by frame against what the map draws (S36): the chase and the pull-out (the
+/// thrower's view is the lineup's own, and the turn may pass through walls).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CameraAudit {
     /// Frames checked.

@@ -1243,28 +1243,26 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   about 0.12 s. The map's physics (73k triangles) leaves out props, trims, awnings and the walls players never reach,
   so a camera kept clear of it alone still went through what is drawn. Only a scripted shot builds it; the window's
   shots keep the physics.
-- **The turn** is a search, not a rule: at 72 bearings × 10 heights the furthest place up to the frame's radius where
-  the eye has the map under it, 24 units of room, is outside the effect and sees it; then the cheapest way round
-  through those places, a height step at most between bearings and every move between them checked. The S34 rule
-  (lowest clear elevation, else nearer, else through the walls, then neighbours' nearest/highest, eased) put eyes
-  that each passed in places the smoothing moved into walls, and had a "through the walls" fallback. Seeing the effect
-  means its middle or two points 70% out to its extremes: mirage-smoke-0002's smoke lies under a wooden balcony 96
-  units over its middle, so its middle is hidden from most bearings while the cloud shows. **Low before whole:** a whole
-  circle only up to 42° at the radius; else the longest arc that low if it turns 90°; only then higher. Allowed any
-  height, mirage-smoke-0002 went round 1,600 units over the roofs with the smoke a speck under the balcony.
+- **The turn** is one smooth, level circle, all the way round, at the frame's radius and one height: the lowest of six
+  (10–42° at the radius) within four bearings of the one from which most of 72 bearings see the effect from a clear
+  place. It may pass through buildings: the user, "it's okay to clip through the buildings, we don't need it to
+  perfectly always stay in perfect line of sight". A first version searched 72 bearings × 10 heights for clear places
+  and the cheapest way round them, else the longest clear arc; it reached zero clipped frames but gave partial arcs
+  and climbs, so it was dropped for the circle. Seeing the effect means its middle or two points 70% out to its
+  extremes: mirage-smoke-0002's smoke lies under a wooden balcony 96 units over its middle. The turn starts at the
+  bearing nearest the chase's end from which the effect shows, reached in a line when one does.
 - **The chase** closes in on the grenade round corners until it sees it, keeps to the path where smoothing would cut a
   corner, and nudges off a wall the path runs within 10 units of. **The pull** to the turn is straight, up then across,
   or a cut. **Last**, every pose is pushed off what its near plane (4 units) would meet, eased.
-- **Audit:** every frame from the release on is checked (`Sequence::audit`): `clipped` where a ray from the eye to the
-  near plane's middle or a corner meets a drawn triangle; `hidden` where the grenade or the effect is out of sight.
-  The renderer prints it, the MCP keeps it in the video's JSON (`camera`) and the `lineup_render` summary says it.
-  Before the release the eye is the lineup's own; two of 126 pro spots stand with drawn props within 5 units.
-- **Evidence:** mirage-smoke-0002 (S35's, `speed` 30) before: 45 clipped and 227 hidden frames (the turn at 23.5–26.8 s,
-  the pull at 15.25 s); after: 0 and 1 of 1,181, a 150° arc 71–360 units up, 19.8 MB. 126 pro lineups (3 per kind
-  per pool map, from the cs2-throws export) audited without rendering: with the turn search alone, 1,163 bad frames
-  of 139,659 (the thrower's view included); with the chase and last-pass fixes, 157 of the 80,565 after the release
-  (1 clipped: a thin pole between the rays; 156 hidden, the grenade passing behind something for a few frames); turns
-  average 227°, 90 of 126 lineups perfect. Planning takes 5–25 ms.
+- **Audit:** every frame of the chase and the pull is checked (`Sequence::audit`): `clipped` where a ray from the eye
+  to the near plane's middle or a corner meets a drawn triangle; `hidden` where the grenade or the effect is out of
+  sight. The renderer prints it, the MCP keeps it in the video's JSON (`camera`) and the `lineup_render` summary says
+  it. Before the release the eye is the lineup's own; the turn is let be.
+- **Evidence:** mirage-smoke-0002 (S35's, `speed` 30) before: 45 clipped and 227 hidden frames (the turn at 23.5–26.8
+  s, the pull at 15.25 s). 126 pro lineups (3 per kind per pool map, from the cs2-throws export) audited without
+  rendering: 38,440 frames of chase and pull, 1 clipped (a thin pole between the rays) and 198 hidden (the grenade
+  behind something for a few frames, or a pull that has to cut to where the effect shows); 109 of 126 perfect; every
+  turn 360°. Planning takes 5–20 ms.
 - **Size:** ffmpeg starts once the renderer has said how many frames it will send (`video_plan`); x264 CRF 20 with its
   rate capped to `max_megabytes` (default 25) over the clip's length, 8% kept for the container, at least 500 kbit/s.
   S35's 27.5 s 1080p60 smoke was 32.5 MB at x264's default CRF 23 with no cap; it is 19.8 MB now.
