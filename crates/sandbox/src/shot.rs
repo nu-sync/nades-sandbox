@@ -54,6 +54,20 @@ impl Shot {
         Self { began: vec![None; laid.len()], moves: laid, sequences, clip_start, last: None }
     }
 
+    /// Its lineup moves' frames checked against what the map draws, in the clip's seconds.
+    pub fn audit(&self, sight: &Collider, fps: f64) -> crate::lineup::Audit {
+        let mut all = crate::lineup::Audit::default();
+        for ((from, _, _), s) in self.moves.iter().zip(&self.sequences) {
+            if let Some(s) = s {
+                let a = s.audit(sight, fps);
+                all.frames += a.frames;
+                all.clipped.extend(a.clipped.iter().map(|v| from + v));
+                all.hidden.extend(a.hidden.iter().map(|v| from + v));
+            }
+        }
+        all
+    }
+
     /// The move playing at `elapsed`, and how far into it.
     fn playing(&self, elapsed: f64) -> (usize, f64) {
         let k = self.moves.iter().position(|(_, end, _)| elapsed < *end).unwrap_or(self.moves.len() - 1);

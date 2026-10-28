@@ -23,6 +23,8 @@ pub struct Staged {
     pub targets: Targets,
     pub placed: Vec<Placed>,
     pub collider: Option<nades_scene::collider::Collider>,
+    /// What the map draws, as a collider, for a scripted shot's camera (S36); built only for one.
+    pub sight: Option<nades_scene::collider::Collider>,
 }
 
 /// Puts `scene`'s map on the GPU for frames of `size`, and simulates its throws against the map's collider.
@@ -50,7 +52,7 @@ pub fn stage(scene: &Scene, (width, height): (u32, u32), arcs: Option<Option<usi
         let arcs: Vec<_> = placed.iter().enumerate().map(|(k, (b, _))| b.arc(strong == Some(k))).collect();
         map.throw.set_arcs(&gpu.device, &arcs);
     }
-    Ok(Staged { gpu, map, targets, placed, collider })
+    Ok(Staged { gpu, map, targets, placed, collider, sight: None })
 }
 
 /// What a throw did, as one JSON line.
@@ -177,7 +179,14 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
     for (i, (b, start)) in s.placed.iter().enumerate() {
         eprintln!("{}", report(i, b, *start));
     }
-    let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds, s.collider.as_ref()));
+    if !request.shot.is_empty() {
+        s.sight = crate::assets::sight(&request.scene.map).map_err(|e| eprintln!("sight: {e:#} (the shot keeps clear of the map's physics only)")).ok();
+    }
+    let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds, s.sight.as_ref().or(s.collider.as_ref())));
+    if let (Some(shot), Some(sight)) = (&shot, &s.sight) {
+        let audit = shot.audit(sight, f64::from(request.fps));
+        eprintln!("{}", serde_json::json!({"event": "camera_audit", "frames": audit.frames, "clipped": audit.clipped, "hidden": audit.hidden}));
+    }
     // each still's frame
     let stills: Vec<(u32, &str)> = request
         .stills
@@ -196,6 +205,8 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
     if end - request.start_seconds > 60.0 || frames > 1800 {
         bail!("the clip would last {:.1} s, {frames} frames: at most 60 s and 1800 frames", end - request.start_seconds);
     }
+    // its length, before the first frame: the encoder's bitrate follows from it
+    eprintln!("{}", serde_json::json!({"event": "video_plan", "total": frames}));
     let output = s.gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("video frame"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },

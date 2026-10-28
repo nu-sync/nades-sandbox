@@ -57,6 +57,55 @@ pub fn collider(map: &str) -> Result<Collider> {
     Collider::from_awmh(bytes).with_context(|| format!("{}'s Collider section is not a triangle mesh", path.display()))
 }
 
+/// What the camera sees of `map`, as a collider: every opaque or cut-out triangle its pack draws (not the 3D skybox),
+/// in Hammer units. The map's physics leaves out props, trims and the walls of places players never reach, so a camera
+/// kept clear of it alone still passes through what is drawn (S36).
+pub fn sight(map: &str) -> Result<Collider> {
+    let path = pack_path(Some(map));
+    let pack = nades_pack::Pack::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    let scene = pack.scene().with_context(|| format!("reading {}'s scene", path.display()))?;
+    Ok(Collider::new(drawn_triangles(&scene, pack.geometry())))
+}
+
+/// The scene's opaque and cut-out triangles in Hammer units (glTF metres, y up → Source, z up).
+pub(crate) fn drawn_triangles(scene: &nades_pack::scene::Scene, geometry: &[u8]) -> Vec<[[f32; 3]; 3]> {
+    use nades_pack::scene::{AlphaMode, IndexFormat};
+    use rayon::prelude::*;
+    let inch = 1.0 / 0.0254_f32;
+    scene
+        .draws
+        .par_iter()
+        .filter(|d| scene.materials.get(d.material as usize).is_none_or(|m| m.alpha != AlphaMode::Blend))
+        .flat_map_iter(|d| {
+            let positions: Vec<glam::Vec3> = d
+                .positions
+                .of(geometry)
+                .chunks_exact(8)
+                .map(|v| {
+                    let c = |k: usize| f32::from(i16::from_le_bytes([v[k], v[k + 1]])) / 32767.0;
+                    glam::Vec3::new(c(0), c(2), c(4))
+                })
+                .collect();
+            let bytes = d.indices.of(geometry);
+            let indices: Vec<usize> = match d.index_format {
+                IndexFormat::U16 => bytes.chunks_exact(2).map(|b| usize::from(u16::from_le_bytes([b[0], b[1]]))).collect(),
+                IndexFormat::U32 => bytes.chunks_exact(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).collect(),
+            };
+            d.world_transforms(geometry)
+                .into_iter()
+                .flat_map(move |m| {
+                    let m = glam::Mat4::from_cols_array(&m);
+                    let world: Vec<[f32; 3]> = positions.iter().map(|p| {
+                        let g = m.transform_point3(*p);
+                        [g.z * inch, g.x * inch, g.y * inch]
+                    }).collect();
+                    indices.chunks_exact(3).filter_map(|t| Some([*world.get(t[0])?, *world.get(t[1])?, *world.get(t[2])?])).collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// The game's smoke noise (or the stand-in, and false) and fire flipbooks (or none), from the effects pack.
 pub fn effects() -> (Vec<u8>, bool, Option<nades_render::throw::Flipbooks>) {
     let path = nades_config::effects_pack(packs());

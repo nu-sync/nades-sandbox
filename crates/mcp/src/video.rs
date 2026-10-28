@@ -32,6 +32,10 @@ pub struct VideoStatus {
     pub reports: Vec<nades_control::scene::ThrowReport>,
     /// The JSON beside the finished video: the scene, the stills and the reports.
     pub report_path: Option<String>,
+    /// A lineup video's camera checked frame by frame against what the map draws, from the release on.
+    pub camera: Option<nades_control::video::CameraAudit>,
+    /// The finished MP4's size, megabytes.
+    pub megabytes: Option<f64>,
 }
 struct Job {
     status: VideoStatus,
@@ -69,6 +73,8 @@ impl VideoJobs {
             duration_seconds: f64::from(request.frame_count().unwrap_or(0)) / f64::from(request.fps),
             request: request.clone(),
             reports: Vec::new(),
+            camera: None,
+            megabytes: None,
             report_path: None,
         };
         self.jobs.lock().await.insert(
@@ -91,7 +97,8 @@ impl VideoJobs {
                         job.status.path = Some(path.to_string_lossy().into_owned());
                         // what happened, beside the video
                         let report = path.with_extension("json");
-                        let what = serde_json::json!({"video": path, "stills": job.status.request.stills, "scene": job.status.request.scene, "reports": job.status.reports});
+                        job.status.megabytes = std::fs::metadata(&path).ok().map(|m| m.len() as f64 / 1e6);
+                        let what = serde_json::json!({"video": path, "stills": job.status.request.stills, "scene": job.status.request.scene, "reports": job.status.reports, "camera": job.status.camera, "megabytes": job.status.megabytes});
                         if std::fs::write(&report, serde_json::to_vec_pretty(&what).unwrap_or_default()).is_ok() {
                             job.status.report_path = Some(report.to_string_lossy().into_owned());
                         }
@@ -179,37 +186,6 @@ impl VideoJobs {
         let final_path = config.runs_dir.join(format!("video-{id}.mp4"));
         let stderr_path = temp.path().join("ffmpeg.log");
         let ffmpeg_log = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
-        let mut encoder = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-s",
-                &format!("{}x{}", request.width, request.height),
-                "-framerate",
-                &request.fps.to_string(),
-                "-i",
-                "pipe:0",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-            ])
-            .arg(&partial)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(ffmpeg_log))
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("Cannot start ffmpeg; install ffmpeg with libx264: {e}"))?;
         let worker = Command::new(&config.sandbox_binary)
             .arg("--render-video")
             .arg(&request_path)
@@ -224,21 +200,35 @@ impl VideoJobs {
             .spawn();
         let mut worker = match worker {
             Ok(worker) => worker,
-            Err(e) => {
-                let _ = encoder.kill().await;
-                let _ = encoder.wait().await;
-                return Err(format!("Cannot start renderer: {e}"));
-            }
+            Err(e) => return Err(format!("Cannot start renderer: {e}")),
         };
         let mut output = worker.stdout.take().ok_or("Renderer stdout unavailable")?;
-        let mut input = encoder.stdin.take().ok_or("Encoder stdin unavailable")?;
         let stderr = worker.stderr.take().ok_or("Renderer stderr unavailable")?;
         let jobs = self.jobs.clone();
         let id_for_progress = id.to_string();
+        let (planned, plan) = tokio::sync::oneshot::channel::<u64>();
         let progress = tokio::spawn(async move {
+            let mut planned = Some(planned);
             let mut lines = BufReader::new(stderr).lines();
             let mut tail = Vec::new();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    match v.get("event").and_then(|x| x.as_str()) {
+                        Some("video_plan") => {
+                            if let Some(planned) = planned.take() {
+                                let _ = planned.send(v["total"].as_u64().unwrap_or(0));
+                            }
+                            continue;
+                        }
+                        Some("camera_audit") => {
+                            if let (Ok(audit), Some(job)) = (serde_json::from_value::<nades_control::video::CameraAudit>(v.clone()), jobs.lock().await.get_mut(&id_for_progress)) {
+                                job.status.camera = Some(audit);
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
                     && v.get("event").and_then(|x| x.as_str()) == Some("video_progress")
                 {
@@ -263,6 +253,71 @@ impl VideoJobs {
             }
             tail.join("\n")
         });
+        // the clip's length, before its first frame, sets the encoder's bitrate to keep the MP4 under its size
+        let frames = tokio::select! {
+            frames = plan => frames.ok(),
+            _ = cancel.changed() => None,
+            _ = shutdown.changed() => None,
+            _ = tokio::time::sleep(Duration::from_secs(300)) => None,
+        };
+        let Some(frames) = frames.filter(|f| *f > 0) else {
+            let _ = worker.kill().await;
+            let status = worker.wait().await;
+            let log = progress.await.unwrap_or_default();
+            if *cancel.borrow() || *shutdown.borrow() {
+                return Err("cancelled".into());
+            }
+            return Err(format!("Renderer exited {}: {log}", status.map_or_else(|e| e.to_string(), |s| s.to_string())));
+        };
+        let seconds = frames as f64 / f64::from(request.fps);
+        let kbits = bitrate_cap(request.max_megabytes.unwrap_or(nades_control::video::DEFAULT_MAX_MEGABYTES), seconds);
+        let encoder = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                &format!("{}x{}", request.width, request.height),
+                "-framerate",
+                &request.fps.to_string(),
+                "-i",
+                "pipe:0",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-maxrate",
+                &format!("{kbits}k"),
+                "-bufsize",
+                &format!("{}k", kbits * 2),
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&partial)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(ffmpeg_log))
+            .kill_on_drop(true)
+            .spawn();
+        let mut encoder = match encoder {
+            Ok(encoder) => encoder,
+            Err(e) => {
+                let _ = worker.kill().await;
+                let _ = worker.wait().await;
+                return Err(format!("Cannot start ffmpeg; install ffmpeg with libx264: {e}"));
+            }
+        };
+        let mut input = encoder.stdin.take().ok_or("Encoder stdin unavailable")?;
         let interrupted;
         let outcomes = {
             let process = async {
@@ -320,5 +375,21 @@ impl VideoJobs {
             }
             None => Ok(final_path),
         }
+    }
+}
+
+/// The bitrate, kbit/s, that keeps `seconds` of video under `megabytes` (8% left for the container and the encoder's
+/// overshoot), at least 500.
+fn bitrate_cap(megabytes: f64, seconds: f64) -> u64 {
+    ((megabytes * 8000.0 * 0.92 / seconds.max(0.5)) as u64).max(500)
+}
+
+#[cfg(test)]
+mod size {
+    #[test]
+    fn a_lineup_video_keeps_under_its_size() {
+        // 25 MB over a 27.5 s lineup: about 6.7 Mbit/s
+        assert_eq!(super::bitrate_cap(25.0, 27.5), 6690);
+        assert_eq!(super::bitrate_cap(1.0, 60.0), 500);
     }
 }

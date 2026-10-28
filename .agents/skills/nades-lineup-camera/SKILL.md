@@ -32,7 +32,10 @@ Call the MCP tool `lineup_render` once:
 - `speed` (u/s along the view at release) for a jump-throw with forward held: "W jumpthrow" reads as 30, or pass
   `speed: 30` (`--speed 30`). About 3 in 10 pro jump-throws drift so; it moves a long smoke 200 units (S35).
 - Defaults: 1920×1080, 60 fps, length from the airtime and the effect (a smoke about 26 s, rendered in about 35 s).
-  `width: 640, height: 360, fps: 20` is a draft in a few seconds. `seconds` sets the length.
+  `width: 640, height: 360, fps: 20` is a draft in a few seconds. `seconds` sets the length. `max_megabytes` caps
+  the MP4 (default 25, under a phone's 30 MB).
+- The summary says whether the camera stayed clear of the map in every frame after the release (`video.camera`:
+  `clipped` and `hidden` seconds); before the release the eye is the lineup's own.
 - It waits, then returns the MP4 path, five stills beside it (`<name>-aim.png`, `-aim_point`, `-flight`, `-bloom`,
   `-result`), `<name>.json` (scene, stills, what the throw did) and the detonation's time and place.
 - Renders run one at a time per server (`busy` is retryable); several lineups render by calling it again.

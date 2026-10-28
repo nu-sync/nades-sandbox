@@ -55,6 +55,24 @@ pub struct VideoRequest {
     /// Frames to keep as PNGs as well, each at a named moment of a lineup video or seconds into the clip.
     #[serde(default)]
     pub stills: Vec<Still>,
+    /// The most the MP4 may weigh, megabytes (1–500, default 25: under the 30 MB many chat apps take); the encoder's
+    /// bitrate is capped to fit it.
+    #[serde(default)]
+    pub max_megabytes: Option<f64>,
+}
+
+/// The size an MP4 keeps under when none is asked for, megabytes.
+pub const DEFAULT_MAX_MEGABYTES: f64 = 25.0;
+
+/// A lineup video's camera checked frame by frame against what the map draws (S36), from the release on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CameraAudit {
+    /// Frames checked.
+    pub frames: usize,
+    /// Seconds into the video where the near plane cuts into a surface (the camera in a wall).
+    pub clipped: Vec<f64>,
+    /// Seconds into the video where a surface hides the grenade or the effect from the camera.
+    pub hidden: Vec<f64>,
 }
 
 /// A frame of the clip kept as a PNG at `path` (absolute, ending in .png).
@@ -238,6 +256,9 @@ impl VideoRequest {
         if self.samples.is_some_and(|n| !(1..=16).contains(&n)) {
             return Err(invalid("samples is 1–16."));
         }
+        if self.max_megabytes.is_some_and(|m| !m.is_finite() || !(1.0..=500.0).contains(&m)) {
+            return Err(invalid("max_megabytes is 1–500."));
+        }
         for still in &self.stills {
             let path = std::path::Path::new(&still.path);
             if !path.is_absolute() || path.extension().is_none_or(|e| e != "png") || matches!(still.at, StillAt::Seconds(s) if !s.is_finite() || s < 0.0) {
@@ -382,6 +403,7 @@ mod tests {
             arcs: false,
             samples: None,
             stills: Vec::new(),
+            max_megabytes: None,
         }
         .validated()
         .unwrap();

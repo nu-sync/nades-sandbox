@@ -395,6 +395,9 @@ pub struct VideoParams {
     /// Jittered frames each smoke frame averages, 1–16 (default 4).
     #[serde(default)]
     pub samples: Option<u32>,
+    /// The most the MP4 may weigh, megabytes (1–500, default 25).
+    #[serde(default)]
+    pub max_megabytes: Option<f64>,
     /// Frames to keep as PNGs too: {"at": "aim_point" | "aim" | "spot" | "flight" | "detonation" | "bloom" | "result" | seconds, "path": "/abs/x.png"}.
     #[serde(default)]
     pub stills: Vec<nades_control::video::Still>,
@@ -447,6 +450,9 @@ pub struct LineupRenderParams {
     /// Keep stills of the aim, the aim point, the flight, the bloom and the result beside the video (default true).
     #[serde(default = "yes")]
     pub stills: bool,
+    /// The most the MP4 may weigh, megabytes (default 25, so it can be sent to a phone).
+    #[serde(default)]
+    pub max_megabytes: Option<f64>,
     /// Wait for the video and return its files (default true); false returns the job at once for video_status.
     #[serde(default = "yes")]
     pub wait: bool,
@@ -831,6 +837,7 @@ impl NadesMcp {
             arcs: false,
             samples: None,
             stills: stills.clone(),
+            max_megabytes: params.max_megabytes,
         };
         let mut status = match self.backend.video_start(request, Some(output)).await {
             Ok(status) => status,
@@ -848,7 +855,7 @@ impl NadesMcp {
         }
         let summary = match (status.state.as_str(), status.reports.first()) {
             ("completed", Some(r)) => format!(
-                "Rendered {map}'s {:?} lineup ({}) to {}: it goes off {:.2} s after the release at ({:.0}, {:.0}, {:.0}) after {} bounces; {:.1} s of video.",
+                "Rendered {map}'s {:?} lineup ({}) to {}: it goes off {:.2} s after the release at ({:.0}, {:.0}, {:.0}) after {} bounces; {:.1} s of video{}{}.",
                 throw.grenade,
                 {
                     let mut how = if technique.understood.is_empty() { "standing, left click".into() } else { technique.understood.join(", ") };
@@ -863,7 +870,13 @@ impl NadesMcp {
                 r.detonation.at[1],
                 r.detonation.at[2],
                 r.bounces.len(),
-                status.duration_seconds
+                status.duration_seconds,
+                status.megabytes.map_or(String::new(), |mb| format!(", {mb:.1} MB")),
+                status.camera.as_ref().map_or(String::new(), |c| if c.clipped.is_empty() {
+                    format!("; the camera clear of the map in all {} frames after the release", c.frames)
+                } else {
+                    format!("; the camera cuts into the map in {} of {} frames after the release (at {:.2?} s)", c.clipped.len(), c.frames, &c.clipped[..c.clipped.len().min(5)])
+                })
             ),
             ("running", _) => format!("Rendering job {}: poll video_status.", status.job_id),
             (state, _) => format!("The render {state}: {}", status.error.as_deref().unwrap_or("no detail")),
@@ -898,6 +911,7 @@ impl NadesMcp {
             shot: params.shot,
             arcs: params.arcs,
             samples: params.samples,
+            max_megabytes: params.max_megabytes,
             stills: params.stills,
         };
         match self.backend.video_start(request, params.output.map(std::path::PathBuf::from)).await {
