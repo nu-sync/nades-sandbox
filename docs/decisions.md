@@ -1365,3 +1365,66 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Open:** x264 `medium` costs 61 CPU-ms a frame and the GPU's wait is back: a faster preset or VideoToolbox,
   judged by size and look; frames drawn further ahead of the readback. The first frames' variation. A GPU clock that
   reads true on Metal (wgpu's calibration, or a Metal counter sample buffer read directly).
+
+## S39 · The simulated smoke retuned to the game-sized clouds
+
+- **Decision (2026-10-28, S37's Open item):** `smoke::Model::default()` takes a step up at 1.4 (from 1.75) and sends
+  74 bricks at most (from 78); everything else stays. The flood climbs a little more readily and stops sooner, so the
+  cloud `fill_cloud` cuts from the simulated grid is narrower and as tall as the recorded ones. A cloud's spread, its
+  timing (the 0.5 s score moves with the whole) and the fires are unchanged.
+- **How it was found:** `examples/smoke_tune.rs` scores every combination of the values given for the model's fields
+  (whole-smoke IoU per map, with the clouds' median sizes) on smokes `effects_check` does not score (`--skip 120
+  --per-map 60`, 420 smokes, the cs2-throws export). Brick counts 50–92, step up 1.0–2.2, step down 0.5–1.3, volume
+  700–1,800 with the brick cap lifted, spread frames 5–40, emitters 20–60. The best lay on a flat ridge: up 1.3–1.4,
+  74–76 bricks, 0.715–0.717 mean against 0.685 for the old numbers. A step down does not matter (±0.002: the clouds
+  sit on floors), nor the spread's pace (±0.003). Of the ridge, 1.4 and 74 give the sizes nearest the recorded.
+- **Evidence:** the standard measures, the same commands before and after (`effects_check -- <export> --per-map
+  120`; `smoke_size -- <export>`, 40 a map):
+
+  | map | IoU whole smoke, before | after | 0.5 s, before | after |
+  |---|---:|---:|---:|---:|
+  | de_ancient | 0.688 | 0.721 | 0.715 | 0.746 |
+  | de_anubis | 0.679 | 0.720 | 0.719 | 0.756 |
+  | de_cache | 0.655 | 0.679 | 0.682 | 0.710 |
+  | de_dust2 | 0.672 | 0.703 | 0.697 | 0.723 |
+  | de_inferno | 0.685 | 0.705 | 0.722 | 0.746 |
+  | de_mirage | 0.679 | 0.716 | 0.725 | 0.750 |
+  | de_nuke | 0.680 | 0.709 | 0.728 | 0.769 |
+
+  | map | recorded: voxels / 90% within / height | simulated, before | simulated, after |
+  |---|---|---|---|
+  | de_ancient | 927 / 156 / 160 | 1,015 / 177 / 160 | 890 / 156 / 160 |
+  | de_anubis | 846 / 148 / 160 | 1,053 / 177 / 160 | 873 / 153 / 160 |
+  | de_cache | 879 / 150 / 140 | 874 / 153 / 120 | 864 / 150 / 120 |
+  | de_dust2 | 910 / 158 / 160 | 926 / 175 / 160 | 902 / 156 / 160 |
+  | de_inferno | 1,004 / 153 / 160 | 1,074 / 177 / 160 | 946 / 158 / 160 |
+  | de_mirage | 952 / 158 / 140 | 1,015 / 177 / 160 | 922 / 156 / 160 |
+  | de_nuke | 946 / 158 / 140 | 924 / 156 / 120 | 939 / 150 / 140 |
+
+  Every map gains 0.020–0.041 over the whole smoke and 0.024–0.041 at 0.5 s; the solid voxels and the fires are the
+  same numbers. The simulated 90% radius is now 150–158 against the recorded 148–158 (153–177 before). Offscreen
+  renders of a smoke and a molotov on Dust II and Inferno look right: the smokes low domes on the floor, held by
+  the walls.
+- **Costs:** the fixture's seven smokes move both ways (Ancient 0.774 → 0.756, Cache 0.707 → 0.652, Mirage
+  0.831 → 0.732; Anubis 0.631 → 0.746, Dust II 0.722 → 0.782, Inferno 0.635 → 0.696, Nuke 0.739 → 0.766; mean
+  0.720 → 0.733), so `fixtures/effects.json` is rewritten (`effects_check --fixture … --shape
+  de_mirage:1395.38:24.51:-165.81`; only the scores and the shape's count change). The Mirage stairs smoke, in a
+  walled street, climbs the stairs further: 1,226 voxels from 1,151. Recorded Mirage clouds run 644–1,208 voxels
+  from the 10th to the 90th percentile (1,308 at the 95th, two recorded within 450 units of the stairs 1,066 and
+  1,557), so the shape test's bound is 600–1,300, from 1,200. The simulated sizes vary less than the game's: on
+  Mirage 758–1,060 from the 10th to the 90th percentile.
+- **Rejected** (on the tuning smokes, mean IoU against 0.715):
+  - Fewer bricks alone: 70 bricks 0.675, 64 0.645, 50 0.404. A wrong brick costs 64 voxels, and the cut follows the
+    bricks.
+  - The flood stopped by its volume instead of the brick cap (900–1,000 voxels): 0.703.
+  - The cloud itself simulated as `fill_cloud` grows it, a 6-neighbour spread from the emitters to a fixed volume,
+    and the bricks sent around it: 0.706 at 1,000 voxels.
+  - The emitters from a flood with its own step up (0.5–2.5), on a lattice shifted a voxel, or by Chebyshev
+    distance: 0.628–0.713.
+- **What is left:** the emitters. With the recorded emitters in place of ours and the cloud spread from them to a
+  fixed 1,000 voxels, the score is 0.82 (0.78–0.89 per map): where the game puts its 44 emitters decides
+  most of what the cloud covers now that the cloud is the spread from them (S37). Recorded emitters sit in a
+  box about ±4–5 voxels across, in layers at every height 0–4 voxels above the grenade's, off our 2-voxel lattice;
+  ours spread ±6–8 along the floor in two layers. None of the rules above found theirs.
+- **Open:** the game's emitter placement (the largest remaining gap, about 0.1); a per-smoke volume, since recorded
+  clouds vary more in size than ours.

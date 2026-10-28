@@ -79,11 +79,12 @@ fn simulated_fires_hold_their_coverage_of_recorded_flames() {
 #[test]
 fn smokes_the_app_drew_wrong_keep_their_fixed_shape() {
     // the Mirage stairs smoke that drew as a cube (S33), then too big (S37): the cloud stops at its shell, about the
-    // game's own size, not every open voxel of the bricks sent (2,108 voxels before)
+    // game's own size, not every open voxel of the bricks sent (2,108 voxels before); recorded Mirage clouds run to
+    // 1,308 voxels at their 95th percentile (S39)
     for s in fixture()["shapes"].as_array().unwrap() {
         let count = fill_cloud(&smoke::grid(&solid(s), &smoke::Model::default()), det(s)).map_or(0, |c| c.count);
         let map = s["map"].as_str().unwrap();
         assert_eq!(count as u64, s["count"].as_u64().unwrap(), "{map}");
-        assert!((600..=1200).contains(&count), "{map}: {count} voxels");
+        assert!((600..=1300).contains(&count), "{map}: {count} voxels");
     }
 }
