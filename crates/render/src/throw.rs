@@ -658,8 +658,9 @@ impl ThrowLayer {
             if let Some(burst) = stage.burst {
                 let on = burst.on(t) as f32;
                 if on > 0.0 {
-                    let (size, color) = if burst.flash { (260.0, [3.2, 3.2, 3.6]) } else { (300.0, [3.0, 1.2, 0.35]) };
-                    glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, size], color: [color[0], color[1], color[2], on] });
+                    // a pop: bright for a few frames, then gone (the light it lends the map lasts the quarter second)
+                    let (size, color) = if burst.flash { (150.0, [60.0, 60.0, 66.0]) } else { (190.0, [30.0, 12.0, 3.5]) };
+                    glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, size], color: [color[0], color[1], color[2], on.powi(3)] });
                 }
             }
             if let Some(f) = &stage.fire {

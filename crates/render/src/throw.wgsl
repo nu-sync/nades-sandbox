@@ -84,7 +84,7 @@ fn mesh(in: MeshOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, alpha);
 }
 
-// --- glows: a flash's or HE's burst (a THREE.Sprite with a radial gradient, added to the scene) ---
+// --- glows: a flash's or HE's burst, a white-hot pop the bloom spreads ---
 
 struct GlowIn {
     @builtin(vertex_index) corner: u32,
@@ -110,15 +110,19 @@ fn corner_of(k: u32) -> vec2<f32> {
 fn glow_vertex(in: GlowIn) -> GlowOut {
     let q = corner_of(in.corner);
     var view = frame.view * vec4<f32>(in.centre.xyz, 1.0);
-    view = vec4<f32>(view.xy + q * in.centre.w * 0.5, view.zw);
+    // a quarter of its size nearer the camera, so the grenade's own mark and the ground it sits on do not cut its core
+    view = vec4<f32>(view.xy + q * in.centre.w * 0.5, view.z + in.centre.w * 0.25, view.w);
     return GlowOut(frame.projection * view, q, in.color);
 }
 
 @fragment
 fn glow(in: GlowOut) -> @location(0) vec4<f32> {
-    // the canvas's radial gradient: opaque at the centre, 0.45 at 45% out, clear at the edge
+    // CS2's burst: a small white-hot core and a faint halo, added far above white so the bloom spreads it, gone at the
+    // quad's edge (no flat disk however near the camera is)
     let r = length(in.quad);
-    let a = select(mix(0.45, 0.0, (r - 0.45) / 0.55), mix(1.0, 0.45, r / 0.45), r < 0.45) * f32(r < 1.0);
+    let core = exp(-r * r * 28.0);
+    let halo = 0.12 * exp(-r * r * 4.0);
+    let a = (core + halo) * clamp(1.0 - r, 0.0, 1.0);
     return vec4<f32>(in.color.rgb, a * in.color.a);
 }
 
