@@ -1266,3 +1266,35 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Size:** ffmpeg starts once the renderer has said how many frames it will send (`video_plan`); x264 CRF 20 with its
   rate capped to `max_megabytes` (default 25) over the clip's length, 8% kept for the container, at least 500 kbit/s.
   S35's 27.5 s 1080p60 smoke was 32.5 MB at x264's default CRF 23 with no cap; it is 19.8 MB now.
+
+
+## S37 · Smokes the game's size: the cloud stops at its shell
+
+- **Decision (2026-10-27, after the user's "smokes are way too big, make them match the size that cs2 uses"):**
+  `fill_cloud` (crates/scene) no longer fills every open voxel of the bricks the server sent. The server sends a brick
+  when its cloud comes within a voxel of it, so the sent bricks are the cloud's shell, not the cloud. The cloud is
+  now the spread from the emitters, as before, cut after the last frame at which the bricks within a voxel of it
+  (its 26 neighbours) best match the bricks sent (IoU, shell reaching unsent bricks counting against it). It is cut
+  only between frames, so it grows evenly. Recorded logs and simulated grids go through the same function.
+- **Evidence:** 5stack's demo-parser rebuilds the same log the same way (its PR #13, read for its description, not
+  its AGPL code): a flood from the source points, stopped at a per-smoke budget, fitted so the cloud's one-voxel shell
+  matches the bricks, of 600–1,100 voxels. `examples/smoke_size.rs` (40 smokes a map, the cs2-throws export):
+
+  | | voxels (median by map) | 90% within (horizontal) | height |
+  |---|---|---|---|
+  | recorded, before | 1,705–2,147 | 228–237 | 140–200 |
+  | recorded, now | 846–1,004 | 148–158 | 140–160 |
+  | simulated, now | 874–1,074 | 153–177 | 120–160 |
+
+  About 950 voxels of 20 units is 7.6 M cubic units, a ball of 122 units' radius; CS:GO's smoke was 144. The same
+  Inferno smoke rendered before and after fills the alley before and half of it now. The Mirage stairs smoke (the
+  fixture's shape) is 1,151 voxels, from 2,108.
+- **Subtracted:** S33's open-air rounding (`Model::round`, `round_edges`). It took the brick box's corners off a cloud
+  that filled the bricks; a cloud cut at its shell never reaches them, and the rounding removed nothing.
+- **Costs:** the simulated cloud against the recorded one, whole smoke, is now IoU 0.66–0.69 a map (S33's 0.74–0.80
+  was against the bigger rebuild). The sim was tuned to the old clouds; it is a little wider than the recorded ones
+  (90% within 153–177 against 148–158). The cloud is full within about half a second, the bricks the server
+  trickles out later no longer feeding it (show-me-the-nades' D16 rejected filling them for the same reason: they
+  are the cloud's late creep, not its bloom).
+- **Open:** retune the simulation (volume, bricks, step costs) against the new clouds; show-me-the-nades' web
+  rebuild (its D16 `smokeCloud`) fills the bricks the old way and draws its smokes too big as well.

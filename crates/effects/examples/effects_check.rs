@@ -19,7 +19,7 @@
 //! `--fixture` writes the committed fixture (`fixtures/effects.json`) that `tests/fixture.rs` holds the scores with: a
 //! smoke and two fires a map, as derived numbers only (the voxelized geometry around each, the recorded cloud and
 //! flames). Each `--shape` adds a place a simulated smoke went wrong in the app, with the shape its cloud has now (its
-//! voxel count, unrounded and rounded): the Mirage stairs smoke that drew as a cube.
+//! voxel count): the Mirage stairs smoke that drew as a cube.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -113,10 +113,10 @@ fn main() -> Result<()> {
         let [map, x, y, z] = parts[..] else { anyhow::bail!("--shape takes <map>:<x>:<y>:<z>") };
         let det = DVec3::new(x.parse()?, y.parse()?, z.parse()?);
         let solid = voxels::surface(det - DVec3::splat(HALF_SPAN), &collider(map)?, voxels::SAMPLES, 0.0);
-        let count = |round: f64| fill_cloud(&smoke::grid(&solid, &smoke::Model { round, ..smoke::Model::default() }), det).map_or(0, |c| c.count);
+        let count = fill_cloud(&smoke::grid(&solid, &smoke::Model::default()), det).map_or(0, |c| c.count);
         fixture["shapes"].as_array_mut().expect("an array").push(json!({
             "map": map, "det": det.to_array(), "solid": pack(solid.iter().map(|&v| v == 1)),
-            "count": count(smoke::Model::default().round), "square_count": count(0.0),
+            "count": count,
         }));
     }
     if let Some(path) = flag("--fixture") {
