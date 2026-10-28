@@ -108,6 +108,10 @@ mcp: build
 verify-mcp: build
     cargo run --release -p nades-mcp --example verify
 
+# Render four lineup integration cases and open their temporary review folder on macOS.
+e2e: build
+    uv run --locked scripts/lineup_integration.py --open
+
 # --- Develop ---
 
 # Build the release binaries.

@@ -127,6 +127,10 @@ transport. The server starts its sibling sandbox binary directly. `just mcp` is 
 `just verify-mcp` exercises the actual server and app (66 checks). For video, install FFmpeg with `libx264` (and
 `ffprobe` for verification).
 
+`just e2e` renders four fixed lineups through MCP, checks their videos and simulated landings, and opens a temporary
+review folder on macOS. It needs uv, the GPU, FFmpeg, and the Dust 2, Inferno, Cache, Ancient and shared effects packs.
+Review the videos for visual issues; the landing checks are simulator baselines, not in-game accuracy checks.
+
 A request such as "render this smoke on Mirage: `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, jumpthrow" is
 one call:
 
