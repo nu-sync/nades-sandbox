@@ -9,15 +9,26 @@ Start with `app_status {}` and `maps_list {}`. `app_status` reports this server'
 ## Window and camera
 
 1. Call `app_start {"map":"de_cache"}` (or another usable ID); keep the returned `instance_id`. Ready means a presented map frame and a visible window, not that the scene's throws are simulated (`scene.loading`).
-2. To change maps, call `map_open` with the current instance and a discovered map ID. A restart returns a new instance ID; replace the old ID. A same-map call can reuse the process. Invalid preflight should preserve the original view.
+2. To change maps in place, `scene_set` a scene on that map. `map_open` restarts the window on another map and returns a new instance ID; replace the old ID. Invalid preflight should preserve the original view.
 3. `camera_set` takes `{ "instance_id": ID, "camera": { "position": [x,y,z], "pitch_degrees": p, "yaw_degrees": y } }`. Positions are CS2 player feet in Hammer units, Z up; pitch is positive downward. `eye_height_units` defaults to 64 (0 means eye position); `vertical_fov_degrees` defaults to 73.7398. Use `expected_revision` when intervening changes must reject the request.
 4. `frame_capture` returns native PNG image content and structured state. `include_ui: false` returns the scene rectangle; its dimensions may differ from the full viewport. Use the returned frame/revision and, when appropriate, an expected revision; if the scene changes or the window is occluded, read status and handle the explicit error. Inspect the image rather than assuming a successful call proves a useful view.
 5. `app_stop` closes only the owned instance. Disconnect after readiness hands the window to the user; another session cannot control it. Incomplete launches are cleaned on disconnect. Never use `app_stop` on a different session's ID or terminate unrelated windows.
 
-## Headless images and video
+## Headless: what a throw does, images and video
 
-`view_render` needs a map and camera; optional width, height and `render_time_seconds` control the PNG. It is base-map only and does not change a live window. To compare with a live capture, use the exact pose, image dimensions and material time, and first wait for a paused, stable scene with no active effects. See the contract for pixel tolerances.
+The person's words become tool calls. A throw is a grenade and a spot: the CS2 console string they paste (`"console":
+"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0"`) or feet/pitch/yaw, with movement (jumpthrow for a jump-throw),
+click (left unless they say otherwise) and crouch. `throws_simulate {"scene": {"map": "de_mirage", "throws": [...]}}`
+answers where and when each throw lands and goes off (times on the scene's clock: add nothing for a throw starting at
+0; `flight_seconds` is from the release). Compare positions with `math.dist`-style 3D distance and say horizontal and
+vertical apart.
 
-For a grenade video, call `video_render` with a scene (`{"map":…,"throws":[{"grenade","feet","pitch","yaw",…}]}`), start/end seconds on its clock (from 0; each throw begins at its own `start`), and a `view` of one throw (follow by default, orbit, thrower), a fixed `camera`, or `camera_keyframes` (timed poses from clip start; the first at 0, times increasing, yaw the short way; a 360° orbit needs intermediate poses). Poll `video_status` with the returned job ID; present the completed local MP4 or use `video_cancel` and poll to a terminal state. Jobs belong to the creating MCP session; disconnect cancels unfinished jobs. Completed files remain local. To place throws in a window instead, use `throw_add` (or `scene_set`), then `time_set` and `view_set`, and `frame_capture`; `view_render` with a scene renders a moment headlessly and reports where each throw went off.
+`view_render` draws a map from a camera, or a scene's moment from a view of a throw (orbit by default). `video_render`
+renders an MP4 with a `shot`: e.g. follow then a 360° pan, `[{"move": "follow", "throw": 0}, {"move": "orbit",
+"throw": 0, "radius": 380, "height": 320, "seconds": 12, "degrees": 360}]`; in tight places a higher orbit (height
+300+) keeps the camera above the roofs. Pass `output` (absolute .mp4) to write where the person wants. Poll
+`video_status` until `completed`; it carries the path and the throws' reports. `video_cancel` stops a job. Jobs belong
+to the creating MCP session; disconnect cancels unfinished jobs. Look at frames of the result (ffmpeg) before calling it
+done.
 
-Video defaults to 1280×720 at 30 fps, without audio. It requires FFmpeg with libx264 on the server's PATH; even dimensions are capped at 1920×1080, duration at 60 seconds, rate at 60 fps, and total frames at 1,800. Only one headless still/video worker runs per server; `busy` is retryable. The video tool renders a recorded grenade; it does not place a new grenade or control live playback.
+Video defaults to 1280×720 at 30 fps, without audio. It requires FFmpeg with libx264 on the server's PATH; even dimensions are capped at 1920×1080, duration at 60 seconds, rate at 60 fps, and total frames at 1,800. Only one headless still/video worker runs per server; `busy` is retryable. The video tool renders the scene it is given; it does not change a live window.

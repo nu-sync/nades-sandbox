@@ -34,8 +34,10 @@ a persistent headless runtime can later replace the worker without changing the 
 
 ## Agent entry point
 
-The server's initialization instructions and each tool description explain this workflow without requiring a
-repository checkout or a separate manual:
+The person talks to an agent; the agent drives the simulator through these tools (S34). The window shows only the 3D
+view. The server's initialization instructions and each tool description explain the work without a repository
+checkout or a separate manual. The headless path needs no window: `throws_simulate` reports what throws do,
+`view_render` renders a moment, `video_render` an MP4 with a scripted shot. With a window:
 
 1. `app_status {}` describes lifecycle, selected map/scene, camera mode and selection, applied versus presented
    revision, viewport and recent CPU frame samples. `next_actions` identifies tools useful in that state.
@@ -45,8 +47,9 @@ repository checkout or a separate manual:
 5. `view_render` accepts the returned map, camera, image dimensions and `render_time_seconds` to reproduce a base-map
    view headlessly, or a scene (map and throws) at a moment from a view of one of its throws. It does not change the
    visible instance. `diagnostics_get` explains errors or slow operations.
-6. `scene_get`, `scene_set`, `throw_add`, `throw_update` and `throw_remove` read and change the window's scene;
-   `time_set` moves or plays its clock; `view_set` shows a throw's view (thrower, follow, orbit) or the free camera.
+6. `scene_get`, `scene_set`, `throw_add`, `throw_update` and `throw_remove` read and change the window's scene (each
+   returns the scene with what every throw did, once simulated); `time_set` moves or plays its clock; `view_set` shows
+   a throw's view (thrower, follow, orbit) or the free camera; `camera_look_at` points the free camera at a point.
 
 `scene` in the state describes the camera mode (free, thrower, follow, orbit), the number of throws and the selected
 one, the clock and where it ends, playback and the effects showing (flight, smoke, fire, flash, he). `scene.loading`
@@ -54,10 +57,14 @@ is true while a map switches in or throws are still being simulated; `scene.noti
 description implies GPU or FPS measurement from CPU submission samples; actual GPU timing remains explicitly
 unavailable until measured.
 
-A scene is the scene file (`nades-sandbox-scene`, version 1, docs/simulator.md): a map and its throws, each the
-player's feet (Hammer units, Z up), pitch and yaw (degrees, positive pitch down, pitch within ±89), crouch, movement
+A scene is a map and its throws (the scene file, `nades-sandbox-scene` version 1, docs/simulator.md, reads as one): each
+throw a grenade with its spot as CS2's console string (`"console": "setpos x y z; setang pitch yaw 0"`) or the
+player's feet (Hammer units, Z up) with pitch and yaw (degrees, positive pitch down, within ±89), crouch, movement
 (stand, walk, run, jumpthrow, run_jumpthrow), click (left, middle, right), start (0–120 s on the scene's clock) and an
-optional label; at most 64 throws.
+optional label; at most 64 throws. What a throw did (`ThrowReport`): `release` (t, at) and `velocity`, `bounces` (t,
+at, normal), `landing` (the first bounce on a floor), `detonation` (t, at, normal), `flight_seconds` from release to
+detonation, `effect_seconds`, `effect_focus`, `smoke_voxels` or `fire_flames`, and `practice`; times are seconds on the
+scene's clock.
 
 ## Common contract
 
@@ -104,14 +111,16 @@ optional label; at most 64 throws.
 | `frame_capture` | Instance; include_ui defaults true; optional expected revision. Native physical window or cropped scene rectangle. | Decodable PNG from the reported frame/revision; scene-only copy occurs before UI in the same submission, with UI still presented normally; app stays open. Occlusion/readback failure is explicit. |
 | `view_render` | Map with a camera; or a scene on that map with `time_seconds`, a view (orbit by default, follow, thrower) of throw `throw` (the first by default) and arcs on or off, the camera optional. Width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; a scene's render reports each throw's release, bounces, detonation and effect; repeated fixed-input map renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. A scene on another map, without throws and without a camera, or naming a throw it lacks is refused before launching. |
 | `diagnostics_get` | Log limit defaults 50, maximum 200. | Bounded actual startup/frame/error/build/GPU diagnostics; failures remain inspectable; no image blobs, raw assets or fabricated metrics. |
-| `scene_get` | Instance. | The window's scene as a scene file, with the state. |
-| `scene_set` | Instance, scene, optional expected revision. Another map switches the window to it in place. | The scene read back equals the one set; status shows loading until its throws are simulated; an invalid scene does not change the window. |
-| `throw_add` | Instance, throw. Selects it. | The scene read back has it last. Invalid throws are refused without change. |
+| `throws_simulate` | A scene (console strings or feet/pitch/yaw). No window, no GPU. | Each throw's report within a second or two; a console string lacking `setang` (or given beside feet) is refused. |
+| `scene_get` | Instance. | The window's scene, and each simulated throw's report (waiting up to 30 s for the simulations). |
+| `scene_set` | Instance, scene, optional expected revision. Another map switches the window to it in place. | The scene read back equals the one set, with the reports; an invalid scene does not change the window. |
+| `throw_add` | Instance, throw (console string or feet/pitch/yaw). Selects it. | The scene read back has it last, with its report. Invalid throws are refused without change. A view revision that moved only because a simulation finished is retried, not refused. |
 | `throw_update` | Instance, index, throw. | The throw at the index is replaced; an index the scene lacks is refused. |
+| `camera_look_at` | Instance, from, at (Hammer units), optional vertical FOV. | The free camera at `from` looks at `at` (eye height 0); the same point twice is refused. |
 | `throw_remove` | Instance, index. | The throw is gone and later ones move down. |
 | `time_set` | Instance, optional seconds (finite, ≥ 0), optional playing. | The clock reads back as set (clamped to the scene's end); effects showing then are reported. |
 | `view_set` | Instance, view (free, thrower, follow, orbit), optional throw index. | The camera mode reads back; a view of a throw the scene lacks is refused. |
-| `video_render` | A scene, start/end seconds on its clock, a fixed camera, keyframes or a view of one of its throws (follow by default), size and fps. | Returns a job ID immediately; uses one persistent headless renderer and FFmpeg H.264; live state is unchanged. |
+| `video_render` | A scene, start (and end) seconds on its clock; a `shot` (follow, orbit, thrower, hold moves), or a fixed camera, keyframes or a view of one of its throws; size, fps; an optional absolute `output` .mp4 path. | Returns a job ID immediately; uses one headless renderer and FFmpeg H.264; a shot's length comes from the simulation; the finished file is at `output` when given; the status carries the throws' reports; live state is unchanged. |
 | `video_status` | Job ID from this MCP session. | Reports running/completed/failed/cancelled, rendered frame count, errors and final local MP4 path. |
 | `video_cancel` | Job ID. | Stops and reaps the owned renderer and encoder; polling reaches cancelled and no partial MP4 remains. |
 
@@ -123,13 +132,25 @@ offscreen requests rather than comparing unrelated frames.
 
 Call `video_render` with a scene and poll `video_status`. The default is 1280×720 at 30 fps; dimensions are even and at
 most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total at most 1,800 frames. Times are seconds
-on the scene's clock (each throw begins at its own start), from 0. Frames sample from the start at fixed 1/fps intervals
-before the end; the encoded duration is the frame count divided by fps. Omit camera information to follow `view`
-(follow, orbit or thrower) of throw `throw`, provide `camera` for a fixed pose, or supply `camera_keyframes` with
-increasing offsets in seconds from clip start. The first keyframe is at zero; yaw takes the shortest route. For example
-`{"scene":{"map":"de_dust2","throws":[{"grenade":"molotov","feet":[-400,1000,-57.8],"pitch":-12,"yaw":60}]},
-"start_seconds":0,"end_seconds":5,"view":"follow"}`. Poll `video_status` with the returned `job_id`; its completed
-response includes the local path.
+on the scene's clock (each throw begins at its own start), from 0; the scene's clock runs with the clip.
+
+The camera is a `shot`: moves played one after another.
+- `{"move": "follow", "throw": k, "after_seconds": s}`: 80 units behind the grenade until it goes off, then rising over
+  what it left for `s` seconds.
+- `{"move": "orbit", "throw": k, "radius": 350, "height": 120, "seconds": 8, "degrees": 360, "start_degrees": null}`:
+  a horizontal circle round what the throw left (the smoke's middle, the fire, the burst), looking at it, from the
+  camera's bearing (or `start_degrees`, 0 = +x) and easing in over its first second. Where the map hides the point the
+  camera rises (up to 480 units) or tries nearer circles; it keeps 24 units from walls and open sky above it (no rooms
+  the players never enter), and never comes nearer than what the throw left reaches.
+- `{"move": "thrower", "throw": k, "seconds": 2}` and `{"move": "hold", "camera": {…}, "seconds": 2}`.
+
+With a shot the clip may end with it (`end_seconds` left out). Instead of a shot: `camera` (fixed), `camera_keyframes`
+(seconds from clip start, the first at 0, yaw the short way) or `view` of `throw` for the whole clip. `output` (an
+absolute path ending in .mp4 whose folder exists) is where the finished file goes. For example, the smoke a person
+gives as `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, a jump-throw on Mirage, followed and then circled:
+`{"scene": {"map": "de_mirage", "throws": [{"grenade": "smoke", "movement": "jumpthrow", "console": "setpos 1296.00
+32.00 -167.97; setang -28.89 -166.00 0"}]}, "shot": [{"move": "follow", "throw": 0}, {"move": "orbit", "throw": 0,
+"radius": 380, "height": 320, "seconds": 12}], "output": "/abs/mirage-smoke-0002.mp4"}`.
 
 The renderer simulates the scene once, , emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
 runs directory. It shares the single headless-worker limit with `view_render`. A job belongs to its MCP session;

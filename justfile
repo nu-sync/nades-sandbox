@@ -6,7 +6,7 @@ default:
 
 # --- Use ---
 
-# Open the simulator on a packed map; extra flags go to nades-sandbox (e.g. --budget-mb 4000).
+# Open the simulator on a packed map (the 3D view; --ui or F1 for the developer shell); extra flags go to nades-sandbox.
 run $map='de_cache' *args:
     cargo run --release --bin nades-sandbox -- --map "$map" {{ args }}
 
@@ -17,6 +17,17 @@ scene $file *args:
 # Simulate a scene file offscreen: its moment at `time` seconds as a PNG from a view (orbit, follow, thrower) of throw `throw`, and what each throw did as JSON.
 simulate $file $time='4' $output='scene.png' $view='orbit' $throw='0' *args: build
     ./target/release/nades-sandbox --scene "$file" --time "$time" --render "$output" --view "$view" --throw "$throw" {{ args }}
+
+# What each throw of a scene file did (release, bounces, landing, detonation), simulated with no GPU.
+report $file: build
+    ./target/release/nades-sandbox --scene "$file" --report
+
+# A scene's video from a request file (docs/mcp-spec.md: scene, shot or camera, size, fps) to an MP4, with FFmpeg.
+video $request $output='scene.mp4': build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fps="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("fps", 30))' "$request")"
+    ./target/release/nades-sandbox --render-video "$request" | ffmpeg -hide_banner -loglevel error -y -f image2pipe -vcodec png -framerate "$fps" -i pipe:0 -an -c:v libx264 -pix_fmt yuv420p -movflags +faststart "$output"
 
 # Render the bare map from a CS2 console camera (comma-separated position and angles).
 render $output $setpos $setang $map='de_cache':

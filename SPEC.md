@@ -5,7 +5,22 @@ through the map, bounce and go off, instantly ([docs/simulator.md](docs/simulato
 files, packed on this machine. Nothing in it depends on recorded matches; lineup libraries, statistics and demo analysis
 belong to other applications (`show-me-the-nades`, a separate project, keeps its own).
 
-Status: **the simulator** (2026-10-27, S31).
+Status: **MCP-first** (2026-10-27, S34). The person talks to an agent, and the agent drives the simulator through
+`nades-mcp`; the window shows only the 3D view (`--ui` or F1 for the developer shell).
+- Throws are given as CS2's console string (`setpos …; setang …`) or feet/pitch/yaw; every tool that places throws
+  returns what each did (release, bounces, landing, detonation, effect). `throws_simulate` answers that with no window
+  and no GPU in a second or two; `camera_look_at` points the camera; `video_render` plays a scripted shot (follow the
+  flight, a 360° orbit round what it left at a radius and height, the thrower's eye, a fixed camera) to an MP4 at a
+  path of the agent's choosing.
+- Acting as the agent over stdio, the user's first case (mirage-smoke-0002: a jump-throw smoke from `setpos 1296.00
+  32.00 -167.97; setang -28.89 -166.00 0`) went off at (−970, −587, −286) 6.16 s after the release, against the game's
+  (−1164, −630, −166) at 6.73 s: 232 units apart (199 across, 120 down), 0.57 s early (S32's smoke tail). Its video,
+  following the flight and circling the smoke 360°, is 18.3 s of 1280×720 H.264.
+- Flashes and HEs go off as a white-hot pop the bloom spreads; the "flat grey disk" was the arcs' release mark at the
+  thrower's hand, gone.
+
+Before it, **the simulator** (2026-10-27, S31).
+
 - The recorded-data features are gone: the lineup library and its filters, the data adapters (cs2-throws files, the
   demo reader, `check`, `--data`), the replay, the viewpoints and callouts from recorded players, `crates/model`'s data
   modules, the MCP tools about recorded throws and the benches that compared recorded throws with the web view. The
@@ -353,6 +368,7 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | **M2** ✓ | CS2 materials, directional lightmap and baked shadows, light probes, sky and skybox, fog, bloom, tone curve, lookup table, GPU exposure; offscreen renders from the in-game lineup shots' cameras | met: every pool map's render differs from the game's shot no more than the web view's, by blurred \|Δ\| whole and top half (S12; the skill's references read in place); de_cache on screen 172 ms from process start (median of 9); a 4.1 ms frame at 2880×1800 |
 | **M3** ✓ | the database: lineup list and filters; the four views; flight path; smoke from its voxel log; fire, flash, HE; time scrubber; result camera through the collider; practice command; a map selector; each map opening at one of its lineups | met: every view of 84 throws on the seven maps opens from the web view's camera, 0.0000 units apart (`bench/cameras.py`); the effects beside the web view's for 12 throws (`bench/effects.py`); a lineup switch shown in the next frame for 0.5 ms of the window's time; de_cache on screen 172 ms from process start (S16–S18) |
 | **M4** ✓ | every pool map packed and resident; map switch; macOS app bundle; a Windows build | met: a resident map shows in the next frame (42 of 42 picks; that frame 5.3 ms, 5.7 on a first visit, worst 8.9); all seven maps in one session, 6.2 GB of an 8 GiB budget, least recently shown let go beyond it; de_cache on screen 168.8 ms from process start, de_inferno 185.1 (medians of 9); `just bundle` runs from Finder; the workspace checks and lints clean for Windows (S19–S23) |
+| **M7** (built) | MCP-first (S34): the window the 3D view alone; console-string throws; reports of what each throw did in every tool that places them; `throws_simulate`, `camera_look_at`; video shots (follow, orbit, thrower, hold) to an MP4 at a chosen path; the flash's burst | met: acting as the agent over stdio, the user's smoke placed from its console string on de_mirage, its detonation reported against the game's, and its MP4 (follow, then a 360° pan round the smoke) rendered and checked frame by frame; `verify-mcp` 66 checks, all 21 tools positive and negative; tests debug and release; clippy clean |
 | **M6** (built) | the simulator (S31): the recorded-data features removed; the throw tool with a live preview arc; the scene (list, select, re-aim, edit, duplicate, delete, start times); play, pause and scrub with every grenade flying and going off (smoke through `smoke_grid` and `fill_cloud`, fire through `fire_flames` and `build_fire`, flash, HE, decoy); the views (free, thrower, follow, orbit); the practice command; scene files; MCP tools for scenes, throws, time, views, images and videos; `--scene … --render` offscreen | met: offscreen renders of placed throws, each grenade kind, on three maps; the window driven over app control (scene in, each view, captures with the shell); the first frame unchanged (139.3 ms against 139.0, medians of 7 alternated); tests in debug and release and clippy `-D warnings` clean. How right a flight or an effect is, is the physics' (S32) and the effects' (S33) |
 | **M5** (built, removed in M6) | demo replay: pick a demo and a round; play, pause, scrub and speed (¼–4×); every player's position, view, life and side, every grenade in flight and its smoke, fire, flash or HE at its time, several smokes at once; a free camera, a player's eyes, a camera behind them; a lineup view from any throw of the round; players 16 a second (cs2-throws 2.1 `player_tracks`), else from the samples; `--replay` and `--bench-replay` offscreen | met offscreen: 11 moments on four maps rendered at chosen times, every living player (72 of 72) and the dead in view (4 of 4) drawn where the facts put them in their side's colour, each live effect seen at its point unless a wall hides it (`bench/replay_check.py`); a replay frame 3.9–4.5 ms median at 1444×1420 (p95 ≤ 5.2) with up to 8 throws live; the map's frame and every lineup view unchanged (3.45 ms either way; renders identical but GPU noise); no change on the first frame's path. Not yet: driving it in the window (the screen was locked, S30) |
 

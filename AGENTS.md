@@ -2,8 +2,10 @@
 
 ## Intent
 
-nades-sandbox is a generic CS2 map and grenade simulator: pick a map, stand somewhere, aim, choose how to throw, and see
-the grenade fly through the map, bounce and go off — the smoke filling around walls, the fire spreading over the floor,
+nades-sandbox is a generic CS2 map and grenade simulator, driven by an agent through its MCP server (`crates/mcp`, S34):
+the person says what they want, the agent places throws (CS2 console strings work), asks what they did, and renders
+images and videos; the window shows only the 3D view (`--ui` or F1 for the developer shell). Pick a map, stand
+somewhere, aim, choose how to throw, and see the grenade fly through the map, bounce and go off — the smoke filling around walls, the fire spreading over the floor,
 the flash, the HE. Nothing in it depends on recorded matches; lineup libraries, statistics and demo analysis belong to
 other applications ([docs/simulator.md](docs/simulator.md), decision S31). The maps are packed on this machine from
 CS2's files (`nades-pack setup <map>`, `nades-pack <map>`). The one generic port is the scene file (JSON: a map and its
@@ -24,6 +26,7 @@ cargo clippy --release --workspace --all-targets -- -D warnings
 ./target/release/nades-sandbox --exit-after-first-frame    # start-up stages as JSON; run it several times, report the median
 ./target/release/nades-sandbox --scene <file.json>          # the simulator on a scene file's map, with its throws
 ./target/release/nades-sandbox --scene <file.json> --time 4 --view orbit --throw 0 --render out.png   # a moment offscreen; what each throw did as JSON
+./target/release/nades-sandbox --scene <file.json> --report       # what each throw did, no GPU (the MCP's throws_simulate)
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
 ./target/release/nades-pack setup de_vertigo                # fetch a map's files from Steam (DepotDownloader), once
@@ -66,7 +69,9 @@ cargo run --release -p nades-render --example upload_memory -- <packs>/de_cache.
 
 Run the tests and clippy above; `cargo test --release --workspace -- --ignored` adds the checks against the local
 packs, exports and game files. For anything in the simulator (`scene.rs`, `sim.rs`, `offscreen.rs`, the throws' layer),
-render scenes of every grenade kind offscreen on several maps (`--scene … --render`) and look at them, and run
+render scenes of every grenade kind offscreen on several maps (`--scene … --render`) and look at them; for anything in
+the MCP or the shots (`shot.rs`), act as the agent over stdio (JSON-RPC, as `examples/verify.rs` does) and look at
+frames of the video it makes; and run
 `cargo run --release -p nades-mcp --example verify` with the window on screen. For anything on the start-up path, run
 `python3 bench/startup.py` and compare its medians with the targets in SPEC.md §9 (with `NADES_SANDBOX_STATE` on a
 scratch file, so the runs do not move the user's remembered view). For anything that changes how maps are kept, loaded

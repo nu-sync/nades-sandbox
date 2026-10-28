@@ -1145,3 +1145,37 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
     - A dome limit on the flood cost, a step up costing 2.2–3.5: −0.005 to −0.2 for little visible change.
   - **Checks:** the stairs site is in the fixture (`shapes`); `tests/fixture.rs` holds its counts, rounded under square.
     A unit test checks that an open floor's cloud loses only rim voxels and keeps its top's middle.
+
+## S34 · MCP-first: the person talks to an agent, the window is the 3D view
+
+- **Decision (2026-10-27, the user's):** the UI is not the product. The window shows only the 3D view (`--ui` or F1
+  shows the developer shell); map choice, throws, views, cameras, time and renders go through `nades-mcp`, and the tool
+  descriptions and the server's instructions are written so that an agent can do a person's request from their words.
+- **Throws as people give them:** `nades_control::scene::ThrowInput` takes a throw's spot as CS2's console string
+  (`setpos x y z; setang pitch yaw roll`, either order, `_exact` forms, roll ignored; `parse_console`) or feet/pitch/yaw,
+  never both; `SceneInput` is a map and such throws (a scene file reads as one). Every tool that places throws
+  (`scene_set`, `throw_add`, `throw_update`) waits for the simulation and returns what each did (`ThrowReport`:
+  release and velocity, bounces with normals, the first landing on a floor, the detonation, the flight's length, the
+  effect's length and focus, the practice command). `throws_simulate` gets the same without a window or a GPU
+  (`nades-sandbox --scene f --report`: the collider and the physics only, about 30 ms a smoke).
+- **Shots:** a video's camera is a list of moves (`nades_control::video::ShotMove`, played by `crates/sandbox/src/shot.rs`),
+  the scene's clock running with them: follow (until the grenade goes off, then rising over what it left), orbit (a
+  horizontal circle of radius and height round the effect's focus, from the camera's bearing, easing in over a second,
+  smoothed frame to frame), thrower, hold. The orbit's camera must see the focus, keep 24 units from walls and have open
+  sky for 300 units above it: the map's physics leaves out the walls of rooms players never enter, so a line of sight
+  alone put the camera inside them, looking out of a window. Failing that it rises up to 480 units, then tries circles
+  down to 45% of the radius, never nearer than what the throw left reaches plus 60.
+- **The flash bug:** the burst was an additive sprite 260 units across at a flat 3.2, nearly opaque over its inner half:
+  close up a flat disk. It is now a white-hot core (exp(−28 r²)) and a faint halo, 60× white for a flash, fading as the
+  cube of its quarter second, drawn a quarter of its size nearer the camera. The user's "big flat grey opaque disk" was
+  mostly something else: the preview arc's release mark, a 4-unit sphere 16 units in front of the eye, drawn whenever
+  the free camera was up (and every arc's, in the thrower's view). The preview is the shell's now, and arcs have no
+  release mark.
+- **Revisions:** a throw edit reads the scene and writes it back with the view's revision; a simulation finishing
+  moves that revision, so an edit whose scene is unchanged is retried (up to five times) rather than refused.
+- **Evidence:** acting as the agent over stdio against the real server, mirage-smoke-0002 (`setpos 1296.00 32.00
+  -167.97; setang -28.89 -166.00 0`, jump-throw, left) went off at (−970, −587, −286) 6.16 s after release against the
+  game's (−1164, −630, −166) at 6.73 s: 232 units (199 across, 120 down), 0.57 s early. The simulated smoke lands first
+  at (−1080, −560, −262) 4.56 s in, then rolls down the steps under Sniper's Nest; the game's stopped on it. This is
+  S32's smoke tail (p90 224 units). Its MP4 (follow, then 12 s round the smoke at 380/320) is 548 frames, 18.3 s of
+  1280×720 H.264. `verify-mcp`: 66 checks, all 21 tools with positive and negative cases.
