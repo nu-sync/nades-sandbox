@@ -482,7 +482,8 @@ impl Sandbox {
         if self.bench || self.free {
             return None;
         }
-        self.scene.camera(self.collider.get().as_deref()).or(self.remembered)
+        let colliders = self.collider.get();
+        self.scene.camera(colliders.as_deref().map(|c| &c.sight)).or(self.remembered)
     }
 
     /// Readies what the frame from `eye` into targets of `size` draws of the scene; None when the picture is already
@@ -564,13 +565,14 @@ impl Sandbox {
 
     /// Stands the camera on the point of the map under the cursor (its floor, when it is a wall), looking as it looked.
     fn stand_at_cursor(&mut self) {
-        let (Some(cursor), Some(camera), Some(collider)) = (self.cursor, self.remembered, self.collider.get()) else {
+        let (Some(cursor), Some(camera), Some(colliders)) = (self.cursor, self.remembered, self.collider.get()) else {
             self.scene.notice = Some("The map's collider is not built yet.".into());
             return;
         };
         let r = self.rect;
         let at = ((f64::from(cursor.x - r.min.x) / f64::from(r.width())), (f64::from(cursor.y - r.min.y) / f64::from(r.height())));
-        let Some(hit) = sim::pick(&collider, &camera, at, f64::from(r.width() / r.height())) else { return };
+        let collider = &colliders.sight;
+        let Some(hit) = sim::pick(collider, &camera, at, f64::from(r.width() / r.height())) else { return };
         let floor = collider.floor_below(hit + DVec3::Z * 8.0, 400.0).unwrap_or(hit.z);
         let height = if self.scene.tool.crouch { nades_scene::camera::EYE_CROUCHED } else { nades_scene::camera::EYE_STANDING };
         let eye = DVec3::new(hit.x, hit.y, floor + height);

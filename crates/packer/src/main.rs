@@ -251,6 +251,9 @@ fn print(inputs: &Inputs, r: &Report, seconds: f64) {
         ),
         Err(why) => println!("  collider: none ({why}): the app has no line of sight on this map"),
     }
+    if let Ok(c) = &r.grenade_collider {
+        println!("  grenade collider: {} triangles, {} vertices ({} exported, {} that grenades pass dropped)", c.triangles.len(), c.vertices.len(), c.exported, c.dropped);
+    }
     let sections: Vec<String> = r.sections.iter().map(|(k, n)| format!("{k:?} {}", if *n < 1_000_000 { format!("{:.1} KB", *n as f64 / 1e3) } else { mb(*n) })).collect();
     println!("  sections: {}", sections.join(", "));
     for fallback in &r.fallbacks {

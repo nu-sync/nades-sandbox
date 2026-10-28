@@ -192,6 +192,9 @@ pub struct Model {
     /// A bounce off a floor (normal z above `floor_z`) slower than this stops the grenade dead.
     pub stop_speed: f64,
     pub floor_z: f64,
+    /// Off a floor (normal z above `floor_z`), a grenade leaves along the normal at most this fast: a faster bounce is
+    /// scaled down whole, its slide with it (S40: the game's floor bounces from above 500 u/s straight down).
+    pub floor_bounce_max: f64,
     /// The grenade's box reaches this far each way from its origin.
     pub radius: f64,
     /// A molotov or incendiary bursts on a surface whose normal z is at least this (`weapon_molotov_maxdetonateslope`).
@@ -215,6 +218,7 @@ impl Model {
         elasticity: 0.45,
         stop_speed: 20.0,
         floor_z: 0.7,
+        floor_bounce_max: 225.0,
         radius: 2.0,
         molotov_floor_z: 0.866_025_403_784_438_6,
         flash_ticks: 105,
@@ -277,6 +281,10 @@ pub fn fly_with(release: &Release, grenade: Grenade, collider: Option<&Collider>
                 p = hit.pos;
                 // PhysicsClipVelocity with overbounce 2 (a reflection), then the elasticity
                 v = (v - 2.0 * v.dot(hit.normal) * hit.normal) * model.elasticity;
+                let away = v.dot(hit.normal);
+                if hit.normal.z > model.floor_z && away > model.floor_bounce_max {
+                    v *= model.floor_bounce_max / away;
+                }
                 if hit.normal.z > model.floor_z && v.length() < model.stop_speed {
                     v = DVec3::ZERO;
                     resting = true;
@@ -506,6 +514,30 @@ mod tests {
         assert!((v.x - 180.0).abs() < 1e-6, "{v}");
         // the bounce tick ends past the bounce point: it moved on with what was left of the tick
         assert!(path.points[k].1.z > b.pos.z && path.points[k].1.x > b.pos.x);
+    }
+
+    #[test]
+    fn a_fast_floor_bounce_leaves_at_most_225_up_scaled_whole() {
+        let floor = floor_at(0.0);
+        let weightless = Model { gravity: 0.0, ..Model::CS2 };
+        let after = |v0: DVec3| {
+            let r = Release { t: 0.0, p0: DVec3::new(0.0, 0.0, 20.0), v0 };
+            let path = fly_with(&r, Grenade::Flash, Some(&floor), &weightless);
+            let k = (path.bounces[0].t * TICK_RATE).round() as usize;
+            (path.points[k + 2].1 - path.points[k + 1].1) * TICK_RATE
+        };
+        // 0.45 of 400 straight down is 180, under the cap: the plain reflection
+        let slow = after(DVec3::new(300.0, 0.0, -400.0));
+        assert!((slow - DVec3::new(135.0, 0.0, 180.0)).length() < 1e-6, "{slow}");
+        // 0.45 of 800 would be 360 up: scaled to 225, the slide with it
+        let fast = after(DVec3::new(600.0, 0.0, -800.0));
+        assert!((fast - DVec3::new(270.0, 0.0, 360.0) * (225.0 / 360.0)).length() < 1e-6, "{fast}");
+        // a wall keeps 0.45 however fast
+        let wall = Collider::new(quad(DVec3::new(50.0, 0.0, 0.0), DVec3::Y * 1000.0, DVec3::Z * 1000.0).to_vec());
+        let r = Release { t: 0.0, p0: DVec3::ZERO, v0: DVec3::new(1000.0, 0.0, 0.0) };
+        let path = fly_with(&r, Grenade::Flash, Some(&wall), &weightless);
+        let k = (path.bounces[0].t * TICK_RATE).round() as usize;
+        assert!(((path.points[k + 2].1 - path.points[k + 1].1).x * TICK_RATE + 450.0).abs() < 1e-6);
     }
 
     #[test]

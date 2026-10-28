@@ -1,7 +1,7 @@
-//! The scene description, format 2: what a pack's Scene section holds, and how it points into the Geometry and
-//! Textures sections. It is the interface every renderer of a pack reads, so each field says its units, its layout
-//! and what its indices refer to. `nades-pack <map>` (crates/packer) writes it; [`crate::Pack::scene`] reads and
-//! validates it.
+//! The scene description, format 3 (laid out as format 2 was): what a pack's Scene section holds, and how it points
+//! into the Geometry and Textures sections. It is the interface every renderer of a pack reads, so each field says its
+//! units, its layout and what its indices refer to. `nades-pack <map>` (crates/packer) writes it;
+//! [`crate::Pack::scene`] reads and validates it.
 //!
 //! # Frame and units
 //!
@@ -131,7 +131,7 @@
 //! # Changing it
 //!
 //! The Scene section is postcard, which is not self-describing: any change to a type here changes the layout, so it
-//! bumps [`crate::VERSION`] (and `the_scene_layout_is_format_2` in the tests says so).
+//! bumps [`crate::VERSION`] (and `the_scene_layout_is_format_3` in the tests says so).
 
 use std::ops::Range;
 
@@ -1353,12 +1353,12 @@ mod tests {
     /// The Scene section is postcard: a change to any of its types changes the bytes a pack holds. This hash of the
     /// sample scene's bytes moves with them, and when it does, `VERSION` must move too, or old packs would be misread.
     #[test]
-    fn the_scene_layout_is_format_2() {
+    fn the_scene_layout_is_format_3() {
         let bytes = sample().0.to_bytes();
         let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
         assert_eq!(
             (crate::VERSION, bytes.len(), hash),
-            (2, 1543, 0x58bd_b9d2_4189_8707),
+            (3, 1543, 0x58bd_b9d2_4189_8707),
             "the Scene section's layout changed: bump nades_pack::VERSION, then update the length and hash here"
         );
     }

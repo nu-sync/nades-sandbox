@@ -16,8 +16,8 @@
 //!   Viewer's CLI can tell it, else the web view's rule.
 //! - **The sky:** the visible env_sky's cube map (BC6H) from `pak01`; **the sun** from the export's light;
 //!   **the post-processing** from `<map>.post.json` and `<map>.lut.bin` ([`post`]).
-//! - **The collider** ([`physics`]): the map's own physics from its VPK, through Source 2 Viewer's CLI, reduced as
-//!   awpy reduces it, in the Collider section.
+//! - **The colliders** ([`physics`]): the map's own physics from its VPK, through Source 2 Viewer's CLI, reduced as
+//!   awpy reduces it, in the Collider section, and as a grenade meets it, in the GrenadeCollider section (S40).
 
 pub mod effects;
 pub mod entities;
@@ -157,6 +157,8 @@ pub struct Report {
     pub sections: Vec<(SectionKind, u64)>,
     /// The collider's triangles and the export's, and why there is none.
     pub collider: Result<physics::Physics, String>,
+    /// The grenade's collider (S40), and why there is none.
+    pub grenade_collider: Result<physics::Physics, String>,
     pub file_size: u64,
     /// Stage name and milliseconds, in order.
     pub stages: Vec<(&'static str, f64)>,
@@ -694,12 +696,16 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     scene.validate(geometry.bytes.len() as u64, textures_section.len() as u64).map_err(|e| anyhow::anyhow!("the scene the packer made is invalid: {e}"))?;
     stage("scene and its checks");
 
-    let collider = match inputs.cli() {
-        Some(cli) => physics::of_map(cli, &inputs.vpk(), &inputs.map, &std::env::temp_dir()).map_err(|e| format!("{e:#}")),
-        None => Err(no_cli(inputs)),
+    let (collider, grenade_collider) = match inputs.cli() {
+        Some(cli) => match physics::both_of_map(cli, &inputs.vpk(), &inputs.map, &std::env::temp_dir()) {
+            Ok((sight, grenade)) => (Ok(sight), Ok(grenade)),
+            Err(e) => (Err(format!("{e:#}")), Err(format!("{e:#}"))),
+        },
+        None => (Err(no_cli(inputs)), Err(no_cli(inputs))),
     };
     let collider_bytes = collider.as_ref().ok().map(physics::Physics::to_awmh);
-    stage("the collider from the map's physics");
+    let grenade_bytes = grenade_collider.as_ref().ok().map(physics::Physics::to_awmh);
+    stage("the colliders from the map's physics");
 
     let source = Source { map: inputs.map.clone(), game_build: game_build(&inputs.game), export_hash: format!("{export_hash:016x}") };
     let scene_bytes = scene.to_bytes();
@@ -710,12 +716,16 @@ pub fn build(inputs: &Inputs) -> Result<Report> {
     if let Some(bytes) = &collider_bytes {
         sections.push((SectionKind::Collider, bytes));
     }
+    if let Some(bytes) = &grenade_bytes {
+        sections.push((SectionKind::GrenadeCollider, bytes));
+    }
     nades_pack::write(&inputs.out, source.clone(), &sections).with_context(|| format!("writing {}", inputs.out.display()))?;
     stage("write the pack");
     let file_size = std::fs::metadata(&inputs.out)?.len();
     Ok(Report {
         sections: sections.iter().map(|(k, b)| (*k, b.len() as u64)).collect(),
         collider,
+        grenade_collider,
         scene,
         source,
         file_size,

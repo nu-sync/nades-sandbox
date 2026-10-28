@@ -23,7 +23,7 @@ struct Recorded {
     det: [f64; 3],
     /// It went off before touching anything.
     free: bool,
-    /// The simulation's landing error on the map's collider when the fixture was written.
+    /// The simulation's landing error on the map's grenade collider when the fixture was written.
     landing_error: f64,
     /// The networked flight until it first turned, every 8th tick: [step, x, y, z].
     flight: Vec<[f64; 4]>,
@@ -108,7 +108,7 @@ fn landings_on_the_maps_colliders_stay_within_the_measured_errors() {
             eprintln!("skipped {map}: no pack at {}", path.display());
             continue;
         };
-        let collider = Collider::from_awmh(pack.collider().expect("a Collider section")).expect("a triangle mesh");
+        let collider = Collider::from_awmh(pack.grenade_collider().expect("a GrenadeCollider section")).expect("a triangle mesh");
         for r in throws.iter().filter(|r| r.map == map) {
             let path = fly(&recorded_release(r), r.grenade, Some(&collider));
             let error = (path.detonation.pos - DVec3::from(r.det)).length();

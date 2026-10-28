@@ -15,6 +15,11 @@
 //!
 //! Positions pass through unchanged: the CLI writes the physics in Hammer units, z up, the demos' frame.
 //!
+//! The grenade's collider ([`grenade_from_glb`], the GrenadeCollider section) is the same export reduced for the
+//! flight instead (S40): grenade clips are kept (they stop grenades), the rest of [`DROP`] is left out (players' clips,
+//! the sky, glass, windows and `passbullets`, which grenades pass), and the vertices are welded but not clustered, since
+//! 8-unit clustering moves edges, steps and slopes by several units, which a bounce multiplies.
+//!
 //! The Collider section is the triangles as awpy's AWMH file holds them: "AWMH", version 1, the vertex and triangle
 //! counts, the vertices (3 × f32) and the triangles (3 × u32), so the app reads both with one reader.
 
@@ -28,6 +33,8 @@ use crate::gltf;
 
 /// A material is a non-occluder when its name holds one of these (awpy-data's `DROP_SUBSTRINGS`).
 pub const DROP: [&str; 6] = ["playerclip", "grenadeclip", "sky", "passbullets", "glass", "window"];
+/// What a grenade passes through: [`DROP`] without the grenade clips.
+pub const GRENADE_DROP: [&str; 5] = ["playerclip", "sky", "passbullets", "glass", "window"];
 /// awpy-data's vertex-clustering cell, Hammer units.
 pub const GRID: f32 = 8.0;
 
@@ -67,6 +74,17 @@ fn physics_glb(dir: &Path) -> Result<PathBuf> {
 /// Exports the map's world physics with `cli` (into a scratch folder under `scratch`, removed afterwards) and reduces
 /// it.
 pub fn of_map(cli: &Path, vpk: &Path, map: &str, scratch: &Path) -> Result<Physics> {
+    from_glb(&glb_of_map(cli, vpk, map, scratch)?)
+}
+
+/// The map's two colliders from one export: line of sight ([`from_glb`]) and the grenade's ([`grenade_from_glb`]).
+pub fn both_of_map(cli: &Path, vpk: &Path, map: &str, scratch: &Path) -> Result<(Physics, Physics)> {
+    let glb = glb_of_map(cli, vpk, map, scratch)?;
+    Ok((from_glb(&glb)?, grenade_from_glb(&glb)?))
+}
+
+/// The CLI's export of the map's world physics (step 1), as the glb's bytes.
+pub fn glb_of_map(cli: &Path, vpk: &Path, map: &str, scratch: &Path) -> Result<Vec<u8>> {
     let entry = format!("maps/{map}/world_physics.vmdl_c");
     let dir = scratch.join(format!(".nades-pack-physics-{map}-{}", std::process::id()));
     if dir.exists() {
@@ -86,8 +104,7 @@ pub fn of_map(cli: &Path, vpk: &Path, map: &str, scratch: &Path) -> Result<Physi
             .with_context(|| format!("running {}", cli.display()))?;
         ensure!(output.status.success(), "{} exited {} exporting {entry}: {}", cli.display(), output.status, String::from_utf8_lossy(&output.stderr).trim());
         let glb = physics_glb(&dir).with_context(|| format!("{entry} in {}", vpk.display()))?;
-        let bytes = std::fs::read(&glb).with_context(|| format!("reading {}", glb.display()))?;
-        from_glb(&bytes).with_context(|| format!("{}", glb.display()))
+        std::fs::read(&glb).with_context(|| format!("reading {}", glb.display()))
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -105,6 +122,29 @@ pub fn is_occluder(material: Option<&str>) -> bool {
 
 /// Steps 2–4 on the CLI's glb.
 pub fn from_glb(bytes: &[u8]) -> Result<Physics> {
+    reduce(bytes, &|name| is_occluder(name), Some(GRID))
+}
+
+/// A grenade bounces off a primitive unless its material (else mesh) name names something it passes, [`GRENADE_DROP`];
+/// a grenade clip always stops it.
+pub fn stops_grenades(material: Option<&str>) -> bool {
+    match material {
+        None | Some("") => true,
+        Some(name) => {
+            let name = name.to_ascii_lowercase();
+            name.contains("grenadeclip") || !GRENADE_DROP.iter().any(|d| name.contains(d))
+        }
+    }
+}
+
+/// The grenade's collider from the CLI's glb: [`stops_grenades`]'s primitives, welded, not clustered.
+pub fn grenade_from_glb(bytes: &[u8]) -> Result<Physics> {
+    reduce(bytes, &|name| stops_grenades(name), None)
+}
+
+/// Steps 2–4 under other rules: `keep` says which primitives stay (by material, else mesh, name), `grid` is the
+/// clustering cell (None welds only).
+pub fn reduce(bytes: &[u8], keep: &dyn Fn(Option<&str>) -> bool, grid: Option<f32>) -> Result<Physics> {
     let parts = gltf::split(bytes)?;
     let doc = gltf::parse(parts.json)?;
     let buffers = gltf::buffers(&doc, parts.bin)?;
@@ -124,7 +164,7 @@ pub fn from_glb(bytes: &[u8]) -> Result<Physics> {
             };
             out.exported += indices.len() / 3;
             let name = primitive.material.and_then(|i| doc.materials.get(i)).and_then(|mat| mat.name.as_deref()).or(mesh.name.as_deref());
-            if !is_occluder(name) {
+            if !keep(name) {
                 out.dropped += indices.len() / 3;
                 continue;
             }
@@ -143,7 +183,13 @@ pub fn from_glb(bytes: &[u8]) -> Result<Physics> {
         }
     }
     out.welded = corners.len() / 3;
-    decimate(&mut out, &positions, &corners, GRID);
+    match grid {
+        Some(grid) => decimate(&mut out, &positions, &corners, grid),
+        None => {
+            out.vertices = positions;
+            out.triangles = corners.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
+        }
+    }
     Ok(out)
 }
 

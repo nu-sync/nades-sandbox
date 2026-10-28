@@ -17,6 +17,8 @@ use nades_render::smoke::SmokeFrame;
 use nades_render::throw::Arc as ArcMesh;
 use nades_scene::camera::{ShotCamera, View as CsView, angles_to, vertical_fov};
 use nades_scene::collider::Collider;
+
+use crate::collider::Colliders;
 use nades_scene::smoke::{fill_cloud, smoke_volume, voxel_light};
 use nades_scene::stage::{Simulated, Stage, build_stage, nade_color};
 
@@ -79,9 +81,9 @@ pub fn thrower_eye(t: &SceneThrow) -> CsView {
 }
 
 /// The flight alone, for the throw tool's preview arc: where it flies and where it goes off.
-pub fn preview(t: &SceneThrow, collider: Option<&Collider>) -> nades_physics::Path {
+pub fn preview(t: &SceneThrow, colliders: Option<&Colliders>) -> nades_physics::Path {
     let throw = physics_throw(t);
-    nades_physics::fly(&nades_physics::release(&throw), throw.grenade, collider)
+    nades_physics::fly(&nades_physics::release(&throw), throw.grenade, colliders.map(|c| &c.flight))
 }
 
 /// One throw simulated: its flight, its stage, its smoke's lit volume, the result shot over what it left.
@@ -153,14 +155,16 @@ impl Built {
     }
 }
 
-/// Simulates `t` against the map's `collider` (without one the grenade flies through walls and leaves no smoke or
-/// fire), its smoke lit from `toward_sun`.
-pub fn simulate(t: &SceneThrow, collider: Option<&Collider>, toward_sun: DVec3) -> Built {
+/// Simulates `t` against the map's `colliders` (without them the grenade flies through walls and leaves no smoke or
+/// fire): the flight against the grenade's, the smoke, the fire and the cameras against line of sight; its smoke lit
+/// from `toward_sun`.
+pub fn simulate(t: &SceneThrow, colliders: Option<&Colliders>, toward_sun: DVec3) -> Built {
     use std::hash::{Hash, Hasher};
     let started = Instant::now();
     let throw = physics_throw(t);
     let release = nades_physics::release(&throw);
-    let path = nades_physics::fly(&release, throw.grenade, collider);
+    let path = nades_physics::fly(&release, throw.grenade, colliders.map(|c| &c.flight));
+    let collider = colliders.map(|c| &c.sight);
     let det = path.detonation;
     let cloud = match (t.grenade, collider) {
         (Grenade::Smoke, Some(c)) => fill_cloud(&nades_effects::smoke_grid(det.pos, c), det.pos),

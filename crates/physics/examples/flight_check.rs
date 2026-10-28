@@ -3,7 +3,11 @@
 //! For each map with a pack and each grenade it reports the landing error of the flight simulated from the recorded
 //! release (median, p90, share within 32 units), the detonation time error, and why the worst flights part from the
 //! game's (see `Why`); then the release error from the recorded setup per movement. `--fixture` writes the committed
-//! test fixture (crates/physics/tests/fixture.json); `--set key=value` changes one rule of the model, for sweeps.
+//! test fixture (crates/physics/tests/fixture.json); `--set key=value` changes one rule of the model, for sweeps. The
+//! flights run against each pack's GrenadeCollider, or `--colliders <dir> --variant <name>`'s `<dir>/<map>.<name>.awmh`
+//! (nades-packer's grenade_collider example). Diagnostics instead of the table: `--show <key>` (one flight beside the
+//! game's), `--first-bounce`, `--phases` (restarted from the game's state after its k-th bounce, S40),
+//! `--floor-bounces` and `--surfaces <dir>` (the speed bounces keep, by speed and material, S40), `--rest-gap`.
 //!
 //! cargo run --release -p nades-physics --example flight_check -- --throws <cs2-throws file> [--per 400] [--maps
 //! de_cache,de_dust2] [--set elasticity=0.45] [--fixture crates/physics/tests/fixture.json]
@@ -329,6 +333,20 @@ fn fixture_entry(r: &Recorded, o: &Outcome, model: &Model) -> serde_json::Value 
     })
 }
 
+/// The map's collider: the pack's GrenadeCollider section, else another one (`--colliders <dir> --variant <name>`).
+fn load_collider(packs: &std::path::Path, map: &str, other: Option<&(PathBuf, String)>) -> Collider {
+    match other {
+        Some((dir, variant)) => {
+            let path = dir.join(format!("{map}.{variant}.awmh"));
+            Collider::from_awmh(&std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))).expect("a triangle mesh")
+        }
+        None => {
+            let pack = nades_pack::Pack::open(&packs.join(format!("{map}.pack"))).expect("the pack opens");
+            Collider::from_awmh(pack.grenade_collider().expect("a GrenadeCollider section")).expect("a triangle mesh")
+        }
+    }
+}
+
 fn quantile(sorted: &[f64], q: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
@@ -350,6 +368,8 @@ fn main() {
             .map(|m| m.to_string())
             .collect(),
     };
+    // another collider for each map: `<dir>/<map>.<variant>.awmh` (nades-packer's grenade_collider example)
+    let colliders = flag("--colliders").map(|dir| (PathBuf::from(dir), flag("--variant").unwrap_or_else(|| "grenade".into())));
     let tight: f64 = flag("--tight").map_or(32.0, |s| s.parse().expect("--tight <units>"));
     let mut model = Model::CS2;
     for (i, a) in args.iter().enumerate() {
@@ -363,6 +383,7 @@ fn main() {
             "elasticity" => model.elasticity = f,
             "stop_speed" => model.stop_speed = f,
             "floor_z" => model.floor_z = f,
+            "floor_bounce_max" => model.floor_bounce_max = f,
             "radius" => model.radius = f,
             "molotov_floor_z" => model.molotov_floor_z = f,
             "flash_ticks" => model.flash_ticks = f as u32,
@@ -380,8 +401,7 @@ fn main() {
     if let Some(key) = flag("--show") {
         let key: i64 = key.parse().expect("--show <throw key>");
         let r = recorded.iter().find(|r| r.key == key).expect("that throw is in the sample");
-        let pack = nades_pack::Pack::open(&packs.join(format!("{}.pack", r.map))).expect("the pack opens");
-        let collider = Collider::from_awmh(pack.collider().expect("a Collider section")).expect("a triangle mesh");
+        let collider = load_collider(&packs, &r.map, colliders.as_ref());
         let path = fly_with(&Release { t: 0.0, p0: r.start, v0: r.vel }, r.grenade, Some(&collider), &model);
         for (s, p) in &r.flight {
             let q = path.points.get(*s as usize).map_or(DVec3::NAN, |q| q.1);
@@ -402,14 +422,25 @@ fn main() {
                 (q - *p).length()
             );
         }
+        for b in &path.bounces {
+            println!(
+                "sim bounce step {:.0} at {:.2} {:.2} {:.2} n {:.3} {:.3} {:.3}",
+                b.t * TICK_RATE,
+                b.pos.x,
+                b.pos.y,
+                b.pos.z,
+                b.normal.x,
+                b.normal.y,
+                b.normal.z
+            );
+        }
         println!("det game step {} {:?}  sim {:.0} {:?}", r.det_step, r.det, path.detonation.t * TICK_RATE, path.detonation.pos);
         return;
     }
     if args.iter().any(|a| a == "--rest-gap") {
         // how far above the collider's floor the game's smokes and decoys lie when they go off
         for map in &maps {
-            let pack = nades_pack::Pack::open(&packs.join(format!("{map}.pack"))).expect("the pack opens");
-            let collider = Collider::from_awmh(pack.collider().expect("a Collider section")).expect("a triangle mesh");
+            let collider = load_collider(&packs, map, colliders.as_ref());
             let mut gaps: Vec<f64> = recorded
                 .iter()
                 .filter(|r| &r.map == map && matches!(r.grenade, Grenade::Smoke | Grenade::Decoy))
@@ -428,12 +459,177 @@ fn main() {
         }
         return;
     }
+    if args.iter().any(|a| a == "--floor-bounces") || flag("--surfaces").is_some() {
+        // every recorded bounce cleanly between two networked points: the speed it kept, by how fast it met the surface
+        // along its normal (floors, walls), and with `--surfaces <dir>` by the material it met (the nearest of
+        // `<dir>/<map>.surfaces/<material>.awmh`, nades-packer's grenade_collider example, along the incoming flight)
+        let surfaces_dir = flag("--surfaces");
+        let mut by_speed: BTreeMap<(bool, i64), Vec<(f64, f64)>> = BTreeMap::new();
+        let mut by_surface: BTreeMap<(String, bool), Vec<f64>> = BTreeMap::new();
+        for map in &maps {
+            let surfaces: Vec<(String, Collider)> = match &surfaces_dir {
+                Some(dir) => std::fs::read_dir(PathBuf::from(dir).join(format!("{map}.surfaces")))
+                    .expect("the surfaces folder")
+                    .filter_map(Result::ok)
+                    .map(|e| {
+                        let name = e.path().file_stem().expect("a name").to_string_lossy().into_owned();
+                        (name, Collider::from_awmh(&std::fs::read(e.path()).expect("readable")).expect("a triangle mesh"))
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            let throws: Vec<&Recorded> = recorded.iter().filter(|r| &r.map == map).collect();
+            let found = par_map(&throws, |r| {
+                let mut out = Vec::new();
+                let b = recorded_bounces(&r.flight, model.gravity);
+                let f = &r.flight;
+                for k in 1..f.len().saturating_sub(2) {
+                    // the bounce lies between points k and k+1: both turn, the points either side do not
+                    let (a, c) = (f[k].0, f[k + 1].0);
+                    if !(b.contains(&a) && b.contains(&c)) || b.contains(&f[k - 1].0) || b.contains(&f[k + 2].0) || r.det_step <= f[k + 2].0 || c - a > 2 {
+                        continue;
+                    }
+                    let d1 = (f[k].0 - f[k - 1].0) as f64 / TICK_RATE;
+                    let d2 = (f[k + 2].0 - f[k + 1].0) as f64 / TICK_RATE;
+                    if d1 <= 0.0 || d2 <= 0.0 {
+                        continue;
+                    }
+                    let vin = (f[k].1 - f[k - 1].1) / d1 - DVec3::Z * model.gravity * d1 * 0.5;
+                    let vout = (f[k + 2].1 - f[k + 1].1) / d2 + DVec3::Z * model.gravity * d2 * 0.5;
+                    if vin.length() < 150.0 {
+                        continue;
+                    }
+                    // a reflection keeps the speed's share e whatever the normal, and v_out / e − v_in lies along it
+                    let e = vout.length() / vin.length();
+                    let n = (vout / e.max(0.05) - vin).normalize_or_zero();
+                    let floor = n.z > model.floor_z;
+                    let surface = surfaces
+                        .iter()
+                        .filter_map(|(name, col)| col.hit_distance(f[k].1, vin.normalize(), vin.length() * (c - a) as f64 / TICK_RATE + 8.0).map(|d| (d, name)))
+                        .min_by(|x, y| x.0.total_cmp(&y.0))
+                        .map(|(_, name)| name.clone());
+                    out.push((floor, -vin.dot(n), e, vout.dot(n), surface));
+                }
+                out
+            });
+            for (floor, into, e, away, surface) in found.into_iter().flatten() {
+                by_speed.entry((floor, (into / 50.0).floor() as i64 * 50)).or_default().push((e, away));
+                if let Some(s) = surface {
+                    by_surface.entry((s, floor)).or_default().push(e);
+                }
+            }
+        }
+        println!("speed kept through a bounce, by the speed it met the surface with along the normal (u/s)");
+        for ((floor, into), rows) in &mut by_speed {
+            if rows.len() < 10 {
+                continue;
+            }
+            let mut kept: Vec<f64> = rows.iter().map(|r| r.0).collect();
+            let mut away: Vec<f64> = rows.iter().map(|r| r.1).collect();
+            kept.sort_by(f64::total_cmp);
+            away.sort_by(f64::total_cmp);
+            println!(
+                "{:<5} {into:>4}–{:<4} n {:>5}  kept p10 {:.3} median {:.3} p90 {:.3}  leaves along the normal at median {:>4.0}",
+                if *floor { "floor" } else { "wall" },
+                into + 50,
+                kept.len(),
+                quantile(&kept, 0.1),
+                quantile(&kept, 0.5),
+                quantile(&kept, 0.9),
+                quantile(&away, 0.5)
+            );
+        }
+        for ((name, floor), e) in &mut by_surface {
+            if e.len() < 20 {
+                continue;
+            }
+            e.sort_by(f64::total_cmp);
+            println!(
+                "{name:<40} {:<5} n {:>5} kept p10 {:.3} median {:.3} p90 {:.3}",
+                if *floor { "floor" } else { "wall" },
+                e.len(),
+                quantile(e, 0.1),
+                quantile(e, 0.5),
+                quantile(e, 0.9)
+            );
+        }
+        return;
+    }
+    if args.iter().any(|a| a == "--phases") {
+        // where a smoke's landing error comes from: the flight restarted from the game's own state after its k-th
+        // bounce (position and velocity from the networked points), and how far off it then goes off
+        let kinds: Vec<Grenade> = match flag("--grenade").as_deref() {
+            Some(g) => vec![grenade(g).expect("a grenade")],
+            None => vec![Grenade::Smoke, Grenade::Decoy],
+        };
+        let mut rows: BTreeMap<String, (Vec<f64>, Vec<f64>)> = BTreeMap::new();
+        for map in &maps {
+            let collider = load_collider(&packs, map, colliders.as_ref());
+            let throws: Vec<&Recorded> = recorded.iter().filter(|r| &r.map == map && kinds.contains(&r.grenade)).collect();
+            let found = par_map(&throws, |r| {
+                let mut out: Vec<(String, f64, f64)> = Vec::new();
+                let full = fly_with(&Release { t: 0.0, p0: r.start, v0: r.vel }, r.grenade, Some(&collider), &model);
+                out.push(("0 release".into(), (full.detonation.pos - r.det).length(), ((full.detonation.t * TICK_RATE).round() as i64 - r.det_step) as f64));
+                let bounces = recorded_bounces(&r.flight, model.gravity);
+                let n = bounces.len();
+                // a restart point: the first networked point at least 2 steps after the bounce whose next two
+                // intervals hold no bounce, so its velocity is the flight's
+                let restart = |b: i64| -> Option<Release> {
+                    let k = r.flight.iter().position(|(s, _)| *s >= b + 2)?;
+                    let (a, c) = (r.flight.get(k)?, r.flight.get(k + 1)?);
+                    if bounces.iter().any(|x| *x > b && *x <= c.0) || c.0 <= a.0 {
+                        return None;
+                    }
+                    let dt = (c.0 - a.0) as f64 / TICK_RATE;
+                    let v = (c.1 - a.1) / dt + DVec3::Z * model.gravity * dt * 0.5;
+                    Some(Release { t: a.0 as f64 / TICK_RATE, p0: a.1, v0: v })
+                };
+                for (i, b) in bounces.iter().enumerate() {
+                    let label = if i + 1 == n && i >= 3 { "last".to_string() } else if i < 3 { format!("{}", i + 1) } else { continue };
+                    let Some(rel) = restart(*b) else { continue };
+                    if rel.t * TICK_RATE >= r.det_step as f64 - 1.0 {
+                        continue;
+                    }
+                    let path = fly_with(&rel, r.grenade, Some(&collider), &model);
+                    out.push((
+                        format!("after bounce {label}"),
+                        (path.detonation.pos - r.det).length(),
+                        ((path.detonation.t * TICK_RATE).round() as i64 - r.det_step) as f64,
+                    ));
+                }
+                out
+            });
+            for rowset in found {
+                for (label, e, dt) in rowset {
+                    let row = rows.entry(label).or_default();
+                    row.0.push(e);
+                    row.1.push(dt);
+                }
+            }
+        }
+        for (label, (e, dt)) in &mut rows {
+            e.sort_by(f64::total_cmp);
+            dt.sort_by(f64::total_cmp);
+            let within = |d: f64| e.iter().filter(|x| **x <= d).count() as f64 / e.len() as f64 * 100.0;
+            println!(
+                "{label:<16} n {:>5} error median {:>6.1} p90 {:>6.1} ≤8 {:>3.0}% ≤32 {:>3.0}%  dt p10 {:>4} median {:>4} p90 {:>4}",
+                e.len(),
+                quantile(e, 0.5),
+                quantile(e, 0.9),
+                within(8.0),
+                within(32.0),
+                quantile(dt, 0.1),
+                quantile(dt, 0.5),
+                quantile(dt, 0.9)
+            );
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--first-bounce") {
         // the error 8 ticks after the game's first bounce, for flights that are still together just before it
         let mut errors: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for map in &maps {
-            let pack = nades_pack::Pack::open(&packs.join(format!("{map}.pack"))).expect("the pack opens");
-            let collider = Collider::from_awmh(pack.collider().expect("a Collider section")).expect("a triangle mesh");
+            let collider = load_collider(&packs, map, colliders.as_ref());
             let throws: Vec<&Recorded> = recorded.iter().filter(|r| &r.map == map).collect();
             let found = par_map(&throws, |r| {
                 let b = recorded_bounces(&r.flight, model.gravity).into_iter().find(|s| *s > 2)?;
@@ -472,9 +668,7 @@ fn main() {
     let mut dt_all: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     println!("{:<11} {:<10} {:>5} {:>8} {:>8} {:>7} {:>9} {:>9}", "map", "grenade", "n", "median", "p90", "≤32", "dt=0", "|dt|≤2");
     for map in &maps {
-        let path = packs.join(format!("{map}.pack"));
-        let pack = nades_pack::Pack::open(&path).expect("the pack opens");
-        let collider = Collider::from_awmh(pack.collider().expect("a Collider section")).expect("a triangle mesh");
+        let collider = load_collider(&packs, map, colliders.as_ref());
         let throws: Vec<&Recorded> = recorded.iter().filter(|r| &r.map == map).collect();
         let outcomes = par_map(&throws, |r| judge(r, &Release { t: 0.0, p0: r.start, v0: r.vel }, &collider, &model));
         for name in ["smoke", "flash", "he", "molotov", "incendiary", "decoy"] {

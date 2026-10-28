@@ -7,8 +7,9 @@
 //! can go to the GPU straight from the mapping. A file cut short, or written by another format version, is refused.
 //! SPEC.md ("The pack") lists what each section holds.
 //!
-//! Format 2's packs hold three sections: Scene (a [`scene::Scene`], postcard), Geometry and Textures, whose bytes the
-//! scene's spans and mips point into. The baked light, the sky and the post-processing are records in the Scene
+//! Format 3's packs hold three sections: Scene (a [`scene::Scene`], postcard), Geometry and Textures, whose bytes the
+//! scene's spans and mips point into, and, when the packer had Source 2 Viewer's CLI, the two colliders: Collider (line
+//! of sight) and GrenadeCollider (what a grenade bounces off, S40). The baked light, the sky and the post-processing are records in the Scene
 //! section, and their textures (lightmaps, the sky's cube map) are in the Textures section with the rest, so one
 //! upload path serves every texture. [`scene`] documents that interface; [`Pack::scene`], [`Pack::geometry`] and
 //! [`Pack::textures`] read it.
@@ -26,7 +27,7 @@ use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"NADESPK\0";
 /// Bumped whenever a section's layout changes: an old pack is then rebuilt, never misread.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Sections start on this boundary.
 pub const ALIGN: u64 = 16 * 1024;
 const HEADER: usize = 16;
@@ -47,6 +48,9 @@ pub enum SectionKind {
     Collider,
     /// The shared effects pack's one section: an [`effects::Effects`] (postcard).
     Effects,
+    /// What a grenade bounces off, in the Collider's AWMH layout: the map's physics welded but not clustered, its
+    /// grenade clips kept and its player clips, sky, glass, windows and `passbullets` left out (S40).
+    GrenadeCollider,
 }
 
 /// Where the pack came from, so a new export or a game update rebuilds it.
@@ -147,6 +151,11 @@ impl Pack {
     /// The Collider section, when the pack has one.
     pub fn collider(&self) -> Option<&[u8]> {
         self.section(SectionKind::Collider)
+    }
+
+    /// The GrenadeCollider section, when the pack has one.
+    pub fn grenade_collider(&self) -> Option<&[u8]> {
+        self.section(SectionKind::GrenadeCollider)
     }
 
     /// The effects of the shared effects pack, checked.
