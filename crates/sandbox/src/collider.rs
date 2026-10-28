@@ -1,20 +1,28 @@
-//! A map's collider (its pack's Collider section: the map's own physics and a BVH over it), built once per map on a
-//! thread of its own after the first frame. The simulator's flights and effects wait for it.
+//! A map's colliders (its pack's Collider and GrenadeCollider sections: the map's own physics, and a BVH over each),
+//! built once per map on a thread of its own after the first frame. The simulator's flights and effects wait for them.
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use nades_scene::collider::Collider;
 
-/// A collider being built: None until the build is done, then the collider (None when the map has none).
-type Slot = Mutex<Option<Option<Arc<Collider>>>>;
+/// A map's two colliders: line of sight, for the effects and the cameras, and what a grenade bounces off (S40).
+pub struct Colliders {
+    /// The Collider section: the map's occluders as awpy reduces them.
+    pub sight: Collider,
+    /// The GrenadeCollider section: the physics a grenade meets, unclustered, its grenade clips kept.
+    pub flight: Collider,
+}
 
-/// A map's collider, once built.
+/// The colliders being built: None until the build is done, then the colliders (None when the map has none).
+type Slot = Mutex<Option<Option<Arc<Colliders>>>>;
+
+/// A map's colliders, once built.
 #[derive(Clone, Default)]
 pub struct SharedCollider(Arc<(Slot, Condvar)>);
 
 impl SharedCollider {
-    /// Builds `map`'s collider on its own thread, from its pack.
+    /// Builds `map`'s colliders on their own thread, from its pack.
     pub fn build(map: String, wake: impl Fn() + Send + 'static) -> Self {
         let shared = Self::default();
         let filled = shared.clone();
@@ -22,9 +30,14 @@ impl SharedCollider {
             .name("collider".into())
             .spawn(move || {
                 let started = Instant::now();
-                let collider = crate::assets::collider(&map);
+                let collider = crate::assets::colliders(&map);
                 match &collider {
-                    Ok(c) => eprintln!("collider: {map}, {} triangles in {:.1} ms", c.triangles(), started.elapsed().as_secs_f64() * 1e3),
+                    Ok(c) => eprintln!(
+                        "collider: {map}, {} triangles and the grenade's {} in {:.1} ms",
+                        c.sight.triangles(),
+                        c.flight.triangles(),
+                        started.elapsed().as_secs_f64() * 1e3
+                    ),
                     Err(e) => eprintln!("collider: {e:#} (grenades fly through walls, smokes fill nothing, the smoke unlit)"),
                 }
                 let (slot, ready) = &*filled.0;
@@ -36,9 +49,9 @@ impl SharedCollider {
         shared
     }
 
-    /// A collider already built.
+    /// Colliders already built.
     #[cfg(test)]
-    pub fn ready(collider: Option<Collider>) -> Self {
+    pub fn ready(collider: Option<Colliders>) -> Self {
         let shared = Self::default();
         *shared.0.0.lock().expect("collider slot") = Some(collider.map(Arc::new));
         shared
@@ -49,13 +62,14 @@ impl SharedCollider {
         self.0.0.lock().expect("collider slot").is_some()
     }
 
-    /// The collider now, if it is built.
-    pub fn get(&self) -> Option<Arc<Collider>> {
+    /// The colliders now, if they are built.
+    pub fn get(&self) -> Option<Arc<Colliders>> {
         self.0.0.lock().expect("collider slot").clone().flatten()
     }
 
-    /// The collider, waiting for its build at most `timeout`; None when it is not built by then or the map has none.
-    pub fn wait_for(&self, timeout: Duration) -> Option<Arc<Collider>> {
+    /// The colliders, waiting for their build at most `timeout`; None when they are not built by then or the map has
+    /// none.
+    pub fn wait_for(&self, timeout: Duration) -> Option<Arc<Colliders>> {
         let (slot, ready) = &*self.0;
         let mut built = slot.lock().expect("collider slot");
         let started = Instant::now();

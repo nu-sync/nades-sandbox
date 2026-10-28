@@ -1365,3 +1365,88 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Open:** x264 `medium` costs 61 CPU-ms a frame and the GPU's wait is back: a faster preset or VideoToolbox,
   judged by size and look; frames drawn further ahead of the readback. The first frames' variation. A GPU clock that
   reads true on Metal (wgpu's calibration, or a Metal counter sample buffer read directly).
+
+## S40 · Smokes land where the game's do: the grenade's own collider, and a floor bounce's ceiling
+
+- **Decision (2026-10-28):** the flight runs against a collider of its own, the pack's new **GrenadeCollider**
+  section (pack format 3): the map's physics from the same Source 2 Viewer export as the Collider, welded but **not
+  clustered**, its **grenade clips kept** and what grenades pass left out (player clips, the sky, glass, windows,
+  `passbullets`; `nades_packer::physics::grenade_from_glb`). The Collider (awpy's reduction) stays for line of sight,
+  the smoke's fill, the fire and the cameras; `crates/sandbox` builds both trees side by side after the first frame
+  (`collider::Colliders { sight, flight }`). And a floor bounce leaves along the normal at most **225 u/s**
+  (`Model::floor_bounce_max`): a faster one is scaled down whole, its slide with it. Walls are unchanged.
+- **Where the smokes' error came from** (S32's bench, `flight_check`, the cs2-throws export, `--per 1000`, 7 maps).
+  Restarting the flight from the game's own state after its k-th bounce (`--phases`, new) splits the error by phase:
+  from the release, smoke median 18.7 / p90 226 / 57 % within 32; after the first bounce 3.8 / 47 / 87 %; after the
+  last bounce 0.0 / 1.3 / 99 %, its detonation tick off by 0 (p10/p90 −1/+3). So rolling, resting and the third
+  still tick were right; the error is made at the first bounce and multiplied by the next ones. Eight ticks after the
+  first bounce only 65 % of smokes were within 4 units of the game's (flash 72 %, molotov 71 %). Two causes:
+  - **The collider was the line-of-sight mesh.** awpy's reduction clusters vertices on an 8-unit lattice (each cell's
+    first vertex stands for it): 40–80 % of a map's triangles go (de_cache 1.26 M → 338 k, de_inferno 2.53 M →
+    548 k), flat floors survive but steps, curbs, slopes, edges and props move by several units, enough for a different
+    bounce normal or height (S32's "a different bounce normal" was mostly this). It also drops grenade clips, which
+    stop grenades (de_inferno 24 k triangles of them, de_cache 4 k). Unclustered, with the clips: flash p90 25.7 →
+    2.5. Without the clips (welded only): flash p90 7.3, HE 32.5, molotov 48.9 — the clips matter. Keeping the sky,
+    glass and `passbullets` too is worse (smoke p90 1 053: grenades fly through them). A 1- or 2-unit cluster cell
+    saves only 15–35 % of the triangles, so none.
+  - **Fast floor bounces keep less.** Every recorded bounce cleanly between two networked points (`--floor-bounces`,
+    new; 32 k of them), by the speed it met the surface with along its normal:
+
+    | into the floor (u/s) | n | kept, median (p10–p90) | leaves along the normal (median) |
+    |---|---:|---|---:|
+    | 300–350 | 789 | 0.449 (0.438–0.456) | 145 |
+    | 400–450 | 366 | 0.445 (0.421–0.457) | 185 |
+    | 500–550 | 304 | 0.446 (0.339–0.455) | 228 |
+    | 550–600 | 190 | 0.351 (0.213–0.452) | 205 |
+    | 650–700 | 160 | 0.299 (0.206–0.344) | 209 |
+    | 800–850 | 205 | 0.284 (0.270–0.295) | 231 |
+
+    Walls keep 0.451 at every speed up to 1 000 u/s (n ≈ 1 000–1 500 a bin). The drop starts exactly where 0.45 × the
+    speed in reaches about 225, and the slide is scaled with the rise (flat floors: horizontal kept equals vertical
+    kept), so the bounce is the reflection scaled to leave at most that fast. Of the flat-floor bounces met above
+    600 u/s, the speed they leave with along the normal has median 225 (p25–p75 207–231, p10 173, p90 240; n 596).
+    Smokes meet floors that fast because their long lobs fall from 800–1 300 units up after 3–5 s; flashes and HEs
+    rarely do before 1.64 s, which is why smokes looked "softer" (S32's SoftSurface). The ceiling is constant at one
+    spot whatever the speed in (on Mirage at (−1130, −600, −166): 226–236 for 636–838 in, 98 bounces) but differs between spots
+    (165–285): the game's own rule is not known; 225 is the median, the bench's plateau being 215–230 (smoke p90 97.6–
+    105.8, 75–76 % within 32). Per material (`--surfaces`, the grenade_collider example's per-material meshes)
+    nothing else stands out: floors and walls of every material keep 0.448–0.452, Wood_Dense floors 0.349 (n 41).
+- **Evidence**, landing error from the recorded release, same run before and after (n as S32; ≤ 32 is the share
+  within 32 units):
+
+  | grenade | before (S32) median / p90 / ≤ 32 | ceiling only | collider only | after |
+  |---|---|---|---|---|
+  | smoke | 18.8 / 223.6 / 57 % | 14.0 / 159.6 / 63 % | 6.2 / 167.2 / 70 % | **6.3 / 101.1 / 75 %** |
+  | decoy | 18.2 / 306.8 / 57 % | 16.2 / 245.4 / 61 % | 5.8 / 272.2 / 67 % | **6.0 / 149.2 / 70 %** |
+  | flash | 0.0 / 25.7 / 91 % | 0.0 / 25.7 / 91 % | 0.0 / 2.5 / 96 % | **0.0 / 2.5 / 96 %** |
+  | HE | 7.0 / 61.1 / 85 % | 6.9 / 61.1 / 85 % | 6.2 / 16.7 / 92 % | **6.2 / 16.4 / 92 %** |
+  | molotov | 0.7 / 106.0 / 81 % | 0.7 / 106.5 / 81 % | 0.0 / 19.4 / 91 % | **0.0 / 19.1 / 91 %** |
+  | incendiary | 0.6 / 63.0 / 84 % | 0.6 / 62.8 / 84 % | 0.0 / 7.2 / 94 % | **0.0 / 7.2 / 94 %** |
+
+  Every grenade on every map is better or level (smoke within 32: Ancient 51 → 64 %, Anubis 64 → 75, Cache 54 → 73,
+  Dust II 62 → 76, Inferno 58 → 73, Mirage 57 → 80, Nuke 52 → 85; Nuke's flash 84 → 96 %, its molotov p90 111.5 → 4.7).
+  After the first bounce, 89 % of smokes are within 4 units of the game's 8 ticks on (65 %), flash 92 % (72), HE 90 %
+  (76). From the release to after the first bounce: smoke 6.3 / 101.9 / 75 % → 2.6 / 22.6 / 92 %. The detonation tick
+  of the smokes that land within 32: median +3 (p10/p90 −3/+11; before −3/+3/+13). What is left (smokes more than 32
+  off: 678 rolling, 618 a different bounce normal, 133 a surface the collider lacks, 59 a player, 36 softer): the
+  middle bounces' normals and hops still multiply small differences, and the ceiling's spread (165–285).
+  mirage-smoke-0002 (`setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, jump-throw at 30, `--report`): first
+  lands at (−1170, −583, −166) 4.42 s in, goes off at (−1170.0, −628.7, −166) 6.72 s after the release, against the
+  game's (−1164, −630, −166) at 6.73 s: 6.1 units off and on time (S35: 50 units, 0.46 s late). The wall at
+  (−1262, −606) is still hit; what S35 left was the floor bounce before it, met at about 710 u/s
+  straight down.
+- **Cost:** the GrenadeCollider is 0.12 M (Mirage) to 2.55 M (Inferno) triangles, 2.4–47 MB of pack (de_cache 23.5
+  MB); both trees build in 10 ms (Mirage) to 191 ms (Inferno) when a map opens, off the first frame (the Collider
+  alone was 5.6–39 ms; load average 18–28 while measured, others benching), about 52 bytes a triangle in memory (some
+  130 MB for Inferno's, one map's at a time). `bench/resident.py`, 2 runs of 2 rounds, every map resident: 28 of 28
+  picks in the next frame, footprint 6.1–7.0 GB of the 8 GiB budget (SPEC: 6.3–6.6; load 12–27, not alternated with
+  the build before).
+- **Packs:** format 3 (`nades_pack::VERSION`); a format 2 pack, the shared effects pack included, is refused
+  ("rebuild it"), so every pack is rebuilt with `nades-pack <map>` and `nades-pack --effects`. Here only de_cache was
+  rebuilt by the packer (its colliders 338 375 and 1 267 902 triangles, as the bench's) into a scratch packs folder;
+  the other maps' and the effects pack were format 2's sections with the same GrenadeCollider bytes added, for the
+  checks; the shared `~/.cache/nades/packs` were left at format 2 while other work used them. Until they are rebuilt,
+  `landings_on_the_maps_colliders_stay_within_the_measured_errors` skips them. The fixture was rewritten from the new
+  model (152 throws, 103 of them within 32 units).
+- **Not done:** why the ceiling differs between spots (a surface property, the hull's contact, something in the
+  game's step), players as obstacles, subtick releases.

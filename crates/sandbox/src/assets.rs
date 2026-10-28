@@ -49,12 +49,15 @@ pub fn packed_maps() -> Vec<String> {
     maps
 }
 
-/// `map`'s collider, from its pack's Collider section.
-pub fn collider(map: &str) -> Result<Collider> {
+/// `map`'s two colliders, from its pack's Collider and GrenadeCollider sections, the trees built side by side.
+pub fn colliders(map: &str) -> Result<crate::collider::Colliders> {
     let path = pack_path(Some(map));
     let pack = nades_pack::Pack::open(&path).with_context(|| format!("opening {}", path.display()))?;
-    let bytes = pack.collider().with_context(|| format!("{} has no collider: rebuild it with nades-pack {map} (it needs Source 2 Viewer's CLI)", path.display()))?;
-    Collider::from_awmh(bytes).with_context(|| format!("{}'s Collider section is not a triangle mesh", path.display()))
+    let no = |what: &str| format!("{} has no {what}: rebuild it with nades-pack {map} (it needs Source 2 Viewer's CLI)", path.display());
+    let (sight, flight) = (pack.collider().with_context(|| no("collider"))?, pack.grenade_collider().with_context(|| no("grenade collider"))?);
+    let (sight, flight) = rayon::join(|| Collider::from_awmh(sight), || Collider::from_awmh(flight));
+    let not_a_mesh = |section: &str| format!("{}'s {section} section is not a triangle mesh", path.display());
+    Ok(crate::collider::Colliders { sight: sight.with_context(|| not_a_mesh("Collider"))?, flight: flight.with_context(|| not_a_mesh("GrenadeCollider"))? })
 }
 
 /// What the camera sees of `map`, as a collider: every opaque or cut-out triangle its pack draws (not the 3D skybox),
@@ -134,9 +137,9 @@ mod tests {
         assert!(!maps.is_empty(), "no packs in {}", packs().display());
         for map in maps {
             let started = std::time::Instant::now();
-            let c = collider(&map).unwrap();
-            eprintln!("{map}: {} triangles, {:.1} ms", c.triangles(), started.elapsed().as_secs_f64() * 1e3);
-            assert!(c.triangles() > 50_000);
+            let c = colliders(&map).unwrap();
+            eprintln!("{map}: {} triangles, the grenade's {}, {:.1} ms", c.sight.triangles(), c.flight.triangles(), started.elapsed().as_secs_f64() * 1e3);
+            assert!(c.sight.triangles() > 50_000 && c.flight.triangles() > c.sight.triangles());
         }
         let (noise, game, books) = effects();
         assert!(game && books.is_some() && noise.len() == nades_scene::noise::SIZE.pow(3));

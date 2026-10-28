@@ -45,9 +45,10 @@ pub fn stage(scene: &Scene, (width, height): (u32, u32), arcs: Option<Option<usi
     if let Some(books) = books {
         map.throw.set_flipbooks(&gpu.device, &books.upload(&gpu.device, &gpu.queue));
     }
-    let collider = crate::assets::collider(&scene.map).map_err(|e| eprintln!("collider: {e:#} (grenades fly through walls, no smoke or fire)")).ok();
+    let colliders = crate::assets::colliders(&scene.map).map_err(|e| eprintln!("collider: {e:#} (grenades fly through walls, no smoke or fire)")).ok();
     let sun = app::toward_sun(&map);
-    let placed: Vec<Placed> = scene.throws.par_iter().map(|t| (Arc::new(sim::simulate(t, collider.as_ref(), sun)), t.start)).collect();
+    let placed: Vec<Placed> = scene.throws.par_iter().map(|t| (Arc::new(sim::simulate(t, colliders.as_ref(), sun)), t.start)).collect();
+    let collider = colliders.map(|c| c.sight);
     if let Some(strong) = arcs {
         let arcs: Vec<_> = placed.iter().enumerate().map(|(k, (b, _))| b.arc(strong == Some(k))).collect();
         map.throw.set_arcs(&gpu.device, &arcs);
@@ -65,9 +66,9 @@ pub fn report(k: usize, b: &sim::Built, start: f64) -> String {
 pub fn simulate(path: &Path) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let scene = Scene::parse(&text).map_err(|e| anyhow!("{}: {}", path.display(), e.message))?;
-    let collider = crate::assets::collider(&scene.map).map_err(|e| eprintln!("collider: {e:#} (grenades fly through walls, no smoke or fire)")).ok();
+    let colliders = crate::assets::colliders(&scene.map).map_err(|e| eprintln!("collider: {e:#} (grenades fly through walls, no smoke or fire)")).ok();
     // the smoke's light is drawing's business: straight up will do for the report
-    let built: Vec<_> = scene.throws.par_iter().map(|t| sim::simulate(t, collider.as_ref(), glam::DVec3::Z)).collect();
+    let built: Vec<_> = scene.throws.par_iter().map(|t| sim::simulate(t, colliders.as_ref(), glam::DVec3::Z)).collect();
     for (k, (b, t)) in built.iter().zip(&scene.throws).enumerate() {
         println!("{}", report(k, b, t.start));
     }

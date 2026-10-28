@@ -657,7 +657,7 @@ mod tests {
         };
         let mut maps = std::collections::HashMap::new();
         for (map, grenade, line, movement, speed) in cases {
-            let (physics, sight) = maps.entry(map.clone()).or_insert_with(|| (crate::assets::collider(&map).unwrap(), crate::assets::sight(&map).unwrap()));
+            let (physics, sight) = maps.entry(map.clone()).or_insert_with(|| (crate::assets::colliders(&map).unwrap(), crate::assets::sight(&map).unwrap()));
             let (feet, pitch, yaw) = parse_console(&line).unwrap();
             let t = SceneThrow { movement, speed, ..SceneThrow::new(grenade, feet, pitch, yaw) };
             let b = sim::simulate(&t, Some(physics), DVec3::Z);

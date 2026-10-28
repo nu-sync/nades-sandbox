@@ -174,7 +174,7 @@ The toolchain decides nothing: every library above builds on Rust 1.95 and newer
 crates/sandbox   the app: winit window, egui shell, views, input, start-up clock, the maps kept on the GPU
                  (resident.rs)                                                          (bin: nades-sandbox)
 crates/render    wgpu device, passes, pipelines, uploads from packs, frame graph
-crates/pack      the per-map pack: format, writer, memory-mapped reader                   (format 2)
+crates/pack      the per-map pack: format, writer, memory-mapped reader                   (format 3)
 crates/source2   CS2's files: VTEX textures (BC blocks, mips, cubes, volumes), VPK archives; later KV3
 crates/packer    `nades-pack <map>`: builds a map's pack from the export, the game's files and their entities
 crates/model     CS2's own encodings it keeps: the smoke's voxel log, the release model's maths
@@ -240,7 +240,7 @@ maps      once the window shows: the other packed maps, one at a time, each draw
   less; `--budget-mb`): 0.37 (Mirage) to 1.43 GB (Inferno) of textures and geometry each, the least recently shown let
   go first (S19).
 
-## 6. The pack (format 2)
+## 6. The pack (format 3)
 
 `<packs>/<map>.pack`, built by `nades-pack <map>` (`crates/packer`) in 2.5–6.5 s from:
 - the geometry export the packer makes (S29): Source 2 Viewer's glTF of the map and of its 3D skybox's prefab
@@ -249,7 +249,8 @@ maps      once the window shows: the other packed maps, one at a time, each draw
   - textures as BC blocks, from `pak01` (or files unpacked from it);
   - each map's lightmaps and light probes, from its VPK;
 - through Source 2 Viewer's CLI (`[tools] s2v`), run by the packer itself (S26):
-  - the map's physics, reduced as awpy reduces it, into the Collider section (byte for byte awpy's mesh);
+  - the map's physics, reduced as awpy reduces it, into the Collider section (byte for byte awpy's mesh), and as a
+    grenade meets it, into the GrenadeCollider section (S40);
   - the entity lumps (the map's, its 3D skybox prefab's): the sun's shadow channel, the light probe volumes, the sky,
     the fog, the 3D skybox's placement;
   - the sky materials and the post-processing resource with its lookup table;
@@ -276,8 +277,11 @@ It is keyed by the game build and the export's hash, rebuilt when either changes
   - **Geometry:** vertex and index buffers in the shaders' layouts (quantized as exported).
   - **Textures:** mips as GPU blocks (BC1/BC4/BC5/BC6H/BC7; RGBA8 for the few images with no game file), rows padded
     to 256 bytes for buffer-to-texture copies, grouped in chunks.
-  - **Collider:** the map's occluding triangles, from its physics (AWMH layout); the BVH over them builds in 6–39 ms
-    when a map opens (S15, S26).
+  - **Collider:** the map's occluding triangles, from its physics (AWMH layout), for line of sight, the smoke and the
+    fire (S15, S26).
+  - **GrenadeCollider:** what a grenade bounces off, from the same physics (AWMH layout): welded, not clustered, its
+    grenade clips kept and what grenades pass (player clips, sky, glass, windows, `passbullets`) left out; 0.12–2.55 M
+    triangles (S40). Both trees build side by side in 10–191 ms when a map opens, after the first frame.
 - **Texture sources:**
   - Base colours map to `.vtex_c` files in `pak01` by name, or else through each material's `TextureParams` (Cache:
     296 of 518 images by name, 69% of the pixels; Mirage: 353 of 407). The rest are the export's WebP, decoded at pack
@@ -343,7 +347,7 @@ panel) has no native counterpart: it exists to work around the browser.
 | **Lineup switch (M3)** | **0.5 ms** of the window's time (median; max 1.1), shown in the next frame, a smoke's light included: its stage is built ahead (S16) | ≤ one frame, with a smoke's light: met |
 | Frame with a lineup's effects (M3) | 4.9 ms (Lineup view) and 5.6–7.1 ms (Result, the smoke drawn) median at 1444×1420, each finished on the GPU; p95 7.1–8.9 | |
 | A throw's stage (M3) | a smoke's 2.8–3.0 ms, 2.4–2.6 of them its light on 18 cores; the result shot 0.18 ms (median of 84) | off the window's thread |
-| Collider (M3) | 5.6 ms (mirage) to 39 ms (inferno), the mesh's read included, after the first frame | |
+| Collider (M3) | 5.6 ms (mirage) to 39 ms (inferno), the mesh's read included, after the first frame; with the grenade's (S40) 10 ms (mirage) to 191 ms (inferno), load ≈18–28 | |
 | Map switch, loaded (M3) | 1.55–1.72 s from the pick to the new map shown at its first lineup, its stage built (`--bench-maps de_mirage,de_inferno,de_cache`) | |
 | **Map switch, resident (M4)** | **the next frame**, 42 of 42 picks; that frame 5.3 ms (median, finished on the GPU, vsync off; GPU 3.7; worst 8.9), 5.7 ms on a map's first visit in a session (GPU 4.1; worst 8.0); the window's own share 1.6 ms; load ≈12.3: `.runs/resident-20261026-163237/` | ≤ one frame: met |
 | **Every map in one session (M4)** | all seven open in the background 49–97 ms each, lineups and first stages warm 1.6–1.75 s after start; 6,221.8 MB on the GPU of an 8,589.9 MB budget; footprint 6.32–6.56 GB at the end, 6.32–6.62 after each pick, peak 6.46–6.74 GB; the shown map's frames meanwhile median 4.7–4.9 ms, p95 15–17, worst 40–56 | bounded and stated: met |
