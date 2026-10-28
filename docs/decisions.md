@@ -1365,7 +1365,6 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Open:** x264 `medium` costs 61 CPU-ms a frame and the GPU's wait is back: a faster preset or VideoToolbox,
   judged by size and look; frames drawn further ahead of the readback. The first frames' variation. A GPU clock that
   reads true on Metal (wgpu's calibration, or a Metal counter sample buffer read directly).
-
 ## S39 · The simulated smoke retuned to the game-sized clouds
 
 - **Decision (2026-10-28, S37's Open item):** `smoke::Model::default()` takes a step up at 1.4 (from 1.75) and sends
@@ -1429,6 +1428,73 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Open:** the game's emitter placement (the largest remaining gap, about 0.1); a per-smoke volume, since recorded
   clouds vary more in size than ours.
 
+## S41 · A video's encoder at x264 `faster`, and the first frames repeatable
+
+- **Decision (2026-10-28, after S38's Open):** the MP4 is x264 `faster` at CRF 19 (from `medium` at CRF 20), the same
+  rate cap from `max_megabytes`, H.264 High, yuv420p. The renderer keeps two frames in flight (the loop now takes any
+  number, `AHEAD`; more were no faster). The first frame is drawn three times over before the one kept (`WARM_UP`),
+  which makes a clip's first frames byte-identical run to run.
+- **Encoders, judged on the same frames:** the Anubis Street → Connector smoke's 1,638 raw RGBA frames (1920×1080,
+  60 fps) kept once and fed to each setting from a file, three runs each alternated (load average 15–35, other agents'
+  work); quality against the yuv420p conversion of the same frames, VMAF over every third frame:
+
+  | setting | CPU-s | MP4, MB | PSNR Y, dB | SSIM Y | VMAF (min) |
+  |---|---|---|---|---|---|
+  | x264 `medium` CRF 20 (before) | 89–96 | 19.3 | 37.84 | 0.9488 | 89.8 (61.8) |
+  | x264 `fast` CRF 20 | 79 | 19.1 | 37.77 | 0.9478 | |
+  | x264 `faster` CRF 20 | 56–62 | 18.8 | 37.69–37.73 | 0.9468 | |
+  | **x264 `faster` CRF 19 (chosen)** | **58** | **19.7** | **37.77** | **0.9483** | **88.5 (52.5)** |
+  | x264 `veryfast` CRF 20 / 19 / 18 | 36–39 | 17.9 / 18.6 / 19.4 | 37.22 / 37.24 / 37.28 | 0.941–0.943 | 85.8 (45.8) at 18 |
+  | x264 `superfast` CRF 20 | 28 | 22.7 | 36.83 (min 28.1) | 0.9402 | |
+  | h264_videotoolbox, 6.7 Mbit/s | 6.3 | 22.8 | 36.17 | 0.9262 | |
+  | h264_videotoolbox `-q:v` 50 / 55 / 65 | 6.1–6.7 | 21.1 / 31.3 / 52.6 | 37.63 / 39.07 / 41.16 | 0.926 / 0.941 / 0.958 | 81.7 (67.2) at 50 |
+
+  `faster` at CRF 19 is within 0.1 dB and 0.0005 SSIM of `medium`, 1.3 VMAF under it, for 60% of its CPU. The worst
+  frames of either (the lineup's fast pull, 642 and 1392) look alike beside the source: both soft where the rate cap
+  bites. `veryfast` loses 0.6 dB and 4 VMAF whatever the CRF. VideoToolbox costs almost nothing on the CPU but is 1.7 dB
+  and 0.023 SSIM under x264 at its bitrate, and the quality setting that matches x264's SSIM (`-q:v` 65) is 52 MB, twice
+  the cap; `-prio_speed` changed nothing. HEVC was left out: the MP4 stays H.264.
+- **Through nades-mcp** (`bench/video.py`'s runs, four and then three builds alternated, 5 and 6 runs each, load
+  average 16–44 throughout; the before is main's 87d605a):
+
+  | | before | after (`faster` CRF 19, 2 ahead) | 3 ahead | 4 ahead |
+  |---|---|---|---|---|
+  | total, s (first bench / second) | 12.95 / 11.74 | 11.04 / 10.22 | 10.85 / 10.61 | 10.71 / — |
+  | frames, s (second) | 11.05 | 9.68 | 10.06 | |
+  | write: the encoder pushing back, s | 4.75 | 3.73 | 3.89 | |
+  | wait, s | 2.73 | 2.73 | 2.28 | |
+  | record, s | 3.36 | 3.34 | 3.65 | |
+  | encoder's tail, s | 0.24 | 0.09 | 0.08 | |
+  | encoder CPU, s (cores) | 96.8 (8.6) | 57.1 (5.7) | 57.5 (5.7) | 57.3 (5.6) |
+  | renderer peak footprint, MB | 2,349 | 2,342 | 2,571 | 2,833 |
+  | MP4, MB | 19.2 | 19.5 | 19.5 | 19.5 |
+
+  A clip is about 13% faster and its encoder uses 40% less CPU. Three or four frames ahead were within the runs'
+  spread of two (better in one bench, worse in the other) and hold 230–480 MB more, so the loop stays at two. At this
+  load the largest stage is still the write (the encoder's 5.7 cores on a busy machine), then the record and the wait.
+- **The first frames' variation, found:** with the throws and camera fixed (the lineup's frames 0–2 have the same eye
+  and scene time, compared bit for bit), a device's first two draws come out unlike every later one: up to 28 levels in
+  about 15,000 bytes, isolated pixels on bright edges and fine sunlit detail. In the pipelined loop the second draw is
+  one or the other at random, which is what S38 saw; frames from the third on are identical in every run. Cut down:
+  - It is the bloom. With the bloom passes skipped the draws agree (a level at most); without the map's effects or the
+    throw's layer they still differ.
+  - It is not a race on our side: drawing with the GPU idle between frames gives draws 1–2 one way and 3 on the other,
+    every run. Nothing in `post.rs` reads a texture before it is written in the frame, and nothing reads the previous
+    frame (only the smoke's accumulation loads, and it is off here).
+  - It is not the uploads: waiting for the GPU to go idle, or a second's sleep, before the first frame changes nothing.
+  - It is not our textures or pipelines: new post targets at frame 5, or the bloom's pipelines built again, keep the
+    later look.
+  - So it is state in the device or driver that changes after the bloom's first uses (consistent with Metal swapping
+    in another compiled form of those shaders; not proven, and Metal's tools were not used). A pause of 0.3–0.5 s
+    between draws now and then brings the early look back for a frame.
+
+  Three draws of the first frame before the one kept make it the later look: ten runs, frames 0–14 byte-identical, and
+  frames 1–14 identical to the old renderer's. The draws cost a few milliseconds in frame 0's `record`.
+- **Checked:** the lineup through nades-mcp over stdio (H.264 High, yuv420p, 1,638 frames, 19.6 MB, no clipped or hidden
+  frames), its frames looked at beside the old renderer's; `examples/verify` passes with the window on screen.
+- **Open:** `--render` and `video_render`'s single shots still draw once, so they show the early bloom. The cause in
+  the driver, named with a Metal capture. Faster still: the encoder remains the largest stage under load; VideoToolbox
+  would take it off the CPU if a look 1.7 dB down were acceptable, or HEVC if the format may change.
 
 ## S42 · Whole-frame brightness: the hands, not the look
 
@@ -1470,4 +1536,5 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **The bench ran again:** `bench/realism.py` imported `web_compare`, a module removed with the recorded-data benches
   (165730a), and could not start; the one function it used (finding the checkout from `--nades` or
   SHOW_ME_THE_NADES) is now in it.
+||||||| 87d605a
 ||||||| 87d605a

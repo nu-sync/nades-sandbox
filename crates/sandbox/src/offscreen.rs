@@ -188,6 +188,13 @@ fn rgb_of_rgba(rgba: &[u8]) -> Vec<u8> {
     rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect()
 }
 
+/// How many frames the video loop keeps in flight, drawn and waiting for the CPU to read them: three or four were no
+/// faster and held 230-480 MB more (S41).
+const AHEAD: usize = 2;
+
+/// How many times the first frame is drawn before the one kept (S41).
+const WARM_UP: u32 = 3;
+
 /// A scene's clip as a stream of frames on stdout (PNGs, or with `raw` packed RGBA, which the encoder takes faster),
 /// with JSON progress on stderr; stills, when asked for, written as PNGs.
 pub fn render_video(path: &Path, raw: bool) -> Result<()> {
@@ -251,21 +258,21 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
         view_formats: &[],
     });
     let (row, packed) = (crate::row_bytes(width) as usize, width as usize * 4);
-    // two readbacks: the GPU draws the next frame while this one goes to the encoder
-    let readbacks: [_; 2] = std::array::from_fn(|_| {
+    // readbacks for the frames drawn ahead: the GPU draws the next ones while this one goes to the encoder
+    let readbacks: Vec<_> = (0..AHEAD).map(|_| {
         let buffer = s.gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("video readback"), size: (row * height as usize) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
         let (sender, receiver) = std::sync::mpsc::channel();
         (buffer, sender, receiver)
-    });
+    }).collect();
     let mut times: [Vec<f64>; 6] = Default::default();
     let [camera_ms, record_ms, wait_ms, convert_ms, stills_ms, write_ms] = &mut times;
     let stdout = std::io::stdout();
     let mut stream = stdout.lock();
     let view = request.view.unwrap_or(ViewName::Follow);
-    // the frame drawn last, waiting to be read: its number, readback, submission and whether it shows the crosshair
-    let mut pending: Option<(u32, usize, wgpu::SubmissionIndex, bool)> = None;
+    // the frames drawn and waiting to be read, oldest first: number, readback, submission, whether it shows the crosshair
+    let mut pending: std::collections::VecDeque<(u32, usize, wgpu::SubmissionIndex, bool)> = Default::default();
     let mut writing_stills = Vec::new();
-    for frame in 0..=frames {
+    for frame in 0..frames + AHEAD as u32 - 1 {
         let drawn = (frame < frames).then(|| -> Result<_> {
             let began = Instant::now();
             let elapsed = f64::from(frame) / f64::from(request.fps);
@@ -282,8 +289,13 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             };
             camera_ms.push(ms(began));
             let recording = Instant::now();
+            // a device's first two draws bloom a little unlike every later one (up to 28 levels in 0.5% of the pixels, S41):
+            // the first frame is drawn a few times over before the one kept
+            for _ in 0..if frame == 0 { WARM_UP } else { 0 } {
+                draw_with(&mut s, &eye, t, elapsed as f32, samples);
+            }
             draw_with(&mut s, &eye, t, elapsed as f32, samples);
-            let slot = frame as usize % 2;
+            let slot = frame as usize % AHEAD;
             let (buffer, mapped, _) = &readbacks[slot];
             let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });
             {
@@ -302,7 +314,11 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             record_ms.push(ms(recording));
             Ok((frame, slot, submitted, aiming))
         }).transpose()?;
-        if let Some((done, slot, submitted, aiming)) = pending.take() {
+        pending.extend(drawn);
+        if pending.len() < AHEAD && frame < frames {
+            continue;
+        }
+        if let Some((done, slot, submitted, aiming)) = pending.pop_front() {
             let (buffer, _, mapped) = &readbacks[slot];
             let waiting = Instant::now();
             s.gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: Some(std::time::Duration::from_secs(10)) })?;
@@ -344,7 +360,6 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             buffer.unmap();
             eprintln!("{}", serde_json::json!({"event":"video_progress", "frames":done + 1, "total":frames}));
         }
-        pending = drawn;
     }
     stream.flush()?;
     for still in writing_stills {
