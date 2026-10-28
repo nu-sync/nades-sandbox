@@ -105,7 +105,7 @@ pub fn show(ui: &mut egui::Ui, mut status: Status<'_>) -> (Vec<Action>, egui::Re
     // the crosshair is the aim's: with the throw tool, or in the thrower's eye until the grenade leaves the hand
     let aiming = status.scene.as_ref().is_some_and(|s| match s.view {
         ViewName::Free => true,
-        ViewName::Thrower => s.viewed().is_some_and(|(t, b)| s.time < t.start + b.path.release.t),
+        ViewName::Thrower => s.viewed().is_some_and(|(t, b)| s.time <= t.start + b.path.release.t),
         _ => false,
     });
     if aiming {

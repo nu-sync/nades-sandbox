@@ -81,7 +81,7 @@ opens, with the stand-ins named below):
 | Input | Default | What reads it |
 |---|---|---|
 | the collider | the map pack's Collider section (`nades-pack <map>` with the CLI) | the grenades' bounces, the smoke's grid and light, the fire's spread, clicking a spot to stand on, the result shot's line of sight; without it the grenades fly through walls and leave no smoke or fire |
-| the game's smoke noise and fire flipbooks | `<packs>/shared/effects.pack` (`nades-pack --effects`) | the smoke and the fire; without them, the web view's stand-ins |
+| the game's smoke noise, fire flipbooks and grenade models | `<packs>/shared/effects.pack` (`nades-pack --effects`; run it again for the grenade models) | the smoke, the fire and the grenades in flight; without them, the web view's stand-ins and a capsule |
 | scene files | `~/nades-scenes/<map>.json` in the shell (any path typed, a file dropped on the window, or `--scene <file>`) | the throws placed on a map ([docs/simulator.md](simulator.md), `crates/control/src/scene.rs`) |
 | the remembered view | `~/.cache/nades/sandbox/state.json`, or `NADES_SANDBOX_STATE` | each map's last camera and its scene, written on exit |
 

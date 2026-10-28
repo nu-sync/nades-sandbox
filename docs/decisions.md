@@ -1179,3 +1179,24 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   at (−1080, −560, −262) 4.56 s in, then rolls down the steps under Sniper's Nest; the game's stopped on it. This is
   S32's smoke tail (p90 224 units). Its MP4 (follow, then 12 s round the smoke at 380/320) is 548 frames, 18.3 s of
   1280×720 H.264. `verify-mcp`: 66 checks, all 21 tools with positive and negative cases.
+- **Then, lineups found online (the user's framing):** the person will rarely operate it; the agent renders lineups
+  posted online. `lineup_render` takes one lineup in one call: `parse_console` reads the line as posted (no semicolons,
+  no roll, `_exact`, quotes, words around it), `Grenade::parse` people's names, `Technique::parse` their words (fields
+  override). The default video follows jumpthrow.pro's lineup videos (the coordinator stepped through one in a browser;
+  the site is never fetched or scraped here): the spot wide (100°), the aim, the aim point (28°), the throw, the chase,
+  the landing, the bloom, a 360° turn, about 2–3 s a phase, cuts only before the chase. The chase and the turn are a port
+  of show-me-the-nades' Orbit view (`flight.ts`, its D29): the eye rides the grenade's own path 70 units behind and 12
+  above, easing back to 150 over its last 0.6 s, Gaussian-smoothed; the turn's circle is planned at 72 bearings and five
+  elevations, clear of the effect's points, smoothed between neighbours, lingering where the effect shows. To its "seen
+  through" fallback (which reads face normals the sandbox's collider does not keep) we prefer an open sky above the eye,
+  for the rooms the map's physics leaves open. The crosshair is drawn on the frames until the release; flight paths are
+  off unless asked. Videos average 4 jittered smoke samples a frame (a still 16) and go to FFmpeg as raw RGB, not PNGs:
+  26.5 s of 1920×1080 at 60 fps in 35 s.
+- **The grenades' own models:** `nades-pack --effects` exports each world model with Source 2 Viewer's CLI from the local
+  `pak01` (as `cs2_effects.py` does for the web view, its D30) and reads the `.glb` itself (`packer/src/grenades.rs`):
+  each mesh in its bind pose with its node's transform (rigged for the hand, the pin's and ring's vertices would stretch
+  if skinned), glTF's metres and axes turned into Hammer units, the base colour cut to 256 texels. They go in the
+  effects pack after the flipbooks; a pack from before reads with none, and a build from before reads the new pack
+  (postcard leaves the trailing models unread). The throw layer draws them textured, lit as its other meshes (sun and a
+  dim sky, a little sheen), at the flight point with the ported spin; slower than 40 units a second on the ground a
+  grenade settles onto its side.

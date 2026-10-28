@@ -14,6 +14,15 @@ Start with `app_status {}` and `maps_list {}`. `app_status` reports this server'
 4. `frame_capture` returns native PNG image content and structured state. `include_ui: false` returns the scene rectangle; its dimensions may differ from the full viewport. Use the returned frame/revision and, when appropriate, an expected revision; if the scene changes or the window is occluded, read status and handle the explicit error. Inspect the image rather than assuming a successful call proves a useful view.
 5. `app_stop` closes only the owned instance. Disconnect after readiness hands the window to the user; another session cannot control it. Incomplete launches are cleaned on disconnect. Never use `app_stop` on a different session's ID or terminate unrelated windows.
 
+## A lineup found online: one call
+
+`lineup_render {"map": "mirage", "grenade": "smoke", "lineup": "<the setpos/setang line as posted>", "technique": "<their
+words: jumpthrow, run jumpthrow, crouch, right click…>", "output": "/abs/name.mp4"}` renders the jumpthrow.pro-style
+video at 1920×1080, 60 fps (about 35 s for a smoke) and returns the MP4, five stills, a JSON and where and when it went
+off. Check `technique.understood` against what the post said; set `movement`, `click` or `crouch` when a word was
+missed. For a quick draft pass `width: 640, height: 360, fps: 20`. Renders run one at a time; several lineups render
+in a row by calling it again. Look at a still or two before calling it done.
+
 ## Headless: what a throw does, images and video
 
 The person's words become tool calls. A throw is a grenade and a spot: the CS2 console string they paste (`"console":

@@ -17,7 +17,7 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
-const TOOLS: [&str; 21] = [
+const TOOLS: [&str; 22] = [
     "app_start",
     "app_status",
     "app_stop",
@@ -25,6 +25,7 @@ const TOOLS: [&str; 21] = [
     "camera_set",
     "diagnostics_get",
     "frame_capture",
+    "lineup_render",
     "map_open",
     "maps_list",
     "scene_get",
@@ -777,7 +778,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let tools = client.service.list_all_tools().await?;
     let actual: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     evidence.check(
-        "discover all twenty-one tools",
+        "discover all twenty-two tools",
         tools.len() == TOOLS.len() && actual == BTreeSet::from(TOOLS),
     )?;
     evidence.check(
@@ -897,6 +898,22 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let frames = ((off + 2.0) * 10.0).ceil() as u64;
     evidence.check("a shot follows the flight then orbits, its length from the simulation, written where asked", shot_done["state"] == "completed" && shot_done["path"] == json!(mp4) && mp4.is_file() && shot_done["frames_total"].as_u64() == Some(frames) && shot_done["reports"].as_array().is_some_and(|r| r.len() == 1))?;
     client.error(evidence, "video_render", json!({"scene":console,"shot":[{"move":"orbit","throw":3}]})).await?;
+    // a lineup as posted online, in one call: a draft's video, its stills and its JSON beside it
+    let draft = evidence.output.join("lineup.mp4");
+    let lineup = client.ok(evidence, "lineup_render", json!({"map":"mirage","grenade":"smoke","lineup":"setpos 1296.00 32.00 -167.97 setang -28.89 -166.00","technique":"jumpthrow","width":640,"height":360,"fps":20,"output":draft})).await?;
+    let made = lineup.structured_content.clone().unwrap();
+    let stills = made["stills"].as_array().cloned().unwrap_or_default();
+    evidence.check(
+        "lineup_render turns a posted lineup into a video with stills and a JSON of what happened",
+        made["video"]["state"] == "completed"
+            && draft.is_file()
+            && draft.with_extension("json").is_file()
+            && stills.len() == 5
+            && stills.iter().all(|s| s[1].as_str().is_some_and(|p| Path::new(p).is_file()))
+            && made["technique"]["movement"] == "jumpthrow"
+            && made["video"]["reports"][0]["detonation"]["t"].as_f64().is_some_and(|t| (t - off).abs() < 1e-6),
+    )?;
+    client.error(evidence, "lineup_render", json!({"map":"mirage","grenade":"smoke","lineup":"setpos 1 2 3"})).await?;
     let cancel_args = json!({"scene":molotov,"start_seconds":0,"end_seconds":30,"width":1280,"height":720,"fps":30});
     let pending = client.ok(evidence, "video_render", cancel_args).await?;
     let cancelled_id = pending.structured_content.as_ref().unwrap()["job_id"]
@@ -1507,7 +1524,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     )?;
     later.disconnect().await?;
     evidence.check(
-        "all twenty-one tools have positive and negative scenarios",
+        "all twenty-two tools have positive and negative scenarios",
         TOOLS.iter().all(|tool| {
             evidence.calls.get(*tool).is_some_and(|counts| counts.0 > 0)
                 && evidence.negative_cases.contains(*tool)

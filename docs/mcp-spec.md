@@ -111,6 +111,7 @@ scene's clock.
 | `frame_capture` | Instance; include_ui defaults true; optional expected revision. Native physical window or cropped scene rectangle. | Decodable PNG from the reported frame/revision; scene-only copy occurs before UI in the same submission, with UI still presented normally; app stays open. Occlusion/readback failure is explicit. |
 | `view_render` | Map with a camera; or a scene on that map with `time_seconds`, a view (orbit by default, follow, thrower) of throw `throw` (the first by default) and arcs on or off, the camera optional. Width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; a scene's render reports each throw's release, bounces, detonation and effect; repeated fixed-input map renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. A scene on another map, without throws and without a camera, or naming a throw it lacks is refused before launching. |
 | `diagnostics_get` | Log limit defaults 50, maximum 200. | Bounded actual startup/frame/error/build/GPU diagnostics; failures remain inspectable; no image blobs, raw assets or fabricated metrics. |
+| `lineup_render` | Map (de_mirage or mirage), grenade (people's names: molly, inc, flashbang, frag…), the lineup line as posted (`setpos … setang …`: semicolons, roll and `_exact` optional), the technique in words or as fields; optional output .mp4, seconds, size, fps, stills, wait. | One call renders the jumpthrow.pro-style video (spot, aim, aim point, throw, chase, landing, bloom, 360° turn; crosshair only before the release; no paths; 1920×1080 at 60 fps), five stills and a JSON beside it, and returns them with the technique as understood and where and when the grenade went off; a line without `setpos x y z` or `setang pitch yaw` is refused with what it lacks. |
 | `throws_simulate` | A scene (console strings or feet/pitch/yaw). No window, no GPU. | Each throw's report within a second or two; a console string lacking `setang` (or given beside feet) is refused. |
 | `scene_get` | Instance. | The window's scene, and each simulated throw's report (waiting up to 30 s for the simulations). |
 | `scene_set` | Instance, scene, optional expected revision. Another map switches the window to it in place. | The scene read back equals the one set, with the reports; an invalid scene does not change the window. |
@@ -134,7 +135,15 @@ Call `video_render` with a scene and poll `video_status`. The default is 1280×7
 most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total at most 1,800 frames. Times are seconds
 on the scene's clock (each throw begins at its own start), from 0; the scene's clock runs with the clip.
 
-The camera is a `shot`: moves played one after another.
+With no camera given, the clip is the lineup video of the first throw (`{"move": "lineup", "throw": 0, "seconds":
+null}`): the spot (wide), the aim with the crosshair, the aim point (zoomed), the throw, the chase down the grenade's own
+path (ported from show-me-the-nades' Orbit view, its D29), the landing, the bloom, a slow 360° turn round the effect;
+its phases scale with the airtime and the effect, `seconds` stretches them; the scene's clock waits for the throw.
+Flight paths are drawn only with `arcs: true`; a smoke frame averages `samples` (default 4) jittered frames. `stills`
+keeps frames as PNGs, each at a moment (`spot`, `aim`, `aim_point`, `flight`, `detonation`, `bloom`, `result`) or
+seconds into the clip.
+
+The camera may instead be a `shot`: moves played one after another.
 - `{"move": "follow", "throw": k, "after_seconds": s}`: 80 units behind the grenade until it goes off, then rising over
   what it left for `s` seconds.
 - `{"move": "orbit", "throw": k, "radius": 350, "height": 120, "seconds": 8, "degrees": 360, "start_degrees": null}`:

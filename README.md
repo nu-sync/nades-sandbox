@@ -9,23 +9,40 @@ floor, the flash, the HE.
 
 ## Status
 
-**MCP-first (version 0.1.0, S31, S34).** Tested on Apple Silicon macOS. Nothing in it depends on recorded matches:
-lineup libraries, team and player statistics and demo analysis belong to other applications
-([docs/simulator.md](docs/simulator.md)). You talk to an agent; the agent drives the simulator through its MCP server
-(`nades-mcp`). The window, when one is open, shows only the 3D view. Through MCP:
+**A lineup renderer for agents (version 0.1.0, S31, S34).** Tested on Apple Silicon macOS. Its main use: an agent
+renders any grenade lineup found online, headlessly. One MCP call, `lineup_render`, takes the map, the grenade, the
+lineup's console line as posted (`setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`) and the technique in words
+("jumpthrow", "run jumpthrow", "crouch", "right click"), and returns an MP4 played like jumpthrow.pro's lineup videos:
 
-- **throws**: a grenade (smoke, flash, HE, molotov, incendiary, decoy) and a spot, given as CS2's console string
-  (`setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`) or feet, pitch and yaw, with the movement (stand, walk, run,
-  jump-throw, run jump-throw), crouch, click (left, middle, right) and a start time;
-- **what each throw did**: its release, every bounce, where it lands, when and where it goes off, its smoke or fire;
-- **scenes** on any packed map: place, change, remove; play and move the scene's clock; views (free, the thrower's eye,
-  following the grenade, an orbit of the result) and cameras (a pose, or one point looking at another);
-- **images and videos** without a window: a moment of a scene as a PNG, or an MP4 with a scripted shot (follow the
-  flight, then a 360° pan around what it left at a radius and height, and more);
+1. where to stand, wide;
+2. the aim, with the crosshair;
+3. a close-up of what the crosshair lines up with;
+4. the throw;
+5. the camera following the grenade (the game's own model) through the air;
+6. the landing;
+7. the effect blooming;
+8. a slow 360° turn around it.
+
+There is no crosshair after the release and no drawn paths. The defaults are 1920×1080 at 60 fps, with the timing from
+the grenade's airtime and effect (a smoke's video is about 26 s and renders in about 35 s). Stills of the aim, the aim
+point, the flight, the bloom and the result, and a JSON of what happened (release, bounces, landing, detonation,
+effect), are written beside it. Nothing in it depends on recorded matches
+([docs/simulator.md](docs/simulator.md)).
+
+Through MCP, for more control:
+
+- **throws**: a grenade (smoke, flash, HE, molotov, incendiary, decoy) and a spot, given as CS2's console string or
+  feet, pitch and yaw, with the movement, crouch, click and a start time; `throws_simulate` reports what each does
+  without rendering;
+- **scenes** on any packed map, **images** (`view_render`) and **videos** with scripted shots (`video_render`: lineup,
+  follow, orbit, thrower, hold moves);
+- **a window**, secondary, showing only the 3D view: scenes, the clock, views (free, the thrower's eye, following the
+  grenade, an orbit of the result) and cameras;
 - **scene files** (JSON, `"format": "nades-sandbox-scene"`, version 1), the generic port other applications can write.
 
 `--ui` (or F1 in the window) shows the developer shell: the throw tool with its preview arc, the scene's list, the
-selected throw and the clock.
+selected throw, the clock and an Arcs switch for the flight paths. `nades-pack --effects` packs the grenades' world
+models with the smoke noise and the fire's flipbooks; without them a grenade flies as a capsule.
 
 The flight comes from `crates/physics` (CS2's release model, bounces, fuses), the smoke's grid and the fire's flames
 from `crates/effects`, both against the map's own collider; the smoke and fire are drawn as show-me-the-nades' web view
@@ -110,18 +127,16 @@ transport. The server starts its sibling sandbox binary directly. `just mcp` is 
 `just verify-mcp` exercises the actual server and app (66 checks). For video, install FFmpeg with `libx264` (and
 `ffprobe` for verification).
 
-A request such as "record a video of this smoke, `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, jump-throw,
-on Mirage: follow it, then pan round the smoke" is two calls:
+A request such as "render this smoke on Mirage: `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, jumpthrow" is
+one call:
 
 ```json
-throws_simulate {"scene": {"map": "de_mirage", "throws": [{"grenade": "smoke", "movement": "jumpthrow",
-                  "console": "setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0"}]}}
-video_render    {"scene": …the same…, "output": "/abs/path/clip.mp4",
-                 "shot": [{"move": "follow", "throw": 0},
-                          {"move": "orbit", "throw": 0, "radius": 380, "height": 320, "seconds": 12, "degrees": 360}]}
+lineup_render {"map": "mirage", "grenade": "smoke", "technique": "jumpthrow",
+               "lineup": "setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0",
+               "output": "/abs/path/mirage-smoke.mp4"}
 ```
 
-then `video_status` until it completes. Headless tools: `throws_simulate` (what each throw did, a second or two),
+It waits and returns the MP4, the stills, the JSON and where and when the grenade went off. Headless tools: `lineup_render` (one lineup, end to end), `throws_simulate` (what each throw did, a second or two),
 `view_render` (a map from a camera, or a scene's moment from a view of a throw), `video_render` / `video_status` /
 `video_cancel`. Window tools (`app_start` returns the `instance_id` they take): `scene_get`, `scene_set` (also how to
 change the map in place), `throw_add`, `throw_update`, `throw_remove`, `time_set`, `view_set`, `camera_set`,
