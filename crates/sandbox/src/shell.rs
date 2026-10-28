@@ -6,6 +6,18 @@ use nades_control::scene::{Click, Grenade, Movement, SceneThrow, ViewName};
 
 use crate::scene::{SceneState, Tool};
 
+/// Whether the shell shows: off by default, so the window is the 3D view alone and the simulator is driven through
+/// MCP (S34); `--ui` or F1 shows it, for development.
+static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn shown() -> bool {
+    SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_shown(on: bool) {
+    SHOWN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Fixed panel sizes (points), so the 3D view's size is known before the first frame.
 pub const LEFT: f32 = 300.0;
 pub const RIGHT: f32 = 290.0;

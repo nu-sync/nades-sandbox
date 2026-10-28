@@ -6,6 +6,8 @@
 //! map: it opens on the camera the last run left (`state.rs`). The collider, the game's flipbooks and smoke noise and
 //! the other maps are read after it.
 //!
+//! - The window is the 3D view alone; `--ui` (or F1 at any time) shows the developer shell: the throw tool, the scene,
+//!   the selected throw and the clock. Everything else is driven through app control (the MCP server, S34).
 //! - `--map <name>` draws `<packs>/<name>.pack` (the last map, else de_cache; `NADES_PACK` names a file); `--packs
 //!   <dir>` names the packs folder, else `NADES_SANDBOX_PACKS`, `[assets] packs`, the platform's cache (`assets.rs`).
 //! - The timed benches (`--bench-frames`, `--bench-maps`) need the window on screen: each stops with an error ("needs
@@ -128,6 +130,7 @@ fn args() -> Result<Args> {
             "--view" => args.view = Some(it.next().as_deref().and_then(nades_control::scene::ViewName::parse).context("--view needs free, thrower, follow or orbit")?),
             "--throw" => args.throw = Some(it.next().and_then(|n| n.parse().ok()).context("--throw needs a throw's index in the scene")?),
             "--no-arcs" => args.no_arcs = true,
+            "--ui" => shell::set_shown(true),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
             "--instance-id" => args.instance_id = Some(it.next().context("--instance-id needs an ID")?),
@@ -743,6 +746,11 @@ impl ApplicationHandler<UserEvent> for App {
                 view.app.open_file(&path);
                 view.window.request_redraw();
             }
+            WindowEvent::KeyboardInput { event: ref key, .. } if key.state.is_pressed() && !key.repeat && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::F1) => {
+                shell::set_shown(!shell::shown());
+                view.revision += 1;
+                view.window.request_redraw();
+            }
             WindowEvent::KeyboardInput { event: ref key, .. } if view.modifiers.super_key() && key.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => {
                 view.modifiers = modifiers.state();
@@ -936,7 +944,8 @@ impl View {
         let scale = window.scale_factor();
         let (width, height) = app::view_size((f64::from(config.width) / scale, f64::from(config.height) / scale), scale);
         let targets = if targets.size() == (width, height) { targets } else { map.targets(&gpu.device, &gpu.queue, width, height) };
-        app.rect = egui::Rect::from_min_size(egui::pos2(shell::LEFT, shell::TOP), egui::vec2((f64::from(width) / scale) as f32, (f64::from(height) / scale) as f32));
+        let corner = if shell::shown() { egui::pos2(shell::LEFT, shell::TOP) } else { egui::Pos2::ZERO };
+        app.rect = egui::Rect::from_min_size(corner, egui::vec2((f64::from(width) / scale) as f32, (f64::from(height) / scale) as f32));
         app.toward_sun = app::toward_sun(&map);
         app.resident.budget = resident::budget(&gpu, args.budget_mb);
         app.shown_bytes = map.gpu_bytes;

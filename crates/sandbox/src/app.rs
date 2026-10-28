@@ -28,10 +28,12 @@ pub fn camera_of(v: &CsView) -> state::Camera {
     ([v.eye.x, v.eye.y, v.eye.z], v.pitch, v.yaw, v.fov)
 }
 
-/// The 3D view's size in pixels for a window of `window` points at `scale`: the window less the shell's panels.
+/// The 3D view's size in pixels for a window of `window` points at `scale`: the whole window, or the window less the
+/// shell's panels when the shell shows.
 pub fn view_size(window: (f64, f64), scale: f64) -> (u32, u32) {
-    let w = (window.0 - f64::from(shell::LEFT) - f64::from(shell::RIGHT)).max(64.0);
-    let h = (window.1 - f64::from(shell::TOP) - f64::from(shell::BOTTOM)).max(64.0);
+    let (panels_x, panels_y) = if shell::shown() { (f64::from(shell::LEFT + shell::RIGHT), f64::from(shell::TOP + shell::BOTTOM)) } else { (0.0, 0.0) };
+    let w = (window.0 - panels_x).max(64.0);
+    let h = (window.1 - panels_y).max(64.0);
     ((w * scale).round() as u32, (h * scale).round() as u32)
 }
 
@@ -375,6 +377,10 @@ impl Sandbox {
 
     /// The shell, laid out over `ui`; what it asks for is applied by [`Sandbox::update`].
     pub fn ui(&mut self, ui: &mut egui::Ui, timings: String) {
+        if !shell::shown() {
+            self.rect = ui.max_rect();
+            return;
+        }
         let loading = self.loading.as_ref().map(|(n, _)| n.clone()).or_else(|| self.picked.clone());
         let practice = self.scene.selected.and_then(|k| self.scene.scene.throws.get(k)).map(|t| nades_physics::practice_command(&sim::physics_throw(t)));
         let status = shell::Status { map: &self.map, maps: &self.maps, notice: self.notice.as_deref(), timings, loading_map: loading.as_deref(), copied: self.copied_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2)), scene: Some(&mut self.scene), practice, free: self.free };
