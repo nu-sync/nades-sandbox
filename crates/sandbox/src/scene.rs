@@ -303,7 +303,7 @@ impl SceneState {
         }
         if let Some((t, path)) = &self.preview {
             let points: Vec<DVec3> = path.points.iter().map(|(_, p)| *p).collect();
-            let marks = path.bounces.iter().map(|b| (b.pos, 0.8)).chain(points.first().map(|p| (*p, 1.0))).chain([(path.detonation.pos, 1.4)]).collect();
+            let marks = path.bounces.iter().map(|b| (b.pos, 0.8)).chain([(path.detonation.pos, 1.4)]).collect();
             arcs.push(nades_render::throw::Arc { points, marks, color: nades_scene::stage::nade_color(sim::drawn(t.grenade)), strong: true });
         }
         arcs

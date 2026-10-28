@@ -336,6 +336,11 @@ impl Sandbox {
         self.scene.scene.clone()
     }
 
+    /// What each simulated throw of the scene did.
+    pub fn reports(&self) -> Vec<nades_control::scene::ThrowReport> {
+        self.scene.scene.throws.iter().enumerate().filter_map(|(k, t)| Some(self.scene.built(t)?.report(k, t.start))).collect()
+    }
+
     /// Shows `scene`: on this map at once, on another once that map is up (picked as the map selector picks it).
     pub fn set_scene(&mut self, scene: Scene) {
         let map = scene.map.clone();
@@ -454,7 +459,8 @@ impl Sandbox {
         if self.wake.is_some() {
             self.scene.simulate(&self.collider, self.toward_sun, self.wake.clone());
         }
-        if let Some(camera) = self.remembered.filter(|_| self.free) {
+        // the throw tool is the shell's: without it nothing is being aimed
+        if let Some(camera) = self.remembered.filter(|_| self.free && shell::shown()) {
             self.scene.aim(&camera, &self.collider);
         } else {
             self.scene.preview = None;

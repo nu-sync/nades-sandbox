@@ -17,9 +17,12 @@ pub struct CameraKeyframe {
 pub struct VideoRequest {
     /// The scene to play: its map and throws.
     pub scene: Scene,
-    /// Seconds on the scene's clock (each throw begins at its own start).
+    /// Seconds on the scene's clock where the clip starts (each throw begins at its own start; default 0).
+    #[serde(default)]
     pub start_seconds: f64,
-    pub end_seconds: f64,
+    /// Where it ends; with a `shot`, omit it to end with the shot.
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
     #[serde(default = "width")]
     pub width: u32,
     #[serde(default = "height")]
@@ -38,6 +41,83 @@ pub struct VideoRequest {
     /// The throw the view is of (its index; the first by default).
     #[serde(default)]
     pub throw: Option<usize>,
+    /// A scripted camera: moves played one after another from the clip's start, the scene's clock running with them
+    /// (e.g. follow the throw to its detonation, then orbit 360° around what it left). Exclusive of camera, keyframes
+    /// and view.
+    #[serde(default)]
+    pub shot: Vec<ShotMove>,
+}
+
+/// One move of a scripted camera.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "move", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ShotMove {
+    /// Behind `throw`'s grenade from now until it goes off (and `after_seconds` more, looking at what it left).
+    Follow {
+        throw: usize,
+        #[serde(default)]
+        after_seconds: f64,
+    },
+    /// A horizontal circle around what `throw` left (its smoke's middle, its fire, where it went off): `radius` units
+    /// out, `height` units above that point, turning `degrees` (360 by default; negative turns clockwise) in `seconds`,
+    /// always looking at it. It starts on the bearing the camera already has, unless `start_degrees` (0 = east, +x;
+    /// 90 = north, +y) is given, and eases in from the previous camera over its first second. A wall between the point
+    /// and the camera brings the camera in front of the wall.
+    Orbit {
+        throw: usize,
+        #[serde(default = "radius")]
+        radius: f64,
+        #[serde(default = "orbit_height")]
+        height: f64,
+        #[serde(default = "orbit_seconds")]
+        seconds: f64,
+        #[serde(default = "full_turn")]
+        degrees: f64,
+        #[serde(default)]
+        start_degrees: Option<f64>,
+    },
+    /// The thrower's eye as `throw` leaves the hand, for `seconds`.
+    Thrower {
+        throw: usize,
+        #[serde(default = "hold_seconds")]
+        seconds: f64,
+    },
+    /// A fixed camera for `seconds`.
+    Hold { camera: CameraPose, seconds: f64 },
+}
+
+fn radius() -> f64 {
+    350.0
+}
+fn orbit_height() -> f64 {
+    120.0
+}
+fn orbit_seconds() -> f64 {
+    8.0
+}
+fn full_turn() -> f64 {
+    360.0
+}
+fn hold_seconds() -> f64 {
+    2.0
+}
+
+impl ShotMove {
+    /// The throw it is about, if any.
+    pub fn throw(&self) -> Option<usize> {
+        match self {
+            ShotMove::Follow { throw, .. } | ShotMove::Orbit { throw, .. } | ShotMove::Thrower { throw, .. } => Some(*throw),
+            ShotMove::Hold { .. } => None,
+        }
+    }
+
+    /// Its length when it has one of its own (a follow lasts as long as the flight).
+    pub fn seconds(&self) -> Option<f64> {
+        match self {
+            ShotMove::Follow { .. } => None,
+            ShotMove::Orbit { seconds, .. } | ShotMove::Thrower { seconds, .. } | ShotMove::Hold { seconds, .. } => Some(*seconds),
+        }
+    }
 }
 fn width() -> u32 {
     1280
@@ -56,9 +136,36 @@ impl VideoRequest {
         if self.throw.is_some_and(|k| k >= self.scene.throws.len()) || (self.camera.is_none() && self.camera_keyframes.is_empty() && self.scene.throws.is_empty()) {
             return Err(invalid("Name a throw of the scene for the view, or give a camera."));
         }
-        let duration = self.end_seconds - self.start_seconds;
+        if !self.shot.is_empty() {
+            if self.camera.is_some() || !self.camera_keyframes.is_empty() || self.view.is_some() {
+                return Err(invalid("A shot is the whole camera: leave camera, camera_keyframes and view out."));
+            }
+            for m in &mut self.shot {
+                if m.throw().is_some_and(|k| k >= self.scene.throws.len()) {
+                    return Err(invalid("A shot's move names a throw the scene does not have."));
+                }
+                if m.seconds().is_some_and(|s| !s.is_finite() || s <= 0.0 || s > 60.0) {
+                    return Err(invalid("A move lasts more than 0 and at most 60 seconds."));
+                }
+                match m {
+                    ShotMove::Follow { after_seconds, .. } if !after_seconds.is_finite() || !(0.0..=30.0).contains(after_seconds) => return Err(invalid("after_seconds is 0–30.")),
+                    ShotMove::Orbit { radius, height, degrees, start_degrees, .. } if ![*radius, *height, *degrees, start_degrees.unwrap_or(0.0)].iter().all(|v| v.is_finite()) || !(16.0..=4000.0).contains(radius) || height.abs() > 2000.0 || degrees.abs() > 3600.0 => {
+                        return Err(invalid("An orbit's radius is 16–4000 units, its height within ±2000, its turn within ±3600°."));
+                    }
+                    ShotMove::Hold { camera, .. } => *camera = camera.clone().validated()?,
+                    _ => {}
+                }
+            }
+            if self.shot.iter().filter_map(ShotMove::seconds).sum::<f64>() > 60.0 {
+                return Err(invalid("A shot lasts at most 60 seconds."));
+            }
+        } else if self.end_seconds.is_none() {
+            return Err(invalid("Give end_seconds, or a shot the clip ends with."));
+        }
+        let end = self.end_seconds.unwrap_or(self.start_seconds + 1.0);
+        let duration = end - self.start_seconds;
         if !self.start_seconds.is_finite() || self.start_seconds < 0.0
-            || !self.end_seconds.is_finite()
+            || !end.is_finite()
             || duration <= 0.0
             || duration > 60.0
         {
@@ -117,8 +224,14 @@ impl VideoRequest {
         Ok(self)
     }
 
-    pub fn frame_count(&self) -> u32 {
-        ((self.end_seconds - self.start_seconds) * f64::from(self.fps)).ceil() as u32
+    /// Frames from the start to `end` (the request's end, or the end its shot resolves to).
+    pub fn frames_until(&self, end: f64) -> u32 {
+        ((end - self.start_seconds) * f64::from(self.fps)).ceil().max(1.0) as u32
+    }
+
+    /// Its frames, when its end is given.
+    pub fn frame_count(&self) -> Option<u32> {
+        self.end_seconds.map(|end| self.frames_until(end))
     }
 
     pub fn camera_at(&self, seconds: f64) -> Option<CameraPose> {
@@ -166,7 +279,7 @@ mod tests {
         let request = VideoRequest {
             scene: Scene::new("de_dust2"),
             start_seconds: 1.0,
-            end_seconds: 3.0,
+            end_seconds: Some(3.0),
             width: 1280,
             height: 720,
             fps: 30,
@@ -183,10 +296,11 @@ mod tests {
             ],
             view: None,
             throw: None,
+            shot: Vec::new(),
         }
         .validated()
         .unwrap();
-        assert_eq!(request.frame_count(), 60);
+        assert_eq!(request.frame_count(), Some(60));
         assert_eq!(request.camera_at(1.0).unwrap().yaw_degrees, -180.0);
     }
     #[test]
@@ -219,7 +333,7 @@ mod tests {
                 request.fps,
                 request.frame_count()
             ),
-            (1280, 720, 30, 60)
+            (1280, 720, 30, Some(60))
         );
         assert!(request.camera_at(0.5).is_none());
         // a view needs a throw to be of, and one the scene has
@@ -227,5 +341,23 @@ mod tests {
         assert_eq!(serde_json::from_value::<VideoRequest>(json).unwrap().validated().unwrap_err().code, "invalid_video");
         let json = serde_json::json!({"scene":{"map":"de_dust2","throws":[{"grenade":"he","feet":[0,0,0],"pitch":0,"yaw":0}]},"start_seconds":0.0,"end_seconds":2.0,"throw":1});
         assert_eq!(serde_json::from_value::<VideoRequest>(json).unwrap().validated().unwrap_err().code, "invalid_video");
+    }
+
+    #[test]
+    fn a_shot_follows_then_orbits_and_ends_the_clip() {
+        let scene = serde_json::json!({"map":"de_mirage","throws":[{"grenade":"smoke","feet":[0,0,0],"pitch":0,"yaw":0}]});
+        let json = serde_json::json!({"scene":scene,"shot":[{"move":"follow","throw":0,"after_seconds":1},{"move":"orbit","throw":0}]});
+        let request = serde_json::from_value::<VideoRequest>(json).unwrap().validated().unwrap();
+        assert_eq!(request.shot[1], ShotMove::Orbit { throw: 0, radius: 350.0, height: 120.0, seconds: 8.0, degrees: 360.0, start_degrees: None });
+        assert_eq!(request.frame_count(), None, "a shot's end is resolved against the simulation");
+        assert_eq!(request.frames_until(10.0), 300);
+        let bad = |shot: serde_json::Value| serde_json::from_value::<VideoRequest>(serde_json::json!({"scene":scene,"shot":shot})).unwrap().validated().unwrap_err().code;
+        assert_eq!(bad(serde_json::json!([{"move":"orbit","throw":1}])), "invalid_video");
+        assert_eq!(bad(serde_json::json!([{"move":"orbit","throw":0,"radius":5}])), "invalid_video");
+        assert_eq!(bad(serde_json::json!([{"move":"orbit","throw":0,"seconds":61}])), "invalid_video");
+        let both = serde_json::json!({"scene":scene,"view":"orbit","shot":[{"move":"follow","throw":0}]});
+        assert_eq!(serde_json::from_value::<VideoRequest>(both).unwrap().validated().unwrap_err().code, "invalid_video");
+        let no_end = serde_json::json!({"scene":scene});
+        assert_eq!(serde_json::from_value::<VideoRequest>(no_end).unwrap().validated().unwrap_err().code, "invalid_video");
     }
 }

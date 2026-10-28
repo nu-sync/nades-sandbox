@@ -17,10 +17,11 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 
-const TOOLS: [&str; 19] = [
+const TOOLS: [&str; 21] = [
     "app_start",
     "app_status",
     "app_stop",
+    "camera_look_at",
     "camera_set",
     "diagnostics_get",
     "frame_capture",
@@ -31,6 +32,7 @@ const TOOLS: [&str; 19] = [
     "throw_add",
     "throw_remove",
     "throw_update",
+    "throws_simulate",
     "time_set",
     "video_cancel",
     "video_render",
@@ -684,7 +686,7 @@ async fn scene_journey(client: &Client, evidence: &mut Evidence, instance: &str)
     let simulated = client.settled_state(evidence).await?;
     evidence.check("the throw is simulated", simulated.scene.throws == 1 && !simulated.scene.loading && simulated.scene.timeline_end_seconds > 5.0)?;
     let rendered = client.ok(evidence, "view_render", json!({"map":"de_cache","width":320,"height":180,"scene":{"scene":{"map":"de_cache","throws":[smoke]},"time_seconds":0.0}})).await?;
-    let went_off = rendered.structured_content.as_ref().unwrap()["throws"][0]["detonation"]["at"].as_f64().context("the render reports the detonation")?;
+    let went_off = rendered.structured_content.as_ref().unwrap()["throws"][0]["detonation"]["t"].as_f64().context("the render reports the detonation")?;
     let moment = went_off + 3.0;
     let timed = state(&client.ok(evidence, "time_set", json!({"instance_id":instance,"seconds":moment})).await?)?;
     evidence.check("time_set moves the clock onto the smoke", (timed.scene.timeline_seconds - moment).abs() < 1e-6 && timed.scene.active_effects.contains(&"smoke".to_string()))?;
@@ -695,6 +697,9 @@ async fn scene_journey(client: &Client, evidence: &mut Evidence, instance: &str)
     let headless = client.ok(evidence, "view_render", json!({"map":"de_cache","width":640,"height":360,"scene":{"scene":{"map":"de_cache","throws":[smoke]},"time_seconds":moment,"view":"orbit"}})).await?;
     evidence.image(&headless, "scene-orbit-headless")?;
     client.error(evidence, "view_set", json!({"instance_id":instance,"view":"follow","throw":3})).await?;
+    let looked = state(&client.ok(evidence, "camera_look_at", json!({"instance_id":instance,"from":[300.0,0.0,1900.0],"at":[0.0,0.0,1612.0]})).await?)?;
+    evidence.check("camera_look_at points the free camera at a point", (looked.camera.yaw_degrees.abs() - 180.0).abs() < 0.01 && looked.camera.pitch_degrees > 40.0 && looked.camera.eye_height_units == 0.0)?;
+    client.error(evidence, "camera_look_at", json!({"instance_id":instance,"from":[1.0,2.0,3.0],"at":[1.0,2.0,3.0]})).await?;
     client.ok(evidence, "view_set", json!({"instance_id":instance,"view":"free"})).await?;
     let cleared = client.ok(evidence, "scene_set", json!({"instance_id":instance,"scene":{"map":"de_cache","throws":[]}})).await?;
     evidence.check("scene_set replaces the scene", throws(&cleared) == 0)?;
@@ -772,7 +777,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     let tools = client.service.list_all_tools().await?;
     let actual: BTreeSet<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
     evidence.check(
-        "discover all nineteen tools",
+        "discover all twenty-one tools",
         tools.len() == TOOLS.len() && actual == BTreeSet::from(TOOLS),
     )?;
     evidence.check(
@@ -870,6 +875,28 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
             && video["height"] == 360
             && video["nb_read_frames"] == "20",
     )?;
+    // the throw a person gives as a console string, simulated headlessly, then a shot that follows it and circles the smoke
+    let console = json!({"map":"de_mirage","throws":[{"grenade":"smoke","console":"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0","movement":"jumpthrow"}]});
+    let simulated = client.ok(evidence, "throws_simulate", json!({"scene":console})).await?;
+    let report = simulated.structured_content.as_ref().unwrap()["reports"][0].clone();
+    let off = report["detonation"]["t"].as_f64().unwrap_or(0.0);
+    evidence.check("throws_simulate reports a console-string throw's release, bounces and detonation", report["release"]["t"].as_f64().is_some_and(|t| t > 0.1) && report["bounces"].as_array().is_some_and(|b| !b.is_empty()) && off > 3.0 && report["smoke_voxels"].as_u64().is_some_and(|v| v > 100))?;
+    client.error(evidence, "throws_simulate", json!({"scene":{"map":"de_mirage","throws":[{"grenade":"smoke","console":"setpos 1 2 3"}]}})).await?;
+    let mp4 = evidence.output.join("shot.mp4");
+    let shot = client.ok(evidence, "video_render", json!({"scene":console,"width":320,"height":180,"fps":10,"shot":[{"move":"follow","throw":0},{"move":"orbit","throw":0,"radius":380,"height":320,"seconds":2}],"output":mp4})).await?;
+    let shot_job = shot.structured_content.as_ref().unwrap()["job_id"].as_str().context("shot job ID")?.to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let shot_done = loop {
+        let status = client.ok(evidence, "video_status", json!({"job_id":shot_job})).await?.structured_content.unwrap();
+        if status["state"] != "running" {
+            break status;
+        }
+        ensure!(tokio::time::Instant::now() < deadline, "shot video timed out");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let frames = ((off + 2.0) * 10.0).ceil() as u64;
+    evidence.check("a shot follows the flight then orbits, its length from the simulation, written where asked", shot_done["state"] == "completed" && shot_done["path"] == json!(mp4) && mp4.is_file() && shot_done["frames_total"].as_u64() == Some(frames) && shot_done["reports"].as_array().is_some_and(|r| r.len() == 1))?;
+    client.error(evidence, "video_render", json!({"scene":console,"shot":[{"move":"orbit","throw":3}]})).await?;
     let cancel_args = json!({"scene":molotov,"start_seconds":0,"end_seconds":30,"width":1280,"height":720,"fps":30});
     let pending = client.ok(evidence, "video_render", cancel_args).await?;
     let cancelled_id = pending.structured_content.as_ref().unwrap()["job_id"]
@@ -1480,7 +1507,7 @@ async fn verify(config: &Config, evidence: &mut Evidence) -> Result<()> {
     )?;
     later.disconnect().await?;
     evidence.check(
-        "all nineteen tools have positive and negative scenarios",
+        "all twenty-one tools have positive and negative scenarios",
         TOOLS.iter().all(|tool| {
             evidence.calls.get(*tool).is_some_and(|counts| counts.0 > 0)
                 && evidence.negative_cases.contains(*tool)

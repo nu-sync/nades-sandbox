@@ -51,7 +51,8 @@ pub struct RenderedView {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SceneShot {
-    pub scene: nades_control::scene::Scene,
+    /// The map and its throws; each throw's spot may be a console string (setpos …; setang …).
+    pub scene: nades_control::scene::SceneInput,
     /// Seconds on the scene's clock.
     #[serde(default)]
     pub time_seconds: f64,
@@ -678,10 +679,10 @@ impl Backend {
         live.request(command, 15).await
     }
 
-    /// The live window's scene and state.
-    pub async fn scene(&self, instance_id: &str) -> Result<(AppState, nades_control::scene::Scene), ControlError> {
+    /// The live window's scene and state, and what each simulated throw did.
+    pub async fn scene(&self, instance_id: &str) -> Result<(AppState, nades_control::scene::Scene, Vec<nades_control::scene::ThrowReport>), ControlError> {
         match self.command(instance_id, AppCommand::GetScene).await? {
-            ControlOutput::Scene { state, scene } => Ok((state, scene)),
+            ControlOutput::Scene { state, scene, reports } => Ok((state, scene, reports)),
             _ => Err(error("protocol_error", "The app did not return its scene.", false)),
         }
     }
@@ -751,17 +752,18 @@ impl Backend {
             ));
         }
         let camera = camera.map(CameraPose::validated).transpose()?;
-        if let Some(shot) = &scene {
-            if shot.scene.map != map {
-                return Err(error("invalid_render", format!("The scene is on {}, not {map}.", shot.scene.map), false));
+        let scene = scene.map(|shot| shot.scene.clone().scene().map(|scene| (shot, scene))).transpose()?;
+        if let Some((shot, scene)) = &scene {
+            if scene.map != map {
+                return Err(error("invalid_render", format!("The scene is on {}, not {map}.", scene.map), false));
             }
             if !shot.time_seconds.is_finite() || shot.time_seconds < 0.0 {
                 return Err(error("invalid_render", "time_seconds must be finite and nonnegative.", false));
             }
-            if camera.is_none() && shot.throw.is_some_and(|k| k >= shot.scene.throws.len()) {
-                return Err(error("invalid_throw", format!("The scene has {} throws.", shot.scene.throws.len()), false));
+            if camera.is_none() && shot.throw.is_some_and(|k| k >= scene.throws.len()) {
+                return Err(error("invalid_throw", format!("The scene has {} throws.", scene.throws.len()), false));
             }
-            if camera.is_none() && (shot.scene.throws.is_empty() || shot.view == Some(nades_control::scene::ViewName::Free)) {
+            if camera.is_none() && (scene.throws.is_empty() || shot.view == Some(nades_control::scene::ViewName::Free)) {
                 return Err(error("invalid_render", "Give a camera, or a view of one of the scene's throws.", false));
             }
         } else if camera.is_none() {
@@ -804,9 +806,9 @@ impl Backend {
             let angles = format!("{},{}", camera.pitch_degrees, camera.yaw_degrees);
             command.args(["--setpos", &position, "--setang", &angles, "--eye", &camera.eye_height_units.to_string(), "--fov", &camera.vertical_fov_degrees.to_string()]);
         }
-        if let Some(shot) = &scene {
+        if let Some((shot, scene)) = &scene {
             let file = temp.path().join("scene.json");
-            std::fs::write(&file, shot.scene.to_json()).map_err(io_error)?;
+            std::fs::write(&file, scene.to_json()).map_err(io_error)?;
             command.arg("--scene").arg(&file).args(["--time", &shot.time_seconds.to_string()]);
             if let Some(view) = shot.view {
                 command.args(["--view", view.name()]);
@@ -875,11 +877,43 @@ impl Backend {
         })
     }
 
+    /// Simulates `scene`'s throws headlessly (no window, no GPU) and reports what each did.
+    pub async fn simulate(&self, scene: nades_control::scene::Scene) -> Result<Vec<nades_control::scene::ThrowReport>, ControlError> {
+        let path = self.preflight(&scene.map)?;
+        std::fs::create_dir_all(&self.0.config.runs_dir).map_err(io_error)?;
+        let temp = tempfile::Builder::new().prefix("simulate-").tempdir_in(&self.0.config.runs_dir).map_err(io_error)?;
+        let file = temp.path().join("scene.json");
+        std::fs::write(&file, scene.to_json()).map_err(io_error)?;
+        let mut command = Command::new(&self.0.config.sandbox_binary);
+        command
+            .arg("--scene")
+            .arg(&file)
+            .arg("--report")
+            .env("NADES_PACK", path)
+            .env("NADES_SANDBOX_PACKS", &self.0.config.packs_dir)
+            .env("NADES_SANDBOX_STATE", temp.path().join("state.json"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(60), command.output()).await.map_err(|_| error("simulate_timeout", "Simulating exceeded 60 seconds.", true))?.map_err(io_error)?;
+        if !output.status.success() {
+            return Err(error("simulate_failed", format!("The simulator exited with {}: {}", output.status, tail_text(&String::from_utf8_lossy(&output.stderr), 10).join("\n")), true));
+        }
+        String::from_utf8_lossy(&output.stdout).lines().map(|line| serde_json::from_str(line).map_err(|e| error("protocol_error", format!("The simulator's report did not read: {e}"), false))).collect()
+    }
+
     pub async fn video_start(
         &self,
         request: nades_control::video::VideoRequest,
+        output: Option<PathBuf>,
     ) -> Result<crate::video::VideoStatus, ControlError> {
         let request = request.validated()?;
+        if let Some(output) = &output
+            && (!output.is_absolute() || output.extension().is_none_or(|e| e != "mp4") || !output.parent().is_some_and(std::path::Path::is_dir))
+        {
+            return Err(error("invalid_video", "output must be an absolute path ending in .mp4, in a folder that exists.", false));
+        }
         if self.0.detached.load(Ordering::Acquire) {
             return Err(error("disconnected", "MCP session is disconnected.", false));
         }
@@ -894,6 +928,7 @@ impl Backend {
             .videos
             .start(
                 request,
+                output,
                 self.0.config.clone(),
                 pack,
                 permit,
@@ -1553,8 +1588,8 @@ for line in sys.stdin:
         let failure = backend.render("de_cache", None, 640, 360, 0.0, None).await.unwrap_err();
         assert_eq!(failure.code, "invalid_render");
         let shot = |map: &str, throws: usize, throw: Option<usize>| {
-            let mut scene = nades_control::scene::Scene::new(map);
-            scene.throws = vec![nades_control::scene::SceneThrow::new(nades_control::scene::Grenade::Smoke, [0.0; 3], 0.0, 0.0); throws];
+            let throw_input = nades_control::scene::ThrowInput::from(nades_control::scene::SceneThrow::new(nades_control::scene::Grenade::Smoke, [0.0; 3], 0.0, 0.0));
+            let scene = nades_control::scene::SceneInput { format: None, version: None, map: map.into(), throws: vec![throw_input; throws] };
             Some(SceneShot { scene, time_seconds: 1.0, view: None, throw, arcs: true })
         };
         assert_eq!(backend.render("de_cache", None, 640, 360, 0.0, shot("de_mirage", 1, None)).await.unwrap_err().code, "invalid_render");

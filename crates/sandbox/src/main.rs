@@ -27,7 +27,7 @@
 //!   moment of a scene file offscreen (or from `--setpos`/`--setang` in place of a view), its smokes averaged over 16
 //!   jittered frames, and prints what each throw did as JSON lines (offscreen.rs). `--render-video <request.json>`
 //!   streams a scene's clip as PNG frames on stdout, for the MCP server. `--scene <file.json>` alone opens the scene in
-//!   the window, on its map.
+//!   the window, on its map; `--scene <file.json> --report` simulates its throws with no GPU and prints what each did.
 //! - `--bench-offscreen <n> [--size 2880x1800]` draws n frames offscreen from the bench camera, each finished on the GPU
 //!   before the next, and prints the median and 95th percentile per frame after the first 30: the steady frame where
 //!   no window can be shown.
@@ -43,6 +43,7 @@ mod control;
 mod resident;
 mod scene;
 mod shell;
+mod shot;
 mod sim;
 mod state;
 mod views;
@@ -105,6 +106,7 @@ struct Args {
     view: Option<nades_control::scene::ViewName>,
     throw: Option<usize>,
     no_arcs: bool,
+    report: bool,
     render_time: Option<f32>,
     fov: Option<f32>,
     bench_maps: Option<Vec<String>>,
@@ -130,6 +132,7 @@ fn args() -> Result<Args> {
             "--view" => args.view = Some(it.next().as_deref().and_then(nades_control::scene::ViewName::parse).context("--view needs free, thrower, follow or orbit")?),
             "--throw" => args.throw = Some(it.next().and_then(|n| n.parse().ok()).context("--throw needs a throw's index in the scene")?),
             "--no-arcs" => args.no_arcs = true,
+            "--report" => args.report = true,
             "--ui" => shell::set_shown(true),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
             "--control-stdio" => args.control_stdio = true,
@@ -186,6 +189,9 @@ fn run() -> Result<()> {
     if args.control_stdio { clock::enable_logs(); }
     if let Some(request) = &args.video_request {
         return offscreen::render_video(request);
+    }
+    if let (true, Some(scene)) = (args.report, &args.scene) {
+        return offscreen::simulate(scene);
     }
     if let (Some(out), Some(scene)) = (&args.render, &args.scene) {
         let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
@@ -653,7 +659,7 @@ impl App {
                     Err(error) => Err(ControlError::new("render_failed", error.to_string(), true)),
                 }
             }
-            AppCommand::GetScene => Ok(ControlOutput::Scene { state: view.snapshot(instance), scene: view.app.scene() }),
+            AppCommand::GetScene => Ok(ControlOutput::Scene { state: view.snapshot(instance), scene: view.app.scene(), reports: view.app.reports() }),
             AppCommand::SetScene { scene, expected_revision } => {
                 view.check_revision(expected_revision)?;
                 view.app.set_scene(scene.validated()?);

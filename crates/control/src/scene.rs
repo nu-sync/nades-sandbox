@@ -152,6 +152,138 @@ impl SceneThrow {
     }
 }
 
+/// The spot and view a CS2 console string puts a player in: `setpos x y z; setang pitch yaw roll` (either order,
+/// `setpos_exact` too, roll ignored), as `getpos` prints it and practice configs hold it.
+pub fn parse_console(text: &str) -> Result<([f64; 3], f64, f64), ControlError> {
+    let invalid = |message: String| ControlError::new("invalid_console", message, false);
+    let (mut feet, mut angles) = (None, None);
+    for command in text.split(';').map(str::trim).filter(|c| !c.is_empty()) {
+        let mut words = command.split_whitespace();
+        let name = words.next().unwrap_or_default().to_ascii_lowercase();
+        let numbers: Vec<f64> = words.map(|w| w.parse::<f64>()).collect::<Result<_, _>>().map_err(|_| invalid(format!("Not numbers in {command:?}.")))?;
+        match name.as_str() {
+            "setpos" | "setpos_exact" if numbers.len() == 3 => feet = Some([numbers[0], numbers[1], numbers[2]]),
+            "setang" | "setang_exact" if (2..=3).contains(&numbers.len()) => angles = Some((numbers[0], numbers[1])),
+            _ => return Err(invalid(format!("Expected `setpos x y z` and `setang pitch yaw [roll]`, not {command:?}."))),
+        }
+    }
+    match (feet, angles) {
+        (Some(feet), Some((pitch, yaw))) => Ok((feet, pitch, yaw)),
+        _ => Err(invalid("A console string needs both `setpos x y z` and `setang pitch yaw`.".into())),
+    }
+}
+
+/// A throw as an agent or another application gives it: the grenade, the spot and view either as a CS2 console string
+/// (`setpos …; setang …`) or as feet, pitch and yaw, and how it is thrown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ThrowInput {
+    pub grenade: Grenade,
+    /// `setpos x y z; setang pitch yaw 0`, as CS2's console takes it: the player's feet and view. Give this, or feet,
+    /// pitch and yaw.
+    #[serde(default)]
+    pub console: Option<String>,
+    /// The player's feet in Hammer units (Z up), as `setpos` takes them.
+    #[serde(default)]
+    pub feet: Option<[f64; 3]>,
+    /// Degrees, positive looking down, as `setang` takes it.
+    #[serde(default)]
+    pub pitch: Option<f64>,
+    #[serde(default)]
+    pub yaw: Option<f64>,
+    /// Crouched as it is thrown.
+    #[serde(default)]
+    pub crouch: bool,
+    /// stand (default), walk, run, jumpthrow, run_jumpthrow.
+    #[serde(default)]
+    pub movement: Movement,
+    /// left (default: a full throw), middle (both buttons: medium), right (an underhand lob).
+    #[serde(default)]
+    pub click: Click,
+    /// Seconds on the scene's clock when the throw begins (0–120, default 0).
+    #[serde(default)]
+    pub start: f64,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl ThrowInput {
+    /// The scene's throw, or why it cannot be one.
+    pub fn throw(self) -> Result<SceneThrow, ControlError> {
+        let (feet, pitch, yaw) = match (&self.console, self.feet, self.pitch, self.yaw) {
+            (Some(text), None, None, None) => parse_console(text)?,
+            (None, Some(feet), Some(pitch), Some(yaw)) => (feet, pitch, yaw),
+            _ => return Err(ControlError::new("invalid_throw", "Give the spot as `console` (setpos …; setang …) or as feet, pitch and yaw, not both.", false)),
+        };
+        SceneThrow { grenade: self.grenade, feet, pitch, yaw, crouch: self.crouch, movement: self.movement, click: self.click, start: self.start, label: self.label }.validated()
+    }
+}
+
+impl From<SceneThrow> for ThrowInput {
+    fn from(t: SceneThrow) -> Self {
+        Self { grenade: t.grenade, console: None, feet: Some(t.feet), pitch: Some(t.pitch), yaw: Some(t.yaw), crouch: t.crouch, movement: t.movement, click: t.click, start: t.start, label: t.label }
+    }
+}
+
+/// A scene as an agent gives it: a map and throws, each a [`ThrowInput`] (a scene file reads as one too).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SceneInput {
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub version: Option<u32>,
+    /// A map ID such as de_mirage.
+    pub map: String,
+    #[serde(default)]
+    pub throws: Vec<ThrowInput>,
+}
+
+impl SceneInput {
+    pub fn scene(self) -> Result<Scene, ControlError> {
+        let throws = self.throws.into_iter().map(ThrowInput::throw).collect::<Result<Vec<_>, _>>()?;
+        Scene { format: self.format.unwrap_or_else(format), version: self.version.unwrap_or(VERSION), map: self.map, throws }.validated()
+    }
+}
+
+/// A point of a flight: seconds on the scene's clock, and where.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FlightPoint {
+    pub t: f64,
+    pub at: [f64; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal: Option<[f64; 3]>,
+}
+
+/// What a throw did, as the simulator worked it out. Times are seconds on the scene's clock; positions Hammer units.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ThrowReport {
+    /// The throw's index in the scene.
+    pub throw: usize,
+    pub grenade: Grenade,
+    pub start: f64,
+    /// When and where it leaves the hand, and its velocity then (units a second).
+    pub release: FlightPoint,
+    pub velocity: [f64; 3],
+    /// Every time it hits something, with the surface's normal.
+    pub bounces: Vec<FlightPoint>,
+    /// Where it first comes down on a floor (a surface facing up), if it does before it goes off.
+    pub landing: Option<FlightPoint>,
+    /// When and where it goes off (a flash or HE in the air has no surface).
+    pub detonation: FlightPoint,
+    /// Seconds from the release to the detonation.
+    pub flight_seconds: f64,
+    /// How long what it leaves lasts after it goes off, and where a camera should look at it.
+    pub effect_seconds: f64,
+    pub effect_focus: [f64; 3],
+    pub smoke_voxels: Option<usize>,
+    pub fire_flames: Option<usize>,
+    /// The console commands that put a player in this throw's spot and view.
+    pub practice: String,
+    /// How long the simulation took (ms).
+    pub ms: f64,
+}
+
 /// A map and the throws placed on it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -280,5 +412,19 @@ mod tests {
         assert_eq!(code(r#"{"map":"de_cache","throws":[{"grenade":"rock","feet":[0,0,0],"pitch":0,"yaw":0}]}"#).code, "invalid_scene");
         assert_eq!(code("not json").code, "invalid_scene");
         assert_eq!(ViewName::parse("Orbit"), Some(ViewName::Orbit));
+    }
+
+    #[test]
+    fn a_console_string_is_a_throws_spot_and_view() {
+        let input = |json: &str| serde_json::from_str::<ThrowInput>(json).unwrap().throw();
+        let t = input(r#"{"grenade":"smoke","console":"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0","movement":"jumpthrow"}"#).unwrap();
+        assert_eq!((t.feet, t.pitch, t.yaw, t.movement, t.click, t.crouch), ([1296.0, 32.0, -167.97], -28.89, -166.0, Movement::Jumpthrow, Click::Left, false));
+        assert_eq!(parse_console("setang 10 20;setpos_exact 1 2 3").unwrap(), ([1.0, 2.0, 3.0], 10.0, 20.0));
+        assert_eq!(input(r#"{"grenade":"he","feet":[0,0,0],"pitch":0,"yaw":90}"#).unwrap().yaw, 90.0);
+        assert_eq!(input(r#"{"grenade":"he","console":"setpos 1 2 3"}"#).unwrap_err().code, "invalid_console");
+        assert_eq!(input(r#"{"grenade":"he","console":"setpos 1 2 3; setang 0 0","feet":[0,0,0]}"#).unwrap_err().code, "invalid_throw");
+        assert_eq!(input(r#"{"grenade":"he","console":"noclip"}"#).unwrap_err().code, "invalid_console");
+        let scene: SceneInput = serde_json::from_str(r#"{"map":"de_mirage","throws":[{"grenade":"flash","console":"setpos 1 2 3; setang 0 0 0"}]}"#).unwrap();
+        assert_eq!(scene.scene().unwrap().throws[0].feet, [1.0, 2.0, 3.0]);
     }
 }

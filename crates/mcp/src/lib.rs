@@ -19,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const INSTRUCTIONS: &str = "Operate the native CS2 grenade simulator through observe → act → verify. Begin with app_status to learn what is shown and maps_list to discover local packs. A scene is a map and the throws placed on it: each throw is the player's feet (Hammer units, Z up), pitch/yaw in degrees (positive pitch looks down), crouch, movement (stand, walk, run, jumpthrow, run_jumpthrow), click (left, middle, right) and a start time in seconds on the scene's clock; the simulator flies each grenade through the map and sets it off (smoke, fire, flash, HE, decoy). Headless: view_render with a scene and time_seconds renders that moment from a view of a throw (orbit, follow, thrower) or a camera, and reports where each throw went off; video_render plays a scene into an MP4 (poll video_status, or video_cancel). Window: app_start opens one agent-owned window and returns only after a map frame is presented and the window visible; use its instance_id. scene_get and scene_set read and replace the window's scene (another map switches the window to it); throw_add, throw_update and throw_remove edit it; time_set moves or plays the clock; view_set shows a throw's view or the free camera; camera_set sets an absolute camera (the free view); frame_capture with the returned revision shows the result. map_open may restart the app and returns a replacement instance_id. Status and diagnostics expose explicitly labelled CPU timings; null GPU timings mean unavailable, not zero. app_stop closes the owned window; disconnect leaves a ready window open for the user. No tool builds packs or exports game assets.";
+const INSTRUCTIONS: &str = "This server drives a CS2 grenade simulator: it throws grenades on CS2 maps, flies them through the map with CS2's physics, sets them off (smoke, fire, flash, HE, decoy) and renders images and videos. The person talks to you; you drive it. A throw is a grenade and a spot: a CS2 console string `setpos x y z; setang pitch yaw 0` (positions are the player's feet in Hammer units, Z up; positive pitch looks down) or feet/pitch/yaw, plus movement (stand, walk, run, jumpthrow, run_jumpthrow), click (left = full throw, middle = medium, right = lob), crouch and start (seconds on the scene's clock). A scene is a map (e.g. de_mirage; maps_list lists them) and its throws. Without a window: throws_simulate answers where and when each throw lands and goes off; view_render renders a moment of a scene as a PNG; video_render renders an MP4 with a scripted shot, e.g. shot=[{move:follow,throw:0},{move:orbit,throw:0,radius:350,height:120,seconds:8,degrees:360}] follows the flight then pans 360° around what it left (poll video_status; pass output to choose the file). With a window (app_start opens one showing only the 3D view and returns the instance_id every window tool takes): scene_set (also the way to change map), throw_add, throw_update, throw_remove, scene_get (with what each throw did), time_set, view_set (thrower, follow, orbit, free), camera_set, camera_look_at, frame_capture to see it. app_status (start here) and diagnostics_get report state; app_stop closes the window. No tool builds packs or exports game assets.";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusResponse {
@@ -135,7 +135,7 @@ impl From<Snapshot> for StatusResponse {
         } else if snapshot.lifecycle == "starting" || snapshot.lifecycle == "stopping" {
             vec!["app_status", "diagnostics_get"]
         } else {
-            vec!["maps_list", "app_start", "view_render", "diagnostics_get"]
+            vec!["maps_list", "throws_simulate", "view_render", "video_render", "app_start"]
         }
         .into_iter()
         .map(str::to_owned)
@@ -218,6 +218,16 @@ pub struct SceneResponse {
     #[serde(flatten)]
     pub status: StatusResponse,
     pub scene: nades_control::scene::Scene,
+    /// What each simulated throw did (release, bounces, landing, detonation, its effect), in the scene's order; a throw
+    /// still being simulated is missing until it is (status shows loading).
+    pub reports: Vec<nades_control::scene::ThrowReport>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SimulateResponse {
+    pub summary: String,
+    pub map: String,
+    pub reports: Vec<nades_control::scene::ThrowReport>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -307,7 +317,8 @@ pub(crate) fn yes() -> bool {
 #[serde(deny_unknown_fields)]
 pub struct SceneSetParams {
     pub instance_id: String,
-    pub scene: nades_control::scene::Scene,
+    /// The map and its throws; each throw's spot may be a console string (setpos …; setang …).
+    pub scene: nades_control::scene::SceneInput,
     /// Reject if user input or another operation has since changed the view.
     pub expected_revision: Option<u64>,
 }
@@ -316,7 +327,68 @@ pub struct SceneSetParams {
 #[serde(deny_unknown_fields)]
 pub struct ThrowAddParams {
     pub instance_id: String,
-    pub throw: nades_control::scene::SceneThrow,
+    pub throw: nades_control::scene::ThrowInput,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SimulateParams {
+    /// The map and its throws; each throw's spot may be a console string (setpos …; setang …).
+    pub scene: nades_control::scene::SceneInput,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LookAtParams {
+    pub instance_id: String,
+    /// Where the camera's eye is, Hammer units (Z up).
+    pub from: [f32; 3],
+    /// The point it looks at.
+    pub at: [f32; 3],
+    /// Vertical field of view in degrees (CS2's 73.74 by default).
+    #[serde(default = "nades_control::default_fov")]
+    pub vertical_fov_degrees: f32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VideoParams {
+    /// The map and its throws; each throw's spot may be a console string (setpos …; setang …).
+    pub scene: nades_control::scene::SceneInput,
+    /// Seconds on the scene's clock where the clip starts (default 0; each throw begins at its own start).
+    #[serde(default)]
+    pub start_seconds: f64,
+    /// Where it ends; with a shot, omit it and the clip ends with the shot.
+    #[serde(default)]
+    pub end_seconds: Option<f64>,
+    /// Even, at most 1920 (default 1280).
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Even, at most 1080 (default 720).
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// 1–60 (default 30); at most 1800 frames in all.
+    #[serde(default)]
+    pub fps: Option<u32>,
+    /// A scripted camera: moves one after another, the scene's clock running with them. E.g. follow the flight, then a
+    /// 360° pan around what it left: [{"move":"follow","throw":0},{"move":"orbit","throw":0,"radius":350,"height":120,"seconds":8,"degrees":360}].
+    #[serde(default)]
+    pub shot: Vec<nades_control::video::ShotMove>,
+    /// Instead of a shot: a fixed camera.
+    #[serde(default)]
+    pub camera: Option<CameraPose>,
+    /// Instead of a shot: timed camera poses (seconds from the clip's start; the first at 0).
+    #[serde(default)]
+    pub camera_keyframes: Vec<nades_control::video::CameraKeyframe>,
+    /// Instead of a shot or camera: thrower, follow or orbit of `throw` for the whole clip.
+    #[serde(default)]
+    pub view: Option<nades_control::scene::ViewName>,
+    #[serde(default)]
+    pub throw: Option<usize>,
+    /// An absolute path ending in .mp4 to write the finished video to (its folder must exist); else the MCP's runs
+    /// folder. video_status gives the path.
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -325,7 +397,7 @@ pub struct ThrowUpdateParams {
     pub instance_id: String,
     /// The throw's index in the scene.
     pub index: usize,
-    pub throw: nades_control::scene::SceneThrow,
+    pub throw: nades_control::scene::ThrowInput,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -432,23 +504,48 @@ impl NadesMcp {
         if let Err(e) = self.backend.command(instance_id, nades_control::AppCommand::SetScene { scene, expected_revision }).await {
             return self.fail(e).await;
         }
-        match self.backend.scene(instance_id).await {
-            Ok((state, scene)) => success(SceneResponse { status: self.status_with_state(state).await, scene }),
-            Err(e) => self.fail(e).await,
+        self.scene_result(instance_id).await
+    }
+
+    /// The window's scene, what its throws did and the state, waiting (up to 30 s) until every throw is simulated.
+    async fn scene_result(&self, instance_id: &str) -> CallToolResult {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match self.backend.scene(instance_id).await {
+                Ok((state, scene, reports)) if reports.len() == scene.throws.len() || tokio::time::Instant::now() >= deadline => {
+                    return success(SceneResponse { status: self.status_with_state(state).await, scene, reports });
+                }
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                Err(e) => return self.fail(e).await,
+            }
         }
     }
 
     /// Reads the window's scene, changes it with `change`, and puts it back.
-    async fn edit_scene(&self, instance_id: &str, change: impl FnOnce(&mut nades_control::scene::Scene) -> Result<(), ControlError>) -> CallToolResult {
-        let (state, mut scene) = match self.backend.scene(instance_id).await {
-            Ok(read) => read,
-            Err(e) => return self.fail(e).await,
-        };
-        let changed = change(&mut scene).and_then(|()| scene.validated());
-        match changed {
-            Ok(scene) => self.apply_scene(instance_id, scene, Some(state.revision)).await,
-            Err(e) => self.fail(e).await,
+    /// The view's revision also moves when a simulation finishes or the person flies the camera, so a write that finds
+    /// it moved is tried again on a fresh read, as long as the scene itself is what was read.
+    async fn edit_scene(&self, instance_id: &str, change: impl Fn(&mut nades_control::scene::Scene) -> Result<(), ControlError>) -> CallToolResult {
+        let mut first: Option<nades_control::scene::Scene> = None;
+        for _ in 0..5 {
+            let (state, read, _) = match self.backend.scene(instance_id).await {
+                Ok(read) => read,
+                Err(e) => return self.fail(e).await,
+            };
+            if first.get_or_insert_with(|| read.clone()) != &read {
+                return self.fail(ControlError::new("stale_revision", "The scene changed while it was being edited; read it again with scene_get.", true)).await;
+            }
+            let mut scene = read;
+            let changed = match change(&mut scene).and_then(|()| scene.validated()) {
+                Ok(scene) => scene,
+                Err(e) => return self.fail(e).await,
+            };
+            match self.backend.command(instance_id, nades_control::AppCommand::SetScene { scene: changed, expected_revision: Some(state.revision) }).await {
+                Ok(_) => return self.scene_result(instance_id).await,
+                Err(e) if e.code == "stale_revision" => continue,
+                Err(e) => return self.fail(e).await,
+            }
         }
+        self.fail(ControlError::new("stale_revision", "The view kept changing while the scene was being edited; try again.", true)).await
     }
 
     async fn status_with_state(&self, state: AppState) -> StatusResponse {
@@ -621,49 +718,90 @@ impl NadesMcp {
         }
     }
 
-    #[tool(description = "Start an asynchronous headless video of a scene: its throws simulated and played from start_seconds to end_seconds on its clock, seen from a view of one throw (follow by default; orbit, thrower) or a fixed camera or camera keyframes (times are seconds from clip start). Poll video_status for progress and the local MP4 path.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
+    #[tool(description = "Render a video of a scene to MP4, headlessly (no window): its throws simulated and played with the scene's clock. The camera is a `shot`, a list of moves played one after another: {\"move\":\"follow\",\"throw\":k,\"after_seconds\":s} trails the grenade until it goes off (plus s seconds); {\"move\":\"orbit\",\"throw\":k,\"radius\":350,\"height\":120,\"seconds\":8,\"degrees\":360} circles horizontally around what the throw left (its smoke, fire or burst), looking at it, starting from the camera's current bearing and easing in; {\"move\":\"thrower\",\"throw\":k,\"seconds\":2} is the thrower's eye; {\"move\":\"hold\",\"camera\":{…},\"seconds\":2} a fixed camera. E.g. follow the flight then a 360° pan around the smoke: shot=[{\"move\":\"follow\",\"throw\":0},{\"move\":\"orbit\",\"throw\":0}]. With a shot, end_seconds may be left out. Alternatively a fixed camera, camera_keyframes or a view of a throw for the whole clip. Give `output` (an absolute .mp4 path) to choose where it is written. Returns a job at once: poll video_status until completed for the path and what each throw did; video_cancel stops it.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
     pub async fn video_render(
         &self,
-        Parameters(request): Parameters<nades_control::video::VideoRequest>,
+        Parameters(params): Parameters<VideoParams>,
     ) -> CallToolResult {
-        match self.backend.video_start(request).await {
+        let scene = match params.scene.scene() {
+            Ok(scene) => scene,
+            Err(e) => return self.fail(e).await,
+        };
+        let request = nades_control::video::VideoRequest {
+            scene,
+            start_seconds: params.start_seconds,
+            end_seconds: params.end_seconds,
+            width: params.width.unwrap_or(1280),
+            height: params.height.unwrap_or(720),
+            fps: params.fps.unwrap_or(30),
+            camera: params.camera,
+            camera_keyframes: params.camera_keyframes,
+            view: params.view,
+            throw: params.throw,
+            shot: params.shot,
+        };
+        match self.backend.video_start(request, params.output.map(std::path::PathBuf::from)).await {
             Ok(v) => success(v),
             Err(e) => self.fail(e).await,
         }
     }
 
-    #[tool(description = "Read the window's scene: its map and every throw placed on it, in order (their indexes are what throw_update, throw_remove and view_set take).", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
-    pub async fn scene_get(&self, Parameters(params): Parameters<InstanceParams>) -> CallToolResult {
-        match self.backend.scene(&params.instance_id).await {
-            Ok((state, scene)) => success(SceneResponse { status: self.status_with_state(state).await, scene }),
+    #[tool(description = "Simulate throws headlessly (no window, no GPU, a second or two) and report what each did: when and where it leaves the hand and its velocity, every bounce with the surface's normal, where it first lands on a floor, when and where it goes off (times in seconds on the scene's clock, from the throw's start), how long its effect lasts and where to look at it (the smoke's middle, the fire), and the practice command. A throw's spot is a CS2 console string, e.g. {\"grenade\":\"smoke\",\"console\":\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\",\"movement\":\"jumpthrow\",\"click\":\"left\",\"crouch\":false}, or feet, pitch and yaw. Use it to answer where and when a lineup lands before rendering anything.", output_schema = output_schema::<SimulateResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
+    pub async fn throws_simulate(&self, Parameters(params): Parameters<SimulateParams>) -> CallToolResult {
+        let scene = match params.scene.scene() {
+            Ok(scene) => scene,
+            Err(e) => return self.fail(e).await,
+        };
+        let map = scene.map.clone();
+        match self.backend.simulate(scene).await {
+            Ok(reports) => {
+                let lines: Vec<String> = reports.iter().map(|r| format!("throw {} ({:?}) goes off at {:.2} s at ({:.0}, {:.0}, {:.0})", r.throw, r.grenade, r.detonation.t, r.detonation.at[0], r.detonation.at[1], r.detonation.at[2])).collect();
+                success(SimulateResponse { summary: format!("Simulated {} throws on {map}: {}.", reports.len(), lines.join("; ")), map, reports })
+            }
             Err(e) => self.fail(e).await,
         }
     }
 
-    #[tool(description = "Replace the window's scene (format nades-sandbox-scene, version 1). A scene on another map switches the window to that map. Its throws are simulated in the background: status shows loading until they are.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false))]
+    #[tool(description = "Point the window's free camera from one point at another (Hammer units, Z up): e.g. from above a smoke's detonation, looking at it. Same as camera_set with the angles worked out; returns the applied camera and revision for frame_capture.", output_schema = output_schema::<StatusResponse>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    pub async fn camera_look_at(&self, Parameters(params): Parameters<LookAtParams>) -> CallToolResult {
+        let d = [params.at[0] - params.from[0], params.at[1] - params.from[1], params.at[2] - params.from[2]];
+        let flat = d[0].hypot(d[1]);
+        if flat < 1e-3 && d[2].abs() < 1e-3 {
+            return self.fail(ControlError::new("invalid_camera", "from and at are the same point.", false)).await;
+        }
+        let camera = CameraPose { position: params.from, pitch_degrees: (-d[2].atan2(flat).to_degrees()).clamp(-89.9, 89.9), yaw_degrees: d[1].atan2(d[0]).to_degrees(), eye_height_units: 0.0, vertical_fov_degrees: params.vertical_fov_degrees };
+        self.state_result(self.backend.set_camera(&params.instance_id, camera, None).await).await
+    }
+
+    #[tool(description = "Read the window's scene: its map, every throw placed on it in order (their indexes are what throw_update, throw_remove, view_set and shots take), and what each did (release, bounces, landing, detonation, effect).", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
+    pub async fn scene_get(&self, Parameters(params): Parameters<InstanceParams>) -> CallToolResult {
+        self.scene_result(&params.instance_id).await
+    }
+
+    #[tool(description = "Replace the window's scene: a map and its throws (each a grenade with a console string `setpos …; setang …` or feet/pitch/yaw, movement, click, crouch, start). A scene on another map switches the window to that map in place (this is how to choose the map). Waits until the throws are simulated and returns what each did. An empty throws list clears the scene.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false))]
     pub async fn scene_set(&self, Parameters(params): Parameters<SceneSetParams>) -> CallToolResult {
-        let scene = match params.scene.validated() {
+        let scene = match params.scene.scene() {
             Ok(scene) => scene,
             Err(e) => return self.fail(e).await,
         };
         self.apply_scene(&params.instance_id, scene, params.expected_revision).await
     }
 
-    #[tool(description = "Place a throw in the window's scene and select it: the player's feet (Hammer units, Z up), pitch and yaw in degrees (positive pitch looks down), crouch, movement, click, and its start in seconds on the scene's clock.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
+    #[tool(description = "Place a throw in the window's scene and select it. The spot is a CS2 console string (`console`: \"setpos x y z; setang pitch yaw 0\", as getpos prints it) or feet (Hammer units, Z up) with pitch and yaw (degrees, positive pitch looks down). Also grenade (smoke, flash, he, molotov, incendiary, decoy), movement (stand, walk, run, jumpthrow, run_jumpthrow), click (left full throw, middle medium, right lob), crouch, and start (seconds on the scene's clock). Waits until it is simulated and returns the scene with what each throw did.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false))]
     pub async fn throw_add(&self, Parameters(params): Parameters<ThrowAddParams>) -> CallToolResult {
         self.edit_scene(&params.instance_id, |scene| {
-            scene.throws.push(params.throw);
+            scene.throws.push(params.throw.clone().throw()?);
             Ok(())
         })
         .await
     }
 
-    #[tool(description = "Change throw `index` of the window's scene: re-aim it, move it, or change its grenade, movement, crouch, click or start.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false))]
+    #[tool(description = "Replace throw `index` of the window's scene with another (same fields as throw_add): re-aim it, move it, or change its grenade, movement, crouch, click or start.", output_schema = output_schema::<SceneResponse>(), annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false))]
     pub async fn throw_update(&self, Parameters(params): Parameters<ThrowUpdateParams>) -> CallToolResult {
         self.edit_scene(&params.instance_id, |scene| {
             let count = scene.throws.len();
             let slot = scene.throws.get_mut(params.index).ok_or_else(|| ControlError::new("invalid_throw", format!("The scene has {count} throws."), false))?;
-            *slot = params.throw;
+            *slot = params.throw.clone().throw()?;
             Ok(())
         })
         .await
@@ -687,7 +825,7 @@ impl NadesMcp {
         self.state_result(result.and_then(state_of)).await
     }
 
-    #[tool(description = "Show a view in the window: thrower (the throw's eye as it lets go), follow (behind the grenade in flight, playing), orbit (over what it left, at its fullest), or free (the camera camera_set moves).", output_schema = output_schema::<StatusResponse>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
+    #[tool(description = "Show a view of a throw in the window: thrower (the throw's eye as it lets go, the clock at its release), follow (80 units behind the grenade, the clock playing from the throw's start), orbit (a shot that sees what it left, the clock at its fullest; drag-free), or free (the camera camera_set and camera_look_at move). `throw` is its index (the selected one by default).", output_schema = output_schema::<StatusResponse>(), annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false))]
     pub async fn view_set(&self, Parameters(params): Parameters<ViewParams>) -> CallToolResult {
         let result = self.backend.command(&params.instance_id, nades_control::AppCommand::SetView { view: params.view, throw: params.throw }).await;
         self.state_result(result.and_then(state_of)).await
@@ -947,6 +1085,7 @@ mod tests {
                 "app_start",
                 "app_status",
                 "app_stop",
+                "camera_look_at",
                 "camera_set",
                 "diagnostics_get",
                 "frame_capture",
@@ -957,6 +1096,7 @@ mod tests {
                 "throw_add",
                 "throw_remove",
                 "throw_update",
+                "throws_simulate",
                 "time_set",
                 "video_cancel",
                 "video_render",

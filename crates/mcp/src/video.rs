@@ -28,6 +28,8 @@ pub struct VideoStatus {
     pub fps: u32,
     pub duration_seconds: f64,
     pub request: VideoRequest,
+    /// What each throw of the scene did, once the renderer has simulated them.
+    pub reports: Vec<nades_control::scene::ThrowReport>,
 }
 struct Job {
     status: VideoStatus,
@@ -42,6 +44,7 @@ impl VideoJobs {
     pub async fn start(
         &self,
         request: VideoRequest,
+        output: Option<PathBuf>,
         config: Config,
         pack: PathBuf,
         permit: OwnedSemaphorePermit,
@@ -53,7 +56,7 @@ impl VideoJobs {
             job_id: id.clone(),
             state: "running".into(),
             frames_completed: 0,
-            frames_total: request.frame_count(),
+            frames_total: request.frame_count().unwrap_or(0),
             path: None,
             error: None,
             map: request.scene.map.clone(),
@@ -61,8 +64,9 @@ impl VideoJobs {
             width: request.width,
             height: request.height,
             fps: request.fps,
-            duration_seconds: f64::from(request.frame_count()) / f64::from(request.fps),
+            duration_seconds: f64::from(request.frame_count().unwrap_or(0)) / f64::from(request.fps),
             request: request.clone(),
+            reports: Vec::new(),
         };
         self.jobs.lock().await.insert(
             id.clone(),
@@ -75,7 +79,7 @@ impl VideoJobs {
         tokio::spawn(async move {
             let _permit = permit;
             let result = jobs
-                .run(&id, request, config, pack, cancelled, shutdown)
+                .run(&id, request, output, config, pack, cancelled, shutdown)
                 .await;
             if let Some(job) = jobs.jobs.lock().await.get_mut(&id) {
                 match result {
@@ -140,10 +144,12 @@ impl VideoJobs {
         job.cancel.send_replace(true);
         Ok(job.status.clone())
     }
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         id: &str,
         request: VideoRequest,
+        destination: Option<PathBuf>,
         config: Config,
         pack: PathBuf,
         mut cancel: watch::Receiver<bool>,
@@ -226,6 +232,15 @@ impl VideoJobs {
                 {
                     if let Some(job) = jobs.lock().await.get_mut(&id_for_progress) {
                         job.status.frames_completed = v["frames"].as_u64().unwrap_or(0) as u32;
+                        // a shot's length is known once the renderer has simulated its throws
+                        job.status.frames_total = v["total"].as_u64().unwrap_or(0) as u32;
+                        job.status.duration_seconds = f64::from(job.status.frames_total) / f64::from(job.status.fps);
+                    }
+                    continue;
+                }
+                if let Ok(report) = serde_json::from_str::<nades_control::scene::ThrowReport>(&line) {
+                    if let Some(job) = jobs.lock().await.get_mut(&id_for_progress) {
+                        job.status.reports.push(report);
                     }
                     continue;
                 }
@@ -285,6 +300,13 @@ impl VideoJobs {
         copy.map_err(|e| format!("Frame stream failed: {e}"))?;
         std::fs::rename(&partial, &final_path)
             .map_err(|e| format!("Publishing video failed: {e}"))?;
-        Ok(final_path)
+        match destination {
+            Some(destination) => {
+                std::fs::copy(&final_path, &destination).map_err(|e| format!("Copying the video to {} failed: {e}", destination.display()))?;
+                let _ = std::fs::remove_file(&final_path);
+                Ok(destination)
+            }
+            None => Ok(final_path),
+        }
     }
 }

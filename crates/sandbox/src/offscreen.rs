@@ -53,23 +53,23 @@ pub fn stage(scene: &Scene, (width, height): (u32, u32), arcs: Option<Option<usi
     Ok(Staged { gpu, map, targets, placed, collider })
 }
 
-/// What a throw did, as one JSON object.
-pub fn report(k: usize, b: &sim::Built, start: f64) -> serde_json::Value {
-    let d = b.path.detonation;
-    let r = b.path.release;
-    serde_json::json!({
-        "throw": k,
-        "grenade": b.throw.grenade,
-        "start": start,
-        "release": { "t": r.t, "p0": r.p0.to_array(), "v0": r.v0.to_array() },
-        "bounces": b.path.bounces.len(),
-        "detonation": { "t": d.t, "at": start + d.t, "pos": d.pos.to_array(), "normal": d.normal.map(|n| n.to_array()) },
-        "smoke_voxels": b.stage.cloud.as_ref().map(|c| c.count),
-        "fire_flames": b.stage.fire.as_ref().map(|f| f.flames.len()),
-        "effect_seconds": b.stage.duration,
-        "result_camera": { "eye": b.result.eye.to_array(), "pitch": b.result.pitch, "yaw": b.result.yaw, "seen": b.result.seen },
-        "ms": b.ms,
-    })
+/// What a throw did, as one JSON line.
+pub fn report(k: usize, b: &sim::Built, start: f64) -> String {
+    serde_json::to_string(&b.report(k, start)).expect("a report serializes")
+}
+
+/// Simulates a scene file's throws against its map's collider, with no GPU, and prints what each did, one JSON line
+/// each (`--scene f.json --report`).
+pub fn simulate(path: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let scene = Scene::parse(&text).map_err(|e| anyhow!("{}: {}", path.display(), e.message))?;
+    let collider = crate::assets::collider(&scene.map).map_err(|e| eprintln!("collider: {e:#} (grenades fly through walls, no smoke or fire)")).ok();
+    // the smoke's light is drawing's business: straight up will do for the report
+    let built: Vec<_> = scene.throws.par_iter().map(|t| sim::simulate(t, collider.as_ref(), glam::DVec3::Z)).collect();
+    for (k, (b, t)) in built.iter().zip(&scene.throws).enumerate() {
+        println!("{}", report(k, b, t.start));
+    }
+    Ok(())
 }
 
 /// The camera `view` of throw `k` shows at `t` on the scene's clock.
@@ -134,9 +134,16 @@ pub fn render_video(path: &Path) -> Result<()> {
     let request: VideoRequest = serde_json::from_slice(&std::fs::read(path)?)?;
     let request = request.validated().map_err(|e| anyhow!("{}: {}", e.code, e.message))?;
     let (width, height) = (request.width, request.height);
-    let mut s = stage(&request.scene, (width, height), Some(request.throw))?;
+    let strong = request.throw.or_else(|| request.shot.first().and_then(nades_control::video::ShotMove::throw));
+    let mut s = stage(&request.scene, (width, height), Some(strong))?;
     for (i, (b, start)) in s.placed.iter().enumerate() {
         eprintln!("{}", report(i, b, *start));
+    }
+    let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds));
+    let end = request.end_seconds.unwrap_or_else(|| request.start_seconds + shot.as_ref().map_or(1.0, crate::shot::Shot::seconds));
+    let frames = request.frames_until(end);
+    if end - request.start_seconds > 60.0 || frames > 1800 {
+        bail!("the clip would last {:.1} s, {frames} frames: at most 60 s and 1800 frames", end - request.start_seconds);
     }
     let output = s.gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("video frame"),
@@ -153,16 +160,17 @@ pub fn render_video(path: &Path) -> Result<()> {
     let stdout = std::io::stdout();
     let mut stream = stdout.lock();
     let view = request.view.unwrap_or(ViewName::Follow);
-    for frame in 0..request.frame_count() {
+    for frame in 0..frames {
         let elapsed = f64::from(frame) / f64::from(request.fps);
         let t = request.start_seconds + elapsed;
-        let eye = match request.camera_at(elapsed) {
-            Some(camera) => {
+        let eye = match (&mut shot, request.camera_at(elapsed)) {
+            (Some(shot), _) => views::of(&shot.camera(elapsed, &s.placed, request.start_seconds, s.collider.as_ref())),
+            (None, Some(camera)) => {
                 let mut live = crate::camera::Camera::bench();
                 live.set_pose(&camera);
                 live.view()
             }
-            None => view_camera(&s, view, request.throw.unwrap_or(0), t)?,
+            (None, None) => view_camera(&s, view, request.throw.unwrap_or(0), t)?,
         };
         draw(&mut s, &eye, t, elapsed as f32);
         let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });
@@ -178,7 +186,7 @@ pub fn render_video(path: &Path) -> Result<()> {
         encoder.copy_texture_to_buffer(output.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
         s.gpu.queue.submit([encoder.finish()]);
         stream.write_all(&crate::encode_png(&s.gpu, &buffer, width, height, [0, 1, 2])?)?;
-        eprintln!("{}", serde_json::json!({"event":"video_progress", "frames":frame + 1, "total":request.frame_count()}));
+        eprintln!("{}", serde_json::json!({"event":"video_progress", "frames":frame + 1, "total":frames}));
     }
     stream.flush()?;
     Ok(())

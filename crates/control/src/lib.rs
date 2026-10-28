@@ -242,6 +242,8 @@ pub enum ControlOutput {
     Scene {
         state: AppState,
         scene: scene::Scene,
+        /// What each simulated throw did, in the scene's order (one still being simulated is left out).
+        reports: Vec<scene::ThrowReport>,
     },
     Stopped,
 }

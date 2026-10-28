@@ -113,10 +113,42 @@ impl Built {
         self.detonates_at(start) + self.stage.duration
     }
 
+    /// How far what it left reaches from where a camera looks at it: its smoke's or fire's farthest point.
+    pub fn reach(&self) -> f64 {
+        self.stage.body.iter().map(|p| p.distance(self.stage.focus)).fold(0.0, f64::max)
+    }
+
+    /// What it did, on the scene's clock for a throw starting at `start`: the throw's `k`-th in its scene.
+    pub fn report(&self, k: usize, start: f64) -> nades_control::scene::ThrowReport {
+        use nades_control::scene::{FlightPoint, ThrowReport};
+        let point = |t: f64, at: DVec3, normal: Option<DVec3>| FlightPoint { t: start + t, at: at.to_array(), normal: normal.map(|n| n.to_array()) };
+        let (r, d) = (self.path.release, self.path.detonation);
+        let bounces: Vec<FlightPoint> = self.path.bounces.iter().map(|b| point(b.t, b.pos, Some(b.normal))).collect();
+        ThrowReport {
+            throw: k,
+            grenade: self.throw.grenade,
+            start,
+            release: point(r.t, r.p0, None),
+            velocity: r.v0.to_array(),
+            landing: self.path.bounces.iter().find(|b| b.normal.z > 0.7).map(|b| point(b.t, b.pos, Some(b.normal))),
+            bounces,
+            detonation: point(d.t, d.pos, d.normal),
+            flight_seconds: d.t - r.t,
+            effect_seconds: self.stage.duration,
+            effect_focus: self.stage.focus.to_array(),
+            smoke_voxels: self.stage.cloud.as_ref().map(|c| c.count),
+            fire_flames: self.stage.fire.as_ref().map(|f| f.flames.len()),
+            practice: nades_physics::practice_command(&physics_throw(&self.throw)),
+            ms: self.ms,
+        }
+    }
+
     /// The arc of its flight.
     pub fn arc(&self, strong: bool) -> ArcMesh {
         let flight = self.stage.flight.as_ref();
-        ArcMesh { points: flight.map(|f| f.points.clone()).unwrap_or_default(), marks: flight.map(|f| f.marks()).unwrap_or_default(), color: nade_color(self.stage.grenade), strong }
+        // no mark where it leaves the hand: from the thrower's eye that is a disk filling the view
+        let marks = flight.map(|f| f.marks().into_iter().skip(1).collect()).unwrap_or_default();
+        ArcMesh { points: flight.map(|f| f.points.clone()).unwrap_or_default(), marks, color: nade_color(self.stage.grenade), strong }
     }
 }
 
@@ -184,7 +216,12 @@ pub mod views {
         let mut back = now - behind;
         back.z = back.z.max(-40.0);
         let back = if back.length() < 1.0 { (now - b.stage.thrower.eye).normalize_or(DVec3::X) } else { back.normalize() };
-        let mut eye = now - back * 80.0 + DVec3::Z * 18.0;
+        // once it has gone off, the camera rises over a second and a half until it looks down on what it left (the sky
+        // is open more often than the ground behind is)
+        let k = (local.max(0.0) / 1.5).min(1.0);
+        let away_from = 80.0 + k * 60.0;
+        let rise = 18.0 + k * (b.reach() + 120.0);
+        let mut eye = now - back * away_from + DVec3::Z * rise;
         if let Some(c) = collider {
             let away = eye - now;
             if let Some(d) = c.hit_distance(now, away.normalize_or_zero(), away.length()) {
