@@ -24,7 +24,7 @@ lineup's console line as posted (`setpos 1296.00 32.00 -167.97; setang -28.89 -1
 8. a slow 360° turn around it.
 
 There is no crosshair after the release and no drawn paths. The defaults are 1920×1080 at 60 fps, with the timing from
-the grenade's airtime and effect (a smoke's video is about 26 s and renders in about 35 s). Stills of the aim, the aim
+the grenade's airtime and effect (a smoke's video is about 26 s and renders in about 12–14 s, S38). Stills of the aim, the aim
 point, the flight, the bloom and the result, and a JSON of what happened (release, bounces, landing, detonation,
 effect), are written beside it. Nothing in it depends on recorded matches
 ([docs/simulator.md](docs/simulator.md)).
@@ -138,7 +138,7 @@ lineup_render {"map": "mirage", "grenade": "smoke", "technique": "jumpthrow",
 
 It waits and returns the MP4, the stills, the JSON and where and when the grenade went off. Headless tools: `lineup_render` (one lineup, end to end), `throws_simulate` (what each throw did, a second or two),
 `view_render` (a map from a camera, or a scene's moment from a view of a throw), `video_render` / `video_status` /
-`video_cancel`. Window tools (`app_start` returns the `instance_id` they take): `scene_get`, `scene_set` (also how to
+`video_cancel`, `maps_list`. Window tools (`app_start` returns the `instance_id` they take): `scene_get`, `scene_set` (also how to
 change the map in place), `throw_add`, `throw_update`, `throw_remove`, `time_set`, `view_set`, `camera_set`,
 `camera_look_at`, `frame_capture`, `map_open`, `app_stop`. `app_status` and `diagnostics_get` report state, startup
 stages, CPU submission metrics, memory and logs. Disconnecting MCP hands a ready window to you; manually opened windows
