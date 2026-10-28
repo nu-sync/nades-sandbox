@@ -62,13 +62,14 @@ pub fn physics_throw(t: &SceneThrow) -> nades_physics::Throw {
             Click::Middle => nades_physics::Click::Middle,
             Click::Right => nades_physics::Click::Right,
         },
+        speed: t.speed,
     }
 }
 
 /// What a throw's simulation depends on: everything but its start and label.
 pub fn key(t: &SceneThrow) -> String {
     let t = SceneThrow { start: 0.0, label: None, ..t.clone() };
-    format!("{:?}", (t.grenade, t.feet.map(f64::to_bits), t.pitch.to_bits(), t.yaw.to_bits(), t.crouch, t.movement, t.click))
+    format!("{:?}", (t.grenade, t.feet.map(f64::to_bits), t.pitch.to_bits(), t.yaw.to_bits(), t.crouch, t.movement, t.click, t.speed.map(f64::to_bits)))
 }
 
 /// The thrower's eye as they set up the throw: their feet, 64 up standing, 46 crouched.
@@ -341,6 +342,7 @@ mod tests {
         let later = SceneThrow { start: 5.0, label: Some("x".into()), ..smoke.clone() };
         assert_eq!(key(&later), key(&smoke));
         assert_ne!(key(&SceneThrow { crouch: true, ..smoke.clone() }), key(&smoke));
+        assert_ne!(key(&SceneThrow { speed: Some(30.0), ..smoke.clone() }), key(&smoke));
         let placed = vec![(Arc::new(b), 2.0)];
         assert_eq!(active(&placed, 2.0 + det + 0.01), ["he"]);
         assert!(active(&placed, 2.0 + det - 0.2).contains(&"flight".to_string()));

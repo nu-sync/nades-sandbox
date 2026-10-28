@@ -40,7 +40,7 @@ impl Tool {
     pub fn throw_from(&self, camera: &CsView) -> SceneThrow {
         let height = if self.crouch { EYE_CROUCHED } else { EYE_STANDING };
         let feet = camera.eye - DVec3::Z * height;
-        SceneThrow { grenade: self.grenade, feet: feet.to_array().map(|v| (v * 100.0).round() / 100.0), pitch: camera.pitch.clamp(-89.0, 89.0), yaw: camera.yaw, crouch: self.crouch, movement: self.movement, click: self.click, start: self.start, label: None }
+        SceneThrow { grenade: self.grenade, feet: feet.to_array().map(|v| (v * 100.0).round() / 100.0), pitch: camera.pitch.clamp(-89.0, 89.0), yaw: camera.yaw, crouch: self.crouch, movement: self.movement, click: self.click, speed: None, start: self.start, label: None }
     }
 }
 

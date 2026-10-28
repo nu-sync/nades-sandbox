@@ -29,6 +29,8 @@ Call the MCP tool `lineup_render` once:
 - `lineup` is the line as posted: semicolons, the roll and `_exact` optional; technique words inside it are read too.
 - `technique` in words: jumpthrow, run jumpthrow, walk, run, crouch/duck, left/right/middle click, LMB, RMB, LMB+RMB.
   Check the result's `technique.understood` against the post; set `movement`, `click` or `crouch` to override.
+- `speed` (u/s along the view at release) for a jump-throw with forward held: "W jumpthrow" reads as 30, or pass
+  `speed: 30` (`--speed 30`). About 3 in 10 pro jump-throws drift so; it moves a long smoke 200 units (S35).
 - Defaults: 1920×1080, 60 fps, length from the airtime and the effect (a smoke about 26 s, rendered in about 35 s).
   `width: 640, height: 360, fps: 20` is a draft in a few seconds. `seconds` sets the length.
 - It waits, then returns the MP4 path, five stills beside it (`<name>-aim.png`, `-aim_point`, `-flight`, `-bloom`,

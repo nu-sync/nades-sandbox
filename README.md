@@ -12,7 +12,7 @@ floor, the flash, the HE.
 **A lineup renderer for agents (version 0.1.0, S31, S34).** Tested on Apple Silicon macOS. Its main use: an agent
 renders any grenade lineup found online, headlessly. One MCP call, `lineup_render`, takes the map, the grenade, the
 lineup's console line as posted (`setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`) and the technique in words
-("jumpthrow", "run jumpthrow", "crouch", "right click"), and returns an MP4 played like jumpthrow.pro's lineup videos:
+("jumpthrow", "W jumpthrow", "run jumpthrow", "crouch", "right click"), and returns an MP4 played like jumpthrow.pro's lineup videos:
 
 1. where to stand, wide;
 2. the aim, with the crosshair;

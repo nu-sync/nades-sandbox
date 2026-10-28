@@ -22,6 +22,7 @@ def main() -> int:
     a.add_argument("--grenade", required=True)
     a.add_argument("--lineup", required=True)
     a.add_argument("--technique", default=None)
+    a.add_argument("--speed", type=float, default=None, help="speed along the view at release: 30 for a jump-throw with W held")
     a.add_argument("--seconds", type=float, default=None)
     a.add_argument("--draft", action="store_true", help="640x360 at 20 fps: a few seconds to render")
     a.add_argument("--simulate-only", action="store_true")
@@ -68,11 +69,15 @@ def main() -> int:
         if o.technique:
             # the simulate tool takes fields: read the technique the way lineup_render does, through its own render
             technique = {"technique": o.technique}
+        if o.speed is not None:
+            technique["speed"] = o.speed
         lineup = {"map": o.map, "grenade": o.grenade, "lineup": o.lineup, **technique}
         if o.simulate_only:
             words = (o.technique or "").lower()
             movement = "run_jumpthrow" if "run" in words and "jump" in words else "jumpthrow" if "jump" in words else "run" if "run" in words else "walk" if "walk" in words else "stand"
             throw.update(movement=movement, crouch=("crouch" in words or "duck" in words))
+            if o.speed is not None:
+                throw["speed"] = o.speed
             mapname = o.map if o.map.startswith("de_") else f"de_{o.map}"
             result, error = call("throws_simulate", {"scene": {"map": mapname, "throws": [throw]}})
             print(json.dumps(result, indent=1) if not error else result)

@@ -10,7 +10,9 @@
 //!
 //! Positions are the player's feet in Hammer units (z up); angles are degrees as CS2's `setang` takes them (pitch
 //! positive looking down); `start` is seconds on the scene's clock when the throw begins. `crouch`, `movement`, `click`
-//! and `start` may be left out (standing, left click, at 0); `label` is the author's name for a throw. A reader takes
+//! and `start` may be left out (standing, left click, at 0); `speed` is the player's speed along the view as they let
+//! go, when it is not the movement's own (a jump-throw with forward held drifts at 30); `label` is the author's name
+//! for a throw. A reader takes
 //! any version it knows and refuses a newer one: a change of meaning is a new version.
 
 use schemars::JsonSchema;
@@ -24,6 +26,10 @@ pub const VERSION: u32 = 1;
 pub const MAX_THROWS: usize = 64;
 /// The latest start a throw may have, in seconds.
 pub const MAX_START: f64 = 120.0;
+/// The fastest a player moves along the view as they let go, units a second (a run is 245).
+pub const MAX_SPEED: f64 = 260.0;
+/// A jump-throw from a standstill with forward held: CS2's air speed cap, `sv_air_max_wishspeed` (S35).
+pub const AIR_FORWARD: f64 = 30.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +122,11 @@ pub struct SceneThrow {
     pub movement: Movement,
     #[serde(default)]
     pub click: Click,
+    /// The player's horizontal speed along the view as they let go, units a second (negative backwards), when it is not
+    /// the movement's own (0 standing and for a jump-throw, 127.4 walking, 245 running). A jump-throw with forward
+    /// held is 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
     /// Seconds on the scene's clock when the throw begins, 0–120.
     #[serde(default)]
     pub start: f64,
@@ -126,7 +137,7 @@ pub struct SceneThrow {
 
 impl SceneThrow {
     pub fn new(grenade: Grenade, feet: [f64; 3], pitch: f64, yaw: f64) -> Self {
-        Self { grenade, feet, pitch, yaw, crouch: false, movement: Movement::Stand, click: Click::Left, start: 0.0, label: None }
+        Self { grenade, feet, pitch, yaw, crouch: false, movement: Movement::Stand, click: Click::Left, speed: None, start: 0.0, label: None }
     }
 
     /// The throw with its yaw in [-180, 180), or why it cannot be thrown.
@@ -140,6 +151,9 @@ impl SceneThrow {
         }
         if !(-89.0..=89.0).contains(&self.pitch) {
             return Err(invalid("Pitch must be within ±89°."));
+        }
+        if self.speed.is_some_and(|s| !s.is_finite() || s.abs() > MAX_SPEED) {
+            return Err(invalid("Speed must be a number of units a second within ±260."));
         }
         if !(0.0..=MAX_START).contains(&self.start) {
             return Err(invalid("Start must be 0–120 seconds."));
@@ -199,12 +213,16 @@ impl Grenade {
 
 /// How a lineup is thrown, read from the words people use: "jumpthrow", "jump throw", "run jumpthrow", "running
 /// jump throw", "walk", "run", "standing", "crouch" / "duck", "left click" / "lmb", "right click" / "rmb", "middle",
-/// "both" / "lmb+rmb". Words it does not know are left alone; what it found is said in `understood`.
+/// "both" / "lmb+rmb". "W" or "forward" with a jump-throw and no run is a jump-throw from a standstill with forward
+/// held: it drifts at the air's 30 units a second (S35). Words it does not know are left alone; what it found is said
+/// in `understood`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Technique {
     pub movement: Movement,
     pub click: Click,
     pub crouch: bool,
+    /// The speed along the view the words give, when it is not the movement's own.
+    pub speed: Option<f64>,
     /// The words it read, in order.
     pub understood: Vec<String>,
 }
@@ -216,7 +234,8 @@ impl Technique {
         let has = |w: &[&str]| words.iter().any(|x| w.contains(x));
         let joined = words.join(" ");
         let jump = has(&["jumpthrow", "jumpthrown", "jt", "jumpbind"]) || joined.contains("jump throw") || has(&["jump"]);
-        let run = has(&["run", "running", "runthrow", "runjumpthrow", "w", "forward", "moving"]) || joined.contains("run jump");
+        let forward = has(&["w", "forward", "moving"]);
+        let run = has(&["run", "running", "runthrow", "runjumpthrow"]) || joined.contains("run jump") || (forward && !jump);
         let walk = has(&["walk", "walking", "shift"]);
         let mut understood = Vec::new();
         let movement = match (jump || has(&["runjumpthrow"]), run || has(&["runjumpthrow"]), walk) {
@@ -228,6 +247,10 @@ impl Technique {
         };
         if movement != Movement::Stand || has(&["stand", "standing", "still"]) {
             understood.push(movement.name().to_string());
+        }
+        let speed = (movement == Movement::Jumpthrow && forward).then_some(AIR_FORWARD);
+        if speed.is_some() {
+            understood.push("forward held (30 u/s)".into());
         }
         let left = has(&["left", "lmb", "m1", "mouse1", "attack", "full", "long"]);
         let right = has(&["right", "rmb", "m2", "mouse2", "attack2", "underhand", "lob", "short"]);
@@ -245,7 +268,7 @@ impl Technique {
         if crouch {
             understood.push("crouch".into());
         }
-        Self { movement, click, crouch, understood }
+        Self { movement, click, crouch, speed, understood }
     }
 }
 
@@ -271,6 +294,9 @@ pub struct LineupInput {
     pub click: Option<Click>,
     #[serde(default)]
     pub crouch: Option<bool>,
+    /// The player's speed along the view as they let go, units a second, when it is not the movement's own.
+    #[serde(default)]
+    pub speed: Option<f64>,
 }
 
 impl LineupInput {
@@ -290,7 +316,13 @@ impl LineupInput {
         if let Some(c) = self.crouch {
             technique.crouch = c;
         }
-        let throw = SceneThrow { grenade, feet, pitch, yaw, crouch: technique.crouch, movement: technique.movement, click: technique.click, start: 0.0, label: None }.validated()?;
+        if self.movement.is_some_and(|m| m != Movement::Jumpthrow) {
+            technique.speed = None;
+        }
+        if let Some(s) = self.speed {
+            technique.speed = Some(s);
+        }
+        let throw = SceneThrow { grenade, feet, pitch, yaw, crouch: technique.crouch, movement: technique.movement, click: technique.click, speed: technique.speed, start: 0.0, label: None }.validated()?;
         Ok((map, throw, technique))
     }
 }
@@ -327,6 +359,10 @@ pub struct ThrowInput {
     /// left (default: a full throw), middle (both buttons: medium), right (an underhand lob).
     #[serde(default)]
     pub click: Click,
+    /// The player's horizontal speed along the view as they let go (units a second), when it is not the movement's own.
+    /// Leave it out for a still jump-throw; 30 for a jump-throw with forward (W) held as they jump.
+    #[serde(default)]
+    pub speed: Option<f64>,
     /// Seconds on the scene's clock when the throw begins (0–120, default 0).
     #[serde(default)]
     pub start: f64,
@@ -342,13 +378,13 @@ impl ThrowInput {
             (None, Some(feet), Some(pitch), Some(yaw)) => (feet, pitch, yaw),
             _ => return Err(ControlError::new("invalid_throw", "Give the spot as `console` (setpos …; setang …) or as feet, pitch and yaw, not both.", false)),
         };
-        SceneThrow { grenade: self.grenade, feet, pitch, yaw, crouch: self.crouch, movement: self.movement, click: self.click, start: self.start, label: self.label }.validated()
+        SceneThrow { grenade: self.grenade, feet, pitch, yaw, crouch: self.crouch, movement: self.movement, click: self.click, speed: self.speed, start: self.start, label: self.label }.validated()
     }
 }
 
 impl From<SceneThrow> for ThrowInput {
     fn from(t: SceneThrow) -> Self {
-        Self { grenade: t.grenade, console: None, feet: Some(t.feet), pitch: Some(t.pitch), yaw: Some(t.yaw), crouch: t.crouch, movement: t.movement, click: t.click, start: t.start, label: t.label }
+        Self { grenade: t.grenade, console: None, feet: Some(t.feet), pitch: Some(t.pitch), yaw: Some(t.yaw), crouch: t.crouch, movement: t.movement, click: t.click, speed: t.speed, start: t.start, label: t.label }
     }
 }
 
@@ -573,7 +609,19 @@ mod tests {
         assert_eq!(Technique::parse("right click lob").click, Click::Right);
         assert_eq!(Technique::parse("LMB+RMB").click, Click::Middle);
         assert_eq!(Technique::parse("walk").movement, Movement::Walk);
-        assert_eq!(Technique::parse("W + jumpthrow").movement, Movement::RunJumpthrow);
+        // forward held with a jump-throw drifts 30 along the view; a run is a run
+        let w = Technique::parse("W + jumpthrow");
+        assert_eq!((w.movement, w.speed, w.understood.as_slice()), (Movement::Jumpthrow, Some(30.0), ["jump-throw".to_string(), "forward held (30 u/s)".into()].as_slice()));
+        assert_eq!((Technique::parse("run + jumpthrow").movement, Technique::parse("run + jumpthrow").speed), (Movement::RunJumpthrow, None));
+        assert_eq!((Technique::parse("W").movement, Technique::parse("jumpthrow").speed), (Movement::Run, None));
+        let (_, t, _) = lineup(r#"{"map":"mirage","grenade":"smoke","lineup":"setpos 1 2 3; setang 4 5","technique":"jumpthrow","speed":30}"#).unwrap();
+        assert_eq!((t.movement, t.speed), (Movement::Jumpthrow, Some(30.0)));
+        let (_, t, _) = lineup(r#"{"map":"mirage","grenade":"smoke","lineup":"setpos 1 2 3; setang 4 5","technique":"W jumpthrow","movement":"stand"}"#).unwrap();
+        assert_eq!(t.speed, None);
+        assert_eq!(lineup(r#"{"map":"mirage","grenade":"smoke","lineup":"setpos 1 2 3; setang 4 5","speed":900}"#).unwrap_err().code, "invalid_throw");
+        // a scene file written before speed reads as before, and one without it writes no speed
+        let t = SceneThrow::new(Grenade::Smoke, [0.0; 3], 0.0, 0.0);
+        assert!(!serde_json::to_string(&t).unwrap().contains("speed"));
         assert_eq!(lineup(r#"{"map":"mirage","grenade":"rock","lineup":"setpos 1 2 3; setang 4 5"}"#).unwrap_err().code, "invalid_grenade");
     }
 }

@@ -21,6 +21,9 @@ pub const JUMPTHROW_VZ: f64 = 218.8;
 pub const CROUCH_JUMPTHROW_VZ: f64 = 221.9;
 /// Running and walking speed with a grenade out (walking is 0.52 of running).
 pub const RUN_SPEED: f64 = 245.0;
+/// The speed holding a direction in the air gives a player who jumped from a standstill: CS2's
+/// `sv_air_max_wishspeed`. Pros' jump-throws are either still (0) or drift forward at exactly this (S35).
+pub const AIR_MAX_WISHSPEED: f64 = 30.0;
 pub const WALK_SPEED: f64 = 127.4;
 /// How far in front of the eye the grenade leaves the hand, and how much lower a weaker throw lets go.
 pub const RELEASE_FORWARD: f64 = 16.0;
@@ -81,6 +84,11 @@ pub struct Throw {
     pub crouch: bool,
     pub movement: Movement,
     pub click: Click,
+    /// The player's horizontal speed as they let go, along the view (units a second; negative backwards). None is the
+    /// movement's own: 0 standing and for a jump-throw, 127.4 walking, 245 running. A jump-throw with forward held is
+    /// [`AIR_MAX_WISHSPEED`] (30).
+    #[serde(default)]
+    pub speed: Option<f64>,
 }
 
 /// Where the grenade leaves the hand and its velocity then.
@@ -134,17 +142,24 @@ pub fn throw_forward(eye_pitch: f64, yaw: f64) -> DVec3 {
     DVec3::new(elevation.cos() * yaw.cos(), elevation.cos() * yaw.sin(), elevation.sin())
 }
 
-/// The player's velocity as they let go: walking and running forward along the view's yaw, a jump-throw rising.
+/// The movement's own horizontal speed: 0 standing and for a jump-throw, walking 127.4, running 245.
+pub fn movement_speed(movement: Movement) -> f64 {
+    match movement {
+        Movement::Stand | Movement::Jumpthrow => 0.0,
+        Movement::Walk => WALK_SPEED,
+        Movement::Run | Movement::RunJumpthrow => RUN_SPEED,
+    }
+}
+
+/// The player's velocity as they let go: its speed (the throw's, else the movement's) forward along the view's yaw,
+/// and a jump-throw rising.
 pub fn player_velocity(throw: &Throw) -> DVec3 {
     let yaw = throw.yaw.to_radians();
-    let ahead = DVec3::new(yaw.cos(), yaw.sin(), 0.0);
+    let ahead = DVec3::new(yaw.cos(), yaw.sin(), 0.0) * throw.speed.unwrap_or_else(|| movement_speed(throw.movement));
     let jump = if throw.crouch { CROUCH_JUMPTHROW_VZ } else { JUMPTHROW_VZ };
     match throw.movement {
-        Movement::Stand => DVec3::ZERO,
-        Movement::Walk => ahead * WALK_SPEED,
-        Movement::Run => ahead * RUN_SPEED,
-        Movement::Jumpthrow => DVec3::Z * jump,
-        Movement::RunJumpthrow => ahead * RUN_SPEED + DVec3::Z * jump,
+        Movement::Stand | Movement::Walk | Movement::Run => ahead,
+        Movement::Jumpthrow | Movement::RunJumpthrow => ahead + DVec3::Z * jump,
     }
 }
 
@@ -381,7 +396,26 @@ mod tests {
     const DT: f64 = 1.0 / TICK_RATE;
 
     fn throw(movement: Movement, click: Click, pitch: f64, crouch: bool) -> Throw {
-        Throw { grenade: Grenade::Smoke, feet: [100.0, 200.0, 0.0], pitch, yaw: 90.0, crouch, movement, click }
+        Throw { grenade: Grenade::Smoke, feet: [100.0, 200.0, 0.0], pitch, yaw: 90.0, crouch, movement, click, speed: None }
+    }
+
+    #[test]
+    fn a_jump_throw_with_forward_held_drifts_thirty_units_a_second_along_the_view() {
+        let still = throw(Movement::Jumpthrow, Click::Left, -28.89, false);
+        let drifting = Throw { speed: Some(AIR_MAX_WISHSPEED), ..still };
+        assert_eq!(player_velocity(&still).truncate(), glam::DVec2::ZERO);
+        let v = player_velocity(&drifting);
+        assert!((v.truncate() - glam::DVec2::new(0.0, 30.0)).length() < 1e-9 && v.z == JUMPTHROW_VZ, "{v}");
+        // the grenade carries 1.25 of it, and the hand 0.107 s of it
+        let (a, b) = (release(&still), release(&drifting));
+        assert!((b.v0 - a.v0 - DVec3::new(0.0, 37.5, 0.0)).length() < 1e-9);
+        assert!((b.p0 - a.p0 - DVec3::new(0.0, 30.0 * JUMPTHROW_RELEASE_T, 0.0)).length() < 1e-9);
+        // a walk at another speed, and the movements' own by default
+        assert!((player_velocity(&Throw { speed: Some(60.0), ..throw(Movement::Walk, Click::Left, 0.0, false) }).y - 60.0).abs() < 1e-9);
+        assert!((player_velocity(&throw(Movement::Run, Click::Left, 0.0, false)).y - RUN_SPEED).abs() < 1e-9);
+        // a throw written before speed reads with none
+        let old: Throw = serde_json::from_str(r#"{"grenade":"Smoke","feet":[0,0,0],"pitch":0,"yaw":0,"crouch":false,"movement":"Jumpthrow","click":"Left"}"#).unwrap();
+        assert_eq!(old.speed, None);
     }
 
     /// A square of two triangles around `centre`, spanned by `u` and `v` (half-sizes).

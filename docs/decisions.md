@@ -1200,3 +1200,37 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   (postcard leaves the trailing models unread). The throw layer draws them textured, lit as its other meshes (sun and a
   dim sky, a little sheen), at the flight point with the ported spin; slower than 40 units a second on the ground a
   grenade settles onto its side.
+
+## S35 · A jump-throw's drift: forward held in the air is 30 units a second
+
+- **Decision (2026-10-27):** a throw may carry `speed`, the player's horizontal speed along the view as they let go
+  (`nades_physics::Throw::speed`, `SceneThrow`, `ThrowInput`, `LineupInput`, `lineup_render`), serde default `None`.
+  None is the movement's own (`movement_speed`): 0 standing and for a jump-throw, 127.4 walking, 245 running, as
+  before; a scene file or a throw written before reads unchanged. `Technique::parse` reads "W" or "forward" with a
+  jump-throw and no "run" as a jump-throw at 30 ("W + jumpthrow" was a run-jump-throw before); "run jumpthrow" is still
+  245. The release model is unchanged: the grenade carries 1.25 of it and the hand 0.107 s of it.
+- **What the 30 is:** CS2's `sv_air_max_wishspeed`. A player who jumps from a standstill and holds a direction in the air
+  gains speed only up to 30 along it (air acceleration 12 × 250 / 64 ≈ 47 a tick, so it is reached in one tick). The
+  recorded airborne throws (a copy of show-me-the-nades' database, its `throws`) fall in four bands by horizontal speed:
+
+  | band | throws | speed | moved take-off → release | off the view |
+  |---|---|---|---|---|
+  | 0 | 11,343 | 0.00 | 0.00 | — |
+  | 30 | 3,902 | 30.00 | median 4.07, p90 6.15 | 0.0° |
+  | 31–120 | 2,083 | median 84.8 | 13.96 | |
+  | 120+ (running) | 8,358 | median 242.1 | 34.71 | 0.3° |
+
+  The 30 band is exactly 30, exactly along the view, and moved 4.07 units between take-off and release: 30 × 0.135 s,
+  so the player stood still, jumped, and held forward (W) from the jump: a habit (or a jump-throw bind that presses
+  forward), not a run. The positions sampled every 32 ticks are too coarse to see the key press itself. The 31–120
+  band is a tap or a short run before the jump; it is left to `speed` as given.
+- **Evidence:** sim-physics' flight bench (`flight_check`, the cs2-throws export, `--per 300`), release error from the
+  recorded setup, before → after: the 30 band, which the bench counted as non-canonical jump-throws (n 238 with the
+  31–120 band, v0 median 37.50, p90 97.69), is now `Jumpthrow+30`: canonical n 159, v0 median 0.03, p90 0.41 u/s, p0
+  median 0.53, p90 1.19 units (the still jump-throw's 0.02/0.11: the first tick's air acceleration is not modelled);
+  the 31–120 band left (n 61) is 88.5/120.1. Every other row is unchanged. mirage-smoke-0002 (`setpos 1296.00 32.00
+  -167.97; setang -28.89 -166.00 0`, jump-throw, left; the pro moved at (−29.1, −7.3) = 30 along the view) through
+  `lineup_render` with `speed: 30`: first lands at (−1170, −583, −166) 4.42 s in, goes off at (−1117, −648, −166) 7.19 s
+  after the release, against the game's (−1164, −630, −166) at 6.73 s: 50 units, on the right floor, 0.46 s late
+  (S34's still throw: 232 units, on the floor below, 0.57 s early). What is left is the bounce off the wall at
+  (−1262, −606) and the roll back.

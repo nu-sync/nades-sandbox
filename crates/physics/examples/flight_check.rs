@@ -98,13 +98,16 @@ fn setup(r: &rusqlite::Row) -> rusqlite::Result<(Option<Throw>, bool)> {
         }
         let feet = [get("takeoff_x")?, get("takeoff_y")?, get("takeoff_z")?];
         let m = if hs < 100.0 { Movement::Jumpthrow } else { Movement::RunJumpthrow };
-        let target = if m == Movement::Jumpthrow { 0.0 } else { nades_physics::RUN_SPEED };
+        // a jump-throw from a standstill is still (0) or drifts forward at the air's 30 (S35)
+        let drifting = m == Movement::Jumpthrow && (hs - nades_physics::AIR_MAX_WISHSPEED).abs() < 1.0;
+        let target = if drifting { nades_physics::AIR_MAX_WISHSPEED } else { nades_physics::movement_speed(m) };
         (m, feet, (hs - target).abs() < 1.0 && along > 0.9998 && !(0.01..=0.99).contains(&duck))
     };
     let [Some(x), Some(y), Some(z)] = feet else {
         return Ok((None, false));
     };
-    Ok((Some(Throw { grenade: g, feet: [x, y, z], pitch, yaw, crouch, movement, click }), canonical))
+    let speed = (movement == Movement::Jumpthrow && (hs - nades_physics::AIR_MAX_WISHSPEED).abs() < 1.0).then_some(nades_physics::AIR_MAX_WISHSPEED);
+    Ok((Some(Throw { grenade: g, feet: [x, y, z], pitch, yaw, crouch, movement, click, speed }), canonical))
 }
 
 fn read(file: &str, maps: &[String], per: usize) -> Vec<Recorded> {
@@ -560,7 +563,8 @@ fn main() {
         let Some(setup) = r.setup else { continue };
         let rel = nades_physics::release(&setup);
         // a jump-throw's start is where it is let go in the air; compare like with like
-        let e = by.entry((format!("{:?}", setup.movement), r.canonical)).or_default();
+        let name = if setup.speed.is_some() { format!("{:?}+30", setup.movement) } else { format!("{:?}", setup.movement) };
+        let e = by.entry((name, r.canonical)).or_default();
         e.0.push((rel.p0 - r.start).length());
         e.1.push((rel.v0 - r.vel).length());
     }

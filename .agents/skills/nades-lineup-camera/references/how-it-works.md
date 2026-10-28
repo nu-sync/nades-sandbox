@@ -6,7 +6,8 @@
    - `parse_console` scans the words for `setpos`/`setpos_exact` (three numbers) and `setang`/`setang_exact` (two;
      a third, the roll, ignored), splitting on whitespace, `;`, `,` and quotes;
    - `Grenade::parse` (smoke, flash/flashbang, he/frag, molotov/molly, incendiary/inc, decoy);
-   - `Technique::parse` over the `technique` text and the lineup's own non-numeric words; fields override.
+   - `Technique::parse` over the `technique` text and the lineup's own non-numeric words; fields override. "W" or
+     "forward" with a jump-throw and no "run" is a jump-throw with `speed` 30 (CS2's air cap from a standstill, S35).
    - The map gets `de_` if it has no prefix.
 2. It builds a `VideoRequest` with `shot: [ShotMove::Lineup { throw: 0, seconds }]`, five `stills` at moments
    (aim, aim_point, flight, bloom, result), 1920×1080 at 60 fps, `output` (default the MCP's runs folder), then

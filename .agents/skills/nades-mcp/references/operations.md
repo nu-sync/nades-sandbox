@@ -20,7 +20,7 @@ Start with `app_status {}` and `maps_list {}`. `app_status` reports this server'
 words: jumpthrow, run jumpthrow, crouch, right click…>", "output": "/abs/name.mp4"}` renders the jumpthrow.pro-style
 video at 1920×1080, 60 fps (about 35 s for a smoke) and returns the MP4, five stills, a JSON and where and when it went
 off. Check `technique.understood` against what the post said; set `movement`, `click` or `crouch` when a word was
-missed. For a quick draft pass `width: 640, height: 360, fps: 20`. Renders run one at a time; several lineups render
+missed, and `speed: 30` for a jump-throw with W held ("W jumpthrow" reads so; S35). For a quick draft pass `width: 640, height: 360, fps: 20`. Renders run one at a time; several lineups render
 in a row by calling it again. Look at a still or two before calling it done.
 
 ## Headless: what a throw does, images and video

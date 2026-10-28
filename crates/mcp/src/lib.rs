@@ -421,6 +421,14 @@ pub struct LineupRenderParams {
     pub click: Option<nades_control::scene::Click>,
     #[serde(default)]
     pub crouch: Option<bool>,
+    /// The player's horizontal speed along the view as they let go, units a second, when it is not the movement's own
+    /// (a jump-throw 0, a walk 127.4, a run 245). Pass 30 for a jump-throw where forward (W) is held as they jump, which
+    /// is how about 3 in 10 pro jump-throws are thrown: CS2 caps the air speed from a standstill at 30, and it carries
+    /// the grenade about 1.25 × 30 further along the view, enough to move a long smoke 200 units or more. "W jumpthrow"
+    /// or "forward + jumpthrow" in the technique means the same. Leave it out for a plain jump-throw or a lineup that
+    /// says nothing of W.
+    #[serde(default)]
+    pub speed: Option<f64>,
     /// An absolute .mp4 path (its folder must exist); by default the MCP's runs folder. The stills and a JSON of what
     /// happened go beside it, named after it.
     #[serde(default)]
@@ -784,9 +792,9 @@ impl NadesMcp {
         }
     }
 
-    #[tool(description = "Render a grenade lineup found online to an MP4, headlessly, in one call. Give the map, the grenade and the lineup's console line exactly as posted (\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\"), with the technique in words (\"jumpthrow\", \"run jumpthrow\", \"crouch\", \"right click\"…). The video plays like jumpthrow.pro's lineup videos: where to stand, the aim with the crosshair, a close-up of what it lines up with, the throw, the camera following the grenade through the air to where it lands, the effect blooming, then a slow 360° turn around it (no crosshair after the release, no drawn paths, the timing from the grenade's airtime and effect; 1920×1080 at 60 fps). Stills of the aim, the aim point, the flight, the bloom and the result, and a JSON of what happened (release, bounces, landing, detonation, effect), are written beside it. Waits until it is done (about a minute for a 25 s smoke at 1080p60) and returns the paths, the technique as understood, and where and when the grenade went off.", output_schema = output_schema::<LineupRenderResponse>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
+    #[tool(description = "Render a grenade lineup found online to an MP4, headlessly, in one call. Give the map, the grenade and the lineup's console line exactly as posted (\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\"), with the technique in words (\"jumpthrow\", \"W jumpthrow\" for one with forward held, \"run jumpthrow\", \"crouch\", \"right click\"…). The video plays like jumpthrow.pro's lineup videos: where to stand, the aim with the crosshair, a close-up of what it lines up with, the throw, the camera following the grenade through the air to where it lands, the effect blooming, then a slow 360° turn around it (no crosshair after the release, no drawn paths, the timing from the grenade's airtime and effect; 1920×1080 at 60 fps). Stills of the aim, the aim point, the flight, the bloom and the result, and a JSON of what happened (release, bounces, landing, detonation, effect), are written beside it. Waits until it is done (about a minute for a 25 s smoke at 1080p60) and returns the paths, the technique as understood, and where and when the grenade went off.", output_schema = output_schema::<LineupRenderResponse>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
     pub async fn lineup_render(&self, Parameters(params): Parameters<LineupRenderParams>) -> CallToolResult {
-        let input = nades_control::scene::LineupInput { map: params.map.clone(), grenade: params.grenade.clone(), lineup: params.lineup.clone(), technique: params.technique.clone(), movement: params.movement, click: params.click, crouch: params.crouch };
+        let input = nades_control::scene::LineupInput { map: params.map.clone(), grenade: params.grenade.clone(), lineup: params.lineup.clone(), technique: params.technique.clone(), movement: params.movement, click: params.click, crouch: params.crouch, speed: params.speed };
         let (map, throw, technique) = match input.throw() {
             Ok(read) => read,
             Err(e) => return self.fail(e).await,
@@ -842,7 +850,13 @@ impl NadesMcp {
             ("completed", Some(r)) => format!(
                 "Rendered {map}'s {:?} lineup ({}) to {}: it goes off {:.2} s after the release at ({:.0}, {:.0}, {:.0}) after {} bounces; {:.1} s of video.",
                 throw.grenade,
-                if technique.understood.is_empty() { "standing, left click".into() } else { technique.understood.join(", ") },
+                {
+                    let mut how = if technique.understood.is_empty() { "standing, left click".into() } else { technique.understood.join(", ") };
+                    if let Some(speed) = throw.speed.filter(|_| !how.contains("u/s")) {
+                        how.push_str(&format!(", {speed} u/s along the view"));
+                    }
+                    how
+                },
                 status.path.as_deref().unwrap_or("?"),
                 r.flight_seconds,
                 r.detonation.at[0],
@@ -892,7 +906,7 @@ impl NadesMcp {
         }
     }
 
-    #[tool(description = "Simulate throws headlessly (no window, no GPU, a second or two) and report what each did: when and where it leaves the hand and its velocity, every bounce with the surface's normal, where it first lands on a floor, when and where it goes off (times in seconds on the scene's clock, from the throw's start), how long its effect lasts and where to look at it (the smoke's middle, the fire), and the practice command. A throw's spot is a CS2 console string, e.g. {\"grenade\":\"smoke\",\"console\":\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\",\"movement\":\"jumpthrow\",\"click\":\"left\",\"crouch\":false}, or feet, pitch and yaw. Use it to answer where and when a lineup lands before rendering anything.", output_schema = output_schema::<SimulateResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
+    #[tool(description = "Simulate throws headlessly (no window, no GPU, a second or two) and report what each did: when and where it leaves the hand and its velocity, every bounce with the surface's normal, where it first lands on a floor, when and where it goes off (times in seconds on the scene's clock, from the throw's start), how long its effect lasts and where to look at it (the smoke's middle, the fire), and the practice command. A throw's spot is a CS2 console string, e.g. {\"grenade\":\"smoke\",\"console\":\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\",\"movement\":\"jumpthrow\",\"click\":\"left\",\"crouch\":false}, or feet, pitch and yaw; add \"speed\":30 for a jump-throw with forward (W) held as they jump. Use it to answer where and when a lineup lands before rendering anything.", output_schema = output_schema::<SimulateResponse>(), annotations(read_only_hint = true, open_world_hint = false))]
     pub async fn throws_simulate(&self, Parameters(params): Parameters<SimulateParams>) -> CallToolResult {
         let scene = match params.scene.scene() {
             Ok(scene) => scene,
