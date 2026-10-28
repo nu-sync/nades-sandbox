@@ -78,12 +78,12 @@ fn simulated_fires_hold_their_coverage_of_recorded_flames() {
 
 #[test]
 fn smokes_the_app_drew_wrong_keep_their_fixed_shape() {
-    // the Mirage stairs smoke that drew as a cube: bricks alone square its open-air corners off, the rounding takes them
+    // the Mirage stairs smoke that drew as a cube (S33), then too big (S37): the cloud stops at its shell, about the
+    // game's own size, not every open voxel of the bricks sent (2,108 voxels before)
     for s in fixture()["shapes"].as_array().unwrap() {
-        let count = |round: f64| fill_cloud(&smoke::grid(&solid(s), &smoke::Model { round, ..smoke::Model::default() }), det(s)).map_or(0, |c| c.count);
-        let (now, square) = (count(smoke::Model::default().round), count(0.0));
+        let count = fill_cloud(&smoke::grid(&solid(s), &smoke::Model::default()), det(s)).map_or(0, |c| c.count);
         let map = s["map"].as_str().unwrap();
-        assert_eq!((now as u64, square as u64), (s["count"].as_u64().unwrap(), s["square_count"].as_u64().unwrap()), "{map}");
-        assert!(now < square, "{map}: rounded {now} against {square} square");
+        assert_eq!(count as u64, s["count"].as_u64().unwrap(), "{map}");
+        assert!((600..=1200).contains(&count), "{map}: {count} voxels");
     }
 }

@@ -35,6 +35,28 @@ fn coords(c: usize) -> (usize, usize, usize) {
     (c % GRID, (c / GRID) % GRID, c / (GRID * GRID))
 }
 
+/// The 26 voxels around one, for the cloud's shell.
+const TWENTY_SIX: [(i32, i32, i32); 26] = {
+    let mut out = [(0, 0, 0); 26];
+    let mut k = 0;
+    let mut n = 0;
+    while n < 27 {
+        let d = (n % 3 - 1, n / 3 % 3 - 1, n / 9 - 1);
+        if n != 13 {
+            out[k] = d;
+            k += 1;
+        }
+        n += 1;
+    }
+    out
+};
+
+/// The 4×4×4 brick a voxel lies in.
+fn brick(c: usize) -> usize {
+    let (x, y, z) = (c % GRID, (c / GRID) % GRID, c / (GRID * GRID));
+    x / 4 + GRID / 4 * (y / 4 + GRID / 4 * (z / 4))
+}
+
 const SIX: [(i32, i32, i32); 6] = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)];
 
 /// The neighbour of `c` one step along `d`, when it is in the grid.
@@ -122,7 +144,10 @@ pub struct Cloud {
 }
 
 /// Spreads from the emitters one voxel per frame through open voxels, never into a brick before the frame that sent
-/// it: a bucket queue over frame numbers, since every arrival is a small integer. None when nothing fills.
+/// it (a bucket queue over frame numbers, since every arrival is a small integer), and stops at its shell: the server sends a brick when its cloud comes within a voxel of it, so
+/// the sent bricks are the cloud's shell, not the cloud (S37). The cloud is cut where the bricks within a voxel of it
+/// best match the bricks sent (their IoU). Filling every open voxel of them instead made clouds of about 1,850
+/// voxels. None when nothing fills.
 pub fn fill_cloud(grid: &Grid, detonation: DVec3) -> Option<Cloud> {
     let open = |c: usize| grid.sent[c] == 1 && grid.solid[c] == 0;
     let mut reached = vec![NEVER; CELLS];
@@ -159,25 +184,49 @@ pub fn fill_cloud(grid: &Grid, detonation: DVec3) -> Option<Cloud> {
             }
         }
     }
-    // the front: a voxel next to a brick the server never looked into had not settled there
-    let front = |c: usize| SIX.iter().any(|&d| step(c, d).is_some_and(|n| grid.sent[n] == 0));
-    let mut arrival = vec![NEVER; CELLS];
-    let mut count = 0;
-    let (mut min, mut max) = ([GRID; 3], [0usize; 3]);
-    for z in 0..GRID {
-        for y in 0..GRID {
-            for x in 0..GRID {
-                let c = cell(x, y, z);
-                if reached[c] == NEVER || front(c) {
-                    continue;
-                }
-                arrival[c] = reached[c];
-                count += 1;
-                for (a, v) in [x, y, z].into_iter().enumerate() {
-                    min[a] = min[a].min(v);
-                    max[a] = max[a].max(v);
-                }
+    // the cloud in the order it filled, cut after the last frame at which the bricks its shell reaches best match the
+    // bricks sent
+    let mut order: Vec<usize> = (0..CELLS).filter(|&c| reached[c] != NEVER).collect();
+    order.sort_by_key(|&c| reached[c]);
+    let bricks = (GRID / 4).pow(3);
+    let mut sent_bricks = vec![false; bricks];
+    for c in (0..CELLS).filter(|&c| grid.sent[c] == 1) {
+        sent_bricks[brick(c)] = true;
+    }
+    let sent_total = sent_bricks.iter().filter(|b| **b).count();
+    let mut touched = vec![false; bricks];
+    let (mut hit, mut over) = (0usize, 0usize);
+    let mut best = (0.0, 0usize);
+    for (n, &c) in order.iter().enumerate() {
+        let (x, y, z) = ((c % GRID) as i32, ((c / GRID) % GRID) as i32, (c / (GRID * GRID)) as i32);
+        for (dx, dy, dz) in TWENTY_SIX {
+            let (a, b, d) = (x + dx, y + dy, z + dz);
+            if ![a, b, d].iter().all(|v| (0..GRID as i32).contains(v)) {
+                continue;
             }
+            let k = brick(cell(a as usize, b as usize, d as usize));
+            if !touched[k] {
+                touched[k] = true;
+                if sent_bricks[k] { hit += 1 } else { over += 1 }
+            }
+        }
+        // cut only between frames, so the cloud grows evenly
+        if order.get(n + 1).is_none_or(|&next| reached[next] != reached[c]) {
+            let iou = hit as f64 / (sent_total + over) as f64;
+            if iou >= best.0 {
+                best = (iou, n + 1);
+            }
+        }
+    }
+    let mut arrival = vec![NEVER; CELLS];
+    let count = best.1;
+    let (mut min, mut max) = ([GRID; 3], [0usize; 3]);
+    for &c in &order[..count] {
+        arrival[c] = reached[c];
+        let p = [c % GRID, (c / GRID) % GRID, c / (GRID * GRID)];
+        for a in 0..3 {
+            min[a] = min[a].min(p[a]);
+            max[a] = max[a].max(p[a]);
         }
     }
     (count > 0).then(|| Cloud {
@@ -477,6 +526,11 @@ mod tests {
     /// lowest layer of them solid (a floor at z = 12); the second frame sends one more brick in a corner the cloud
     /// cannot reach; the fourth says it is fading.
     fn log() -> Vec<u8> {
+        log_from([16, 16, 16])
+    }
+
+    /// The same bricks with one emitter at `emitter`.
+    fn log_from(emitter: [u8; 3]) -> Vec<u8> {
         let mut bricks = Vec::new();
         for (bx, by, bz) in [(3, 3, 3), (4, 3, 3), (3, 4, 3), (4, 4, 3), (3, 3, 4), (4, 3, 4), (3, 4, 4), (4, 4, 4)] {
             let mut mask = 0u64;
@@ -508,7 +562,7 @@ mod tests {
             p.push(0);
             p
         };
-        let mut log = frame(0, &payload(0, &[[16, 16, 16]], &bricks));
+        let mut log = frame(0, &payload(0, &[emitter], &bricks));
         log.extend(frame(1, &payload(0, &[], &[(interleave(0, 0, 0, 3) as u16, 0)])));
         log.extend(frame(2, &payload(0, &[], &[])));
         log.extend(frame(3, &payload(1, &[], &[])));
@@ -527,16 +581,22 @@ mod tests {
         assert_eq!(cloud.arrival[cell(16, 16, 16)], 0);
         assert_eq!(cloud.arrival[cell(17, 16, 16)], 1);
         assert_eq!(cloud.arrival[cell(16, 16, 12)], NEVER);
-        // the bricks' outer layer touches unsent voxels: the front, left out; the corner brick is out of reach
+        // the cloud stops at its shell: no voxel of it lies beside an unsent brick (S37); the corner brick is out of reach
         assert_eq!(cloud.arrival[cell(12, 16, 16)], NEVER);
         assert_eq!(cloud.arrival[cell(1, 1, 1)], NEVER);
         assert_eq!(grid.sent_frame[cell(1, 1, 1)], 1);
-        assert_eq!(cloud.bounds, ([13, 13, 13], [18, 18, 18]));
-        // 6×6 columns over the floor, z 13–18 (the bricks' open part less the front)
-        assert_eq!(cloud.count, 6 * 6 * 6);
+        let inside = |v: usize| (12..20).contains(&v);
+        for c in (0..CELLS).filter(|&c| cloud.arrival[c] != NEVER) {
+            let p = [c % GRID, (c / GRID) % GRID, c / (GRID * GRID)];
+            assert!(p.iter().all(|v| inside(v - 1) && inside(v + 1)), "{p:?} lies beside an unsent brick");
+        }
+        // not every open voxel of the bricks: 6×6×6 of them lie off the floor and the bricks' outer layer
+        assert!(cloud.count < 6 * 6 * 6, "{}", cloud.count);
+        // an octahedron two voxels out: one more frame and its shell would leave the bricks
+        assert_eq!(cloud.count, 25);
         assert_eq!(cloud.count_at(0.0), 1);
         let focus = cloud.focus();
-        assert!((focus.x - (680.0 + 16.0 * 20.0)).abs() < 1e-9 && (focus.y - (1680.0 + 16.0 * 20.0)).abs() < 1e-9, "{focus}");
+        assert!((focus.x - (680.0 + 16.5 * 20.0)).abs() < 1e-9 && (focus.y - (1680.0 + 16.5 * 20.0)).abs() < 1e-9, "{focus}");
         assert_eq!(cloud.voxels().len(), cloud.count);
     }
 
@@ -548,14 +608,15 @@ mod tests {
 
     #[test]
     fn the_volume_ramps_toward_air_and_carries_into_the_floor() {
-        let cloud = smoke_cloud(&log(), DVec3::ZERO).unwrap();
+        // a cloud from the floor
+        let cloud = smoke_cloud(&log_from([16, 16, 13]), DVec3::ZERO).unwrap();
         let volume = smoke_volume(&cloud, None);
         let at = |x, y, z, k| volume[cell(x, y, z) * 4 + k];
         // full in the middle, thinner at the edge, carried into the floor below
-        assert!(at(16, 16, 16, 0) > at(13, 16, 16, 0));
+        assert!(at(16, 16, 13, 0) > at(14, 16, 13, 0));
         assert!(at(16, 16, 12, 0) > 0);
         // arrival in 1/40 s: the emitter's voxel first
-        assert!(at(16, 16, 16, 1) < at(18, 18, 18, 1));
+        assert!(at(16, 16, 13, 1) < at(17, 16, 14, 1));
         assert_eq!(at(0, 0, 0, 1), 255);
         // no light given: open sky above the floor, a roof's shade under it, the sun everywhere
         assert_eq!((at(16, 16, 20, 2), at(16, 16, 5, 2), at(16, 16, 16, 3)), (255, 89, 255));
