@@ -1365,3 +1365,44 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 - **Open:** x264 `medium` costs 61 CPU-ms a frame and the GPU's wait is back: a faster preset or VideoToolbox,
   judged by size and look; frames drawn further ahead of the readback. The first frames' variation. A GPU clock that
   reads true on Metal (wgpu's calibration, or a Metal counter sample buffer read directly).
+
+## S42 · Whole-frame brightness: the hands, not the look
+
+- **Decision:** no change to the look. The four maps that read brighter than the web view against the game by
+  whole-frame Δ luma (dust2, cache, mirage, nuke; SPEC.md §12) are not brighter by any cause in the renderer: the
+  frame mean counts the in-game hands and watermark, and the web view's mean comes out nearer only because its own
+  errors cancel. Whole-frame Δ luma stays a number to read beside blurred |Δ| and the top half, not one to tune.
+- **Baseline** (`.runs/realism-20261028-092252/`, 87d605a, against the web view's run of 2026-10-25 17:16): the
+  numbers of S12 to the decimal (the renderer is deterministic): Δ luma +4.9 / +2.8 / +2.9 / +7.5 / +11.9 / +1.0 /
+  +5.8 (dust2, cache, anubis, mirage, inferno, ancient, nuke), the web view +3.6 / +2.0 / +3.3 / +4.7 / +23.4 / +5.3 /
+  +4.1; blurred |Δ| no worse than the web view on all 7, whole and top half.
+- **Where the brightness is**, measured on the 800×450 frames the skill compares (scratch scripts, nothing of the
+  shots kept):
+  - **Exposure is not it.** With the adapted exposure forced to each map's minimum and then its maximum, every
+    pool map's default render equals its minimum render exactly: six are clamped at the minimum, as daylight outdoors
+    is, and nuke's bounds (1.0 over 0.85) fix it there. Raising it to the maximum would add 9–49 levels.
+  - **The top half and the sky agree.** The sky (cells blue in the game and in both renders) is within 1.3 levels of
+    the game on dust2, anubis, inferno and nuke, cache −5.1, mirage +7.6 (the web view +3.1; ancient has 12 such
+    cells). The top half's non-sky surfaces are within 4.3 levels on every map (the web view up to 17.7), and its
+    median within 5 levels of the game's on every map but ancient (−10, its mossy cliff).
+  - **The bottom half is the hands.** Leaving out cells of the lower half where both renders are over 25 levels
+    brighter than the game (the gloves and grenade: 43–139 of 1,400 cells), the whole-frame Δ falls to dust2 +2.0,
+    cache −2.3, mirage +3.0, nuke +2.4 (anubis +0.5, inferno +5.9, ancient −3.0); the web view's to +0.9, −3.2, 0.0,
+    +0.6. The mask leaves the hands' edges and the white watermark in, so this still leans positive.
+  - **Ours against the web view, where they differ:** on the cells where ours is over 6 levels brighter than the web
+    view, ours is −8.2 to +1.7 from the game and the web view −11 to −25 (dust2, cache, anubis, mirage, ancient,
+    nuke); where ours is over 6 levels darker, ours is −5.2 to +3.8 and the web view +5.9 to +20.2. The web view's
+    sunlit walls are too dark and its shade too bright, and the two cancel in a mean; ours is close in both, which
+    is why its blurred |Δ| is lower everywhere.
+  - Checked and in order: the tone curve on min(c × 2.8, 2^white point) over its value at white (dust2, mirage and
+    nuke's curves are near-linear, cache's is the filmic default); the lookup table sampled in gamma space at
+    c × (n−1)/n + 0.5/n from an `Rgba8Unorm` volume; the sRGB target encoding the linear output once.
+- **Left:** by game-luma tercile (hands left out), the darkest third reads +3 on dust2 and nuke, +6–7 on cache and
+  inferno, and the brightest +1 or less but for inferno (+5.2, bright all over) and cache (−13.6, its camera the
+  furthest off).
+  Shadow a few levels light is what screen-space ambient occlusion would take off, which CS2 draws and the sandbox
+  does not (not measured against a capture with it off). Mirage's sky is +7.6 on its own. Neither has a cause in hand
+  that is not a per-map fudge.
+- **The bench ran again:** `bench/realism.py` imported `web_compare`, a module removed with the recorded-data benches
+  (165730a), and could not start; the one function it used (finding the checkout from `--nades` or
+  SHOW_ME_THE_NADES) is now in it.

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -45,14 +46,22 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-import web_compare
-
 ROOT = Path(__file__).resolve().parent.parent
 # the show-me-the-nades checkout's skill, reference set and history, once main() is told where it is
 NADES = SKILL = REFS = WEB_HISTORY = Path()
 PACKS = Path.home() / ".cache/nades/packs"
 RUNS = ROOT / ".runs"
 HISTORY = RUNS / "realism-history.jsonl"
+
+
+def checkout(given: Path | None) -> Path:
+    """The show-me-the-nades checkout, named and never assumed: `--nades <dir>`, else SHOW_ME_THE_NADES."""
+    path = given or (Path(os.environ["SHOW_ME_THE_NADES"]) if os.environ.get("SHOW_ME_THE_NADES") else None)
+    if path is None:
+        raise SystemExit("name the show-me-the-nades checkout to compare with: --nades <dir> or SHOW_ME_THE_NADES=<dir>")
+    if not (path / "web/app").is_dir():
+        raise SystemExit(f"{path} is not a show-me-the-nades checkout (it has no web/app)")
+    return path.resolve()
 
 
 def locate(nades: Path) -> None:
@@ -123,7 +132,7 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--renders", type=Path, help="compare renders made earlier (<map>.png) instead of rendering")
     opts = parser.parse_args()
-    locate(web_compare.checkout(opts.nades))
+    locate(checkout(opts.nades))
     if not opts.note:
         print("give --note: the history is only useful if each run says what changed", file=sys.stderr)
         return 2
