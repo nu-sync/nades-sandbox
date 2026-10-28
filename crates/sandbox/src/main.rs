@@ -449,10 +449,26 @@ fn encode_png(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, height: u32, order: 
 /// A copied frame (rows padded to 256 bytes, four bytes a texel) as packed 8-bit RGB; `order` picks red, green and
 /// blue from each texel.
 fn read_rgb(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, order: [usize; 3]) -> Result<Vec<u8>> {
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    buffer.slice(..).map_async(wgpu::MapMode::Read, move |mapped| { let _ = sender.send(mapped); });
+    map_read(gpu, &[buffer])?;
+    rgb_of(buffer, width, order)
+}
+
+/// Waits until everything submitted has run and `buffers` are mapped for reading.
+fn map_read(gpu: &Gpu, buffers: &[&wgpu::Buffer]) -> Result<()> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(buffers.len());
+    for buffer in buffers {
+        let sender = sender.clone();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |mapped| { let _ = sender.send(mapped); });
+    }
     gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(10)) })?;
-    receiver.recv_timeout(Duration::from_secs(1)).context("frame mapping timed out")??;
+    for _ in buffers {
+        receiver.recv_timeout(Duration::from_secs(1)).context("frame mapping timed out")??;
+    }
+    Ok(())
+}
+
+/// A mapped frame's rows as packed 8-bit RGB (`order` picks the channels); unmaps it.
+fn rgb_of(buffer: &wgpu::Buffer, width: u32, order: [usize; 3]) -> Result<Vec<u8>> {
     let bytes = buffer.slice(..).get_mapped_range()?;
     let rgb: Vec<u8> = bytes.chunks_exact(row_bytes(width) as usize).flat_map(|row| row[..width as usize * 4].chunks_exact(4).flat_map(|t| order.map(|k| t[k]))).collect();
     drop(bytes);

@@ -1298,3 +1298,70 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   are the cloud's late creep, not its bloom).
 - **Open:** retune the simulation (volume, bricks, step costs) against the new clouds; show-me-the-nades' web
   rebuild (its D16 `smokeCloud`) fills the bricks the old way and draws its smokes too big as well.
+
+## S38 · A video's render time, stage by stage
+
+- **Decision (2026-10-28, after the user's "do we have the correct performance profiling and telemetry around this
+  to understand exactly why?"):** every video job reports `timings` in `video_status` and the JSON beside its MP4
+  (`nades_control::video::VideoTimings`). The renderer times its setup (the map staged, the sight collider, the
+  shot planned, the camera audited) and each frame's stages — the camera, recording and submitting the draws, the
+  wait until the frame is readable on the CPU, the conversion to RGB, the stills, the write into the encoder's
+  pipe — and sends them as one `video_timings` line on stderr; the MCP adds the wall clock (startup to the plan,
+  the frames, the encoder's tail, the total). Each frame stage is a total, median, p95 and max in milliseconds.
+- **Evidence:** the Anubis Street → Connector smoke, `lineup_render` at 1920×1080, 60 fps, 1,638 frames, five runs
+  through nades-mcp (load average 10–20 throughout, so absolute times are high; the shares held in every run):
+
+  | stage | median per frame | whole clip (median run) | share |
+  |---|---|---|---|
+  | convert: mapped rows to packed RGB (CPU) | 10.3 ms | 17.1 s | 46% |
+  | wait: submission to the frame readable (GPU and copy) | 6.6 ms | 10.5 s | 28% |
+  | write: blocked on the encoder's pipe | 3.3 ms | 5.9 s | 16% |
+  | record: draws recorded and submitted | 1.0 ms | 2.6 s | 7% |
+  | stills: five PNGs | — | 1.3 s | 3% |
+  | startup to the plan / encoder's tail | | 0.5 s / 0.2 s | 2% |
+  | **total** | | **38.2 s** | |
+
+  The stages sum to the measured frame time within 1% (37.37 of 37.45 s). Without an encoder (output discarded,
+  load 4–6) a frame is 15 ms: convert 9.1, wait 3.7, record 0.7. The renderer's setup is 0.45 s, 0.28 s of it the
+  sight collider.
+- **Not done: GPU timestamp queries.** The device has `TIMESTAMP_QUERY`, but on Metal (Apple M5 Max, wgpu 30) an
+  empty compute pass's begin stamp reads 0, an end stamp repeats the previous frame's, and a span read 17 ms when the
+  CPU's whole submit-to-readable window was 4.4 ms (wgpu reports a 1 ns period; the stamps look uncalibrated). Numbers
+  that look exact and are not would mislead, so there is no GPU field: `wait` bounds the GPU's time from above.
+- **What it says:** the GPU is not the bottleneck. Nearly half the time is a byte-at-a-time iterator turning
+  8 MB of BGRA rows into RGB; a quarter is waiting on a GPU that idles while the CPU converts and writes (nothing is
+  pipelined); a sixth is x264 `medium` pushing back through the pipe.
+- **Then (the same day): no conversion, and the readback pipelined.** The renderer writes the mapped rows to the
+  encoder as they are (`-pix_fmt rgba`; ffmpeg turns RGBA and RGB into byte-identical YUV); a frame is copied only
+  for the crosshair, a still or padded rows, and RGB is made only for the PNGs. Two readback buffers: frame N+1 is
+  drawn and submitted before the CPU waits for frame N, so the GPU works while the CPU writes. The same smoke, five
+  runs of each alternated through nades-mcp (load average 6–13):
+
+  | | before | after |
+  |---|---|---|
+  | total (median) | 38.1 s | 16.4 s |
+  | convert | 17.0 s | 0.06 s |
+  | wait | 10.6 s | 0.9 s |
+  | write (the encoder pushing back) | 5.9 s | 9.4 s |
+  | record | 2.5 s | 3.4 s |
+
+  Frames: 240 frames of the clip against the old renderer's are byte-identical but for a few frames within 1 level,
+  as two runs of the old renderer differ; the first frame or two now and then differ by up to 7 levels in about 175
+  bytes scattered over the frame, also between two runs of the new renderer (seven of eight agreeing): unexplained,
+  and not seen above 1 level before. The stills are identical. Two x264 encodes of the old renderer differ by
+  41.5 dB PSNR, the old against the new by 41.3: x264's output is not repeatable here either way.
+- **Then: what each process uses, a bench, and two stalls it found.** `timings` also carries the renderer's CPU
+  seconds and peak footprint (it measures itself) and the encoder's CPU seconds (the children the MCP reaped during the
+  job, less the renderer; one headless job runs at a time). Against ffmpeg timed directly under `/usr/bin/time` on the
+  same frames it read 90.6 s for 104.3 s, near enough to say how many cores x264 keeps busy, not to bill it.
+  `bench/video.py` renders a lineup through nades-mcp, alternating two builds, and reports medians of every stage.
+  It showed the frames reaching the encoder slower through the MCP than straight from the renderer (12.6 s
+  against 8.6 s): every byte, 13.6 GB a clip, went through the MCP in `tokio::io::copy`'s 8 KB reads. The renderer's
+  stdout is now the encoder's stdin. And the five stills' PNGs (0.3 s each) are written on threads of their own.
+  The Anubis smoke, 5 runs of each alternated (load 12–15): 13.8 s → 11.9 s (`write` 7.9 → 4.3 s, `stills` 1.3 → 0 s,
+  `wait` 0.8 → 3.5 s as the GPU comes back into the critical path); x264 keeps 9 of 18 cores busy (100 CPU-seconds
+  for 1,638 frames, about 61 ms a frame); the renderer 1.3, peaking at 2.4 GB. The pipe alone, before the stills
+  moved: 14.1 → 13.2 s, faster in all five pairs.
+- **Open:** x264 `medium` costs 61 CPU-ms a frame and the GPU's wait is back: a faster preset or VideoToolbox,
+  judged by size and look; frames drawn further ahead of the readback. The first frames' variation. A GPU clock that
+  reads true on Metal (wgpu's calibration, or a Metal counter sample buffer read directly).

@@ -39,6 +39,7 @@ uv run bench/realism.py --nades <checkout> --note "what changed"   # every map r
 ./target/release/nades-sandbox --bench-maps de_mirage,de_cache   # each map picked in turn, timed until it shows
 ./target/release/nades-sandbox --bench-maps all:2           # every packed map picked twice, once all are on the GPU
 python3 bench/resident.py                                   # every map in one session: switches, memory, the budget
+python3 bench/video.py --baseline <dir>                     # a lineup video through the MCP, two builds alternated, every stage
 cargo run --release -p nades-mcp --example verify           # every MCP tool against the real app (window on screen)
 just bundle                                                 # the macOS app: target/release/bundle/macos/Nades Sandbox.app
 just check-windows                                          # type-check and lint the workspace for Windows (DX12)
@@ -74,7 +75,7 @@ the MCP or the shots (`shot.rs`), act as the agent over stdio (JSON-RPC, as `exa
 frames of the video it makes; and run
 `cargo run --release -p nades-mcp --example verify` with the window on screen. For anything on the start-up path, run
 `python3 bench/startup.py` and compare its medians with the targets in SPEC.md §9 (with `NADES_SANDBOX_STATE` on a
-scratch file, so the runs do not move the user's remembered view). For anything that changes how maps are kept, loaded
+scratch file, so the runs do not move the user's remembered view). For anything in the video path (`render_video`, `crates/mcp/src/video.rs`), run `python3 bench/video.py --baseline <dir>` with the previous build's binaries copied to `<dir>`, and read its stages. For anything that changes how maps are kept, loaded
 or switched, run `python3 bench/resident.py` (the same scratch file) and compare it with SPEC.md §9; for anything
 platform-specific, `just check-windows`. For anything that changes how a map looks, run `uv run bench/realism.py --nades
 <checkout> --note …`, which compares every map with the in-game references show-me-the-nades keeps (its

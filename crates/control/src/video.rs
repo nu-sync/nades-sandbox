@@ -76,6 +76,87 @@ pub struct CameraAudit {
     pub hidden: Vec<f64>,
 }
 
+/// Where a video's render time went (S38): the job's wall clock, the renderer's setup and each frame's stages.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct VideoTimings {
+    /// Seconds from launching the renderer until it planned the clip (the map loaded, the throws simulated, the shot
+    /// planned and audited), as the MCP saw it.
+    #[serde(default)]
+    pub startup_seconds: f64,
+    /// Seconds from the plan until the renderer's last frame left its pipe.
+    #[serde(default)]
+    pub frames_seconds: f64,
+    /// Seconds the encoder ran after the last frame reached it.
+    #[serde(default)]
+    pub encode_tail_seconds: f64,
+    /// Seconds from launching the renderer until the MP4 was finished.
+    #[serde(default)]
+    pub total_seconds: f64,
+    /// The renderer's setup before its first frame, in order.
+    pub setup: Vec<StageTime>,
+    pub frame: FrameTimings,
+    /// What the renderer used, as it measured itself.
+    #[serde(default)]
+    pub renderer: ProcessUse,
+    /// What the encoder used: the CPU time of the processes the MCP reaped during the job, less the renderer's.
+    #[serde(default)]
+    pub encoder: ProcessUse,
+}
+
+/// A process's CPU time (user and system, every thread) and its largest physical footprint; null where unmeasured.
+/// CPU seconds over a stage's wall seconds is how many cores it kept busy.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ProcessUse {
+    pub cpu_seconds: Option<f64>,
+    pub peak_footprint_bytes: Option<u64>,
+}
+
+/// One setup stage, milliseconds.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StageTime {
+    pub stage: String,
+    pub ms: f64,
+}
+
+/// Each frame's stages across the clip. CPU stages are wall time on the renderer's thread.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FrameTimings {
+    pub frames: u32,
+    /// The camera for the frame (a shot's moves, its keeping clear of walls).
+    pub camera: Spread,
+    /// Recording and submitting the frame's draws (each smoke sample) and its present and copy.
+    pub record: Spread,
+    /// Blocked until the frame was readable on the CPU: the GPU finishing it and its copy. The next frame is drawn
+    /// first, so this is the part of the GPU's time the CPU could not hide. (Metal's timestamp queries read stale or
+    /// uncalibrated here, S38.)
+    pub wait: Spread,
+    /// The frame made ready for the encoder: nothing for most, which go as the mapped rows; a copy for the crosshair,
+    /// a still or padded rows (S38).
+    pub convert: Spread,
+    /// Handing the frame's stills to the threads that write them as PNGs.
+    pub stills: Spread,
+    /// Blocked writing the frame into the encoder's pipe.
+    pub write: Spread,
+}
+
+/// A stage's milliseconds over the frames.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Spread {
+    pub total_ms: f64,
+    pub median_ms: f64,
+    pub p95_ms: f64,
+    pub max_ms: f64,
+}
+
+impl Spread {
+    pub fn of(ms: &[f64]) -> Self {
+        let mut sorted = ms.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let at = |q: f64| sorted.get(((sorted.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+        Self { total_ms: sorted.iter().sum(), median_ms: at(0.5), p95_ms: at(0.95), max_ms: at(1.0) }
+    }
+}
+
 /// A frame of the clip kept as a PNG at `path` (absolute, ending in .png).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -371,6 +452,12 @@ impl VideoRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_spread_sums_and_ranks_its_samples() {
+        let spread = Spread::of(&[4.0, 1.0, 3.0, 2.0, 10.0]);
+        assert_eq!(spread, Spread { total_ms: 20.0, median_ms: 3.0, p95_ms: 10.0, max_ms: 10.0 });
+        assert_eq!(Spread::of(&[]), Spread::default());
+    }
     #[test]
     fn moving_camera_crosses_the_yaw_seam_on_the_short_path() {
         let pose = |yaw| CameraPose {

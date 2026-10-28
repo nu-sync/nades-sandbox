@@ -20,6 +20,9 @@ base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 rmcp = { version = "=3.7.0", features = ["client", "transport-child-process"] }
 png.workspace = true

@@ -2,7 +2,7 @@
 
 ## Outcome and boundaries
 
-An agent discovers thirteen typed tools, understands the currently shown map and camera, operates its own window,
+An agent discovers twenty-two typed tools, understands the currently shown map and camera, operates its own window,
 checks actual results, and renders scenes headlessly. It can read bounded logs and correctly labelled frame metrics
 without shell automation. The MCP adapter calls the same application commands as the UI. It is not a second renderer.
 
@@ -10,7 +10,7 @@ The server owns one window. Another MCP session and manually opened windows are 
 restart the owned window; this is explicitly reported. A ready window survives MCP disconnect and becomes the user's
 normal window. It cannot be reclaimed by later MCP sessions. Offscreen workers never become retained windows.
 
-Live M3 throw selection and playback; M4 resident map switching; semantic location navigation, picking, visibility,
+M4 resident map switching; semantic location navigation, picking, visibility,
 saved views and batch rendering are follow-up capabilities. V1 does not advertise them. Database writes, arbitrary
 SQL, shell execution and raw game/pack exports are excluded. Assets and the database stay local.
 
@@ -112,7 +112,7 @@ scene's clock.
 | `frame_capture` | Instance; include_ui defaults true; optional expected revision. Native physical window or cropped scene rectangle. | Decodable PNG from the reported frame/revision; scene-only copy occurs before UI in the same submission, with UI still presented normally; app stays open. Occlusion/readback failure is explicit. |
 | `view_render` | Map with a camera; or a scene on that map with `time_seconds`, a view (orbit by default, follow, thrower) of throw `throw` (the first by default) and arcs on or off, the camera optional. Width/height default 1138×640, render_time_seconds defaults zero. | No window; PNG has requested dimensions/provenance; a scene's render reports each throw's release, bounces, detonation and effect; repeated fixed-input map renders have maximum channel error ≤1 and mean error ≤0.001 display levels on the same GPU/build; live state unchanged; workers and temporary outputs cleaned. A scene on another map, without throws and without a camera, or naming a throw it lacks is refused before launching. |
 | `diagnostics_get` | Log limit defaults 50, maximum 200. | Bounded actual startup/frame/error/build/GPU diagnostics; failures remain inspectable; no image blobs, raw assets or fabricated metrics. |
-| `lineup_render` | Map (de_mirage or mirage), grenade (people's names: molly, inc, flashbang, frag…), the lineup line as posted (`setpos … setang …`: semicolons, roll and `_exact` optional), the technique in words or as fields (`speed` 30 for a jump-throw with W held); optional `max_megabytes` (default 25); optional output .mp4, seconds, size, fps, stills, wait. | One call renders the jumpthrow.pro-style video (spot, aim, aim point, throw, chase, landing, bloom, 360° turn; crosshair only before the release; no paths; 1920×1080 at 60 fps), five stills and a JSON beside it, and returns them with the technique as understood and where and when the grenade went off; a line without `setpos x y z` or `setang pitch yaw` is refused with what it lacks. |
+| `lineup_render` | Map (any packed map; `mirage` reads as de_mirage), grenade (people's names: molly, inc, flashbang, frag…), the lineup line as posted (`setpos … setang …`: semicolons, roll and `_exact` optional), the technique in words or as fields (`speed` 30 for a jump-throw with W held); optional `max_megabytes` (default 25); optional output .mp4, seconds, size, fps, stills, wait (default true, for up to 15 minutes; false returns the job for `video_status`). | One call renders the jumpthrow.pro-style video (spot, aim, aim point, throw, chase, landing, bloom, 360° turn; crosshair only before the release; no paths; 1920×1080 at 60 fps), five stills and a JSON beside it, and returns them with the technique as understood and where and when the grenade went off; a line without `setpos x y z` or `setang pitch yaw` is refused with what it lacks. |
 | `throws_simulate` | A scene (console strings or feet/pitch/yaw). No window, no GPU. | Each throw's report within a second or two; a console string lacking `setang` (or given beside feet) is refused. |
 | `scene_get` | Instance. | The window's scene, and each simulated throw's report (waiting up to 30 s for the simulations). |
 | `scene_set` | Instance, scene, optional expected revision. Another map switches the window to it in place. | The scene read back equals the one set, with the reports; an invalid scene does not change the window. |
@@ -122,8 +122,8 @@ scene's clock.
 | `throw_remove` | Instance, index. | The throw is gone and later ones move down. |
 | `time_set` | Instance, optional seconds (finite, ≥ 0), optional playing. | The clock reads back as set (clamped to the scene's end); effects showing then are reported. |
 | `view_set` | Instance, view (free, thrower, follow, orbit), optional throw index. | The camera mode reads back; a view of a throw the scene lacks is refused. |
-| `video_render` | A scene, start (and end) seconds on its clock; a `shot` (follow, orbit, thrower, hold moves), or a fixed camera, keyframes or a view of one of its throws; size, fps; an optional absolute `output` .mp4 path. | Returns a job ID immediately; uses one headless renderer and FFmpeg H.264; a shot's length comes from the simulation; the finished file is at `output` when given; the status carries the throws' reports; live state is unchanged. |
-| `video_status` | Job ID from this MCP session. | Reports running/completed/failed/cancelled, rendered frame count, errors and final local MP4 path. |
+| `video_render` | A scene, start (and end) seconds on its clock; a `shot` (lineup, follow, orbit, thrower, hold moves), or a fixed camera, keyframes or a view of one of its throws; size, fps, `max_megabytes` (1–500, default 25); an optional absolute `output` .mp4 path. | Returns a job ID immediately; uses one headless renderer and FFmpeg H.264; a shot's length comes from the simulation; the finished file is at `output` when given; the status carries the throws' reports; live state is unchanged. |
+| `video_status` | Job ID from this MCP session. | Reports running/completed/failed/cancelled, rendered frame count, errors and final local MP4 path; once finished, `timings` (S38): the wall clock (startup, frames, encode tail) and each frame stage's total, median, p95 and max (camera, record, wait, convert, stills, write), the renderer's CPU seconds and peak footprint and the encoder's CPU seconds; also in the JSON beside the MP4. |
 | `video_cancel` | Job ID. | Stops and reaps the owned renderer and encoder; polling reaches cancelled and no partial MP4 remains. |
 
 Capture and offscreen comparison use identical dimensions, camera/FOV and material time. Exposure has no temporal
@@ -133,8 +133,9 @@ offscreen requests rather than comparing unrelated frames.
 ## Headless video
 
 Call `video_render` with a scene and poll `video_status`. The default is 1280×720 at 30 fps; dimensions are even and at
-most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total at most 1,800 frames. Times are seconds
-on the scene's clock (each throw begins at its own start), from 0; the scene's clock runs with the clip.
+most 1920×1080, duration at most 60 seconds, frame rate at most 60, and the total at most 1,800 frames. The bitrate is
+capped so the MP4 stays within `max_megabytes` (1–500, default 25). Times are seconds on the scene's clock (each throw
+begins at its own start), from 0; the scene's clock runs with the clip.
 
 With no camera given, the clip is the lineup video of the first throw (`{"move": "lineup", "throw": 0, "seconds":
 null}`): the spot (wide), the aim with the crosshair, the aim point (zoomed), the throw, the chase down the grenade's own
@@ -185,7 +186,7 @@ packs, GPU or desktop are unavailable coverage, not a passing test. Mock protoco
 
 The required journeys are:
 
-1. Negotiate MCP, discover all thirteen tools and their input/output schemas; list maps; inspect stopped state;
+1. Negotiate MCP, discover all twenty-two tools and their input/output schemas; list maps; inspect stopped state;
    start de_cache, repeat start, inspect ready state, capture, stop, and start again.
 2. Set distinct known camera poses; independently assert conversion and numerical readback. Capture the actual
    resulting revision and compare scene-only pixels with offscreen output at the same pose, size and material time.
@@ -207,7 +208,7 @@ Alternate baseline/candidate timing runs (n≥5), record load averages/stage mar
 launch. Preserve SPEC §9 targets. Game reference images and derivatives remain in the neighboring project's
 `.verify-runs/`; do not copy them into MCP output or evidence.
 
-V1 is complete only when all thirteen real-tool criteria and the five journeys have passing evidence, the verifier and
+V1 is complete only when all twenty-two real-tool criteria and the five journeys have passing evidence, the verifier and
 verification skill can be rerun by a fresh agent, and unresolved coverage is explicitly reported. No commit or external
 client configuration change is part of this implementation.
 

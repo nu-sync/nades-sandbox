@@ -1801,6 +1801,7 @@ dependencies = [
  "anyhow",
  "base64",
  "jsonschema",
+ "libc",
  "nades-config",
  "nades-control",
  "nades-pack",
