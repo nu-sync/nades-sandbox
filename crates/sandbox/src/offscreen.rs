@@ -81,8 +81,13 @@ fn view_camera(s: &Staged, view: ViewName, k: usize, t: f64) -> Result<Eye> {
 
 /// Draws `t` of the staged scene from `eye`, its smokes averaged over the jittered frames a still view takes.
 fn draw(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32) {
+    draw_with(s, eye, t, material_seconds, nades_render::smoke::ACCUMULATE);
+}
+
+/// Draws `t` from `eye`, a smoke averaged over `samples` jittered frames.
+fn draw_with(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32, samples: u32) {
     let size = s.targets.size();
-    let frames = if sim::smoking(&s.placed, t) { nades_render::smoke::ACCUMULATE } else { 1 };
+    let frames = if sim::smoking(&s.placed, t) { samples.max(1) } else { 1 };
     for k in 0..frames {
         let effects = sim::show(&s.gpu, &mut s.map, &s.placed, t, eye, size, k);
         let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene") });
@@ -129,17 +134,63 @@ pub fn render(shot: Shot<'_>) -> Result<()> {
 }
 
 /// A scene's clip as a stream of PNG frames on stdout, with JSON progress on stderr.
-pub fn render_video(path: &Path) -> Result<()> {
+/// CS2's crosshair drawn over a frame of packed RGB: four green arms with a dark outline round the middle, sized to
+/// the frame (`width` × `height`).
+pub fn crosshair(rgb: &mut [u8], width: u32, height: u32) {
+    let unit = (f64::from(height) / 720.0).max(0.5);
+    let (gap, length, thick) = ((4.0 * unit).round() as i64, (9.0 * unit).round() as i64, (1.5 * unit).round().max(1.0) as i64);
+    let (cx, cy) = (i64::from(width) / 2, i64::from(height) / 2);
+    let mut paint = |x0: i64, y0: i64, x1: i64, y1: i64, color: [u8; 3]| {
+        for y in y0.max(0)..y1.min(i64::from(height)) {
+            for x in x0.max(0)..x1.min(i64::from(width)) {
+                let i = ((y * i64::from(width) + x) * 3) as usize;
+                rgb[i..i + 3].copy_from_slice(&color);
+            }
+        }
+    };
+    let arms = |o: i64| {
+        [
+            (cx + gap - o, cy - thick / 2 - o, cx + gap + length + o, cy + (thick + 1) / 2 + o),
+            (cx - gap - length - o, cy - thick / 2 - o, cx - gap + o, cy + (thick + 1) / 2 + o),
+            (cx - thick / 2 - o, cy + gap - o, cx + (thick + 1) / 2 + o, cy + gap + length + o),
+            (cx - thick / 2 - o, cy - gap - length - o, cx + (thick + 1) / 2 + o, cy - gap + o),
+        ]
+    };
+    let outline = (unit.round() as i64).max(1);
+    for (x0, y0, x1, y1) in arms(outline) {
+        paint(x0, y0, x1, y1, [0, 0, 0]);
+    }
+    for (x0, y0, x1, y1) in arms(0) {
+        paint(x0, y0, x1, y1, [50, 250, 50]);
+    }
+}
+
+/// A scene's clip as a stream of frames on stdout (PNGs, or with `raw` packed RGB, which the encoder takes faster),
+/// with JSON progress on stderr; stills, when asked for, written as PNGs.
+pub fn render_video(path: &Path, raw: bool) -> Result<()> {
     use nades_control::video::VideoRequest;
     let request: VideoRequest = serde_json::from_slice(&std::fs::read(path)?)?;
     let request = request.validated().map_err(|e| anyhow!("{}: {}", e.code, e.message))?;
     let (width, height) = (request.width, request.height);
     let strong = request.throw.or_else(|| request.shot.first().and_then(nades_control::video::ShotMove::throw));
-    let mut s = stage(&request.scene, (width, height), Some(strong))?;
+    let mut s = stage(&request.scene, (width, height), request.arcs.then_some(strong))?;
     for (i, (b, start)) in s.placed.iter().enumerate() {
         eprintln!("{}", report(i, b, *start));
     }
-    let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds));
+    let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds, s.collider.as_ref()));
+    // each still's frame
+    let stills: Vec<(u32, &str)> = request
+        .stills
+        .iter()
+        .map(|still| {
+            let seconds = match still.at {
+                nades_control::video::StillAt::Seconds(at) => at,
+                nades_control::video::StillAt::Moment(m) => shot.as_ref().and_then(|shot| shot.moment(m)).unwrap_or(0.0),
+            };
+            ((seconds * f64::from(request.fps)).round() as u32, still.path.as_str())
+        })
+        .collect();
+    let samples = request.samples.unwrap_or(4);
     let end = request.end_seconds.unwrap_or_else(|| request.start_seconds + shot.as_ref().map_or(1.0, crate::shot::Shot::seconds));
     let frames = request.frames_until(end);
     if end - request.start_seconds > 60.0 || frames > 1800 {
@@ -162,7 +213,8 @@ pub fn render_video(path: &Path) -> Result<()> {
     let view = request.view.unwrap_or(ViewName::Follow);
     for frame in 0..frames {
         let elapsed = f64::from(frame) / f64::from(request.fps);
-        let t = request.start_seconds + elapsed;
+        let t = shot.as_ref().map_or(request.start_seconds + elapsed, |shot| shot.scene_time(elapsed));
+        let aiming = shot.as_ref().is_some_and(|shot| shot.crosshair(elapsed));
         let eye = match (&mut shot, request.camera_at(elapsed)) {
             (Some(shot), _) => views::of(&shot.camera(elapsed, &s.placed, request.start_seconds, s.collider.as_ref())),
             (None, Some(camera)) => {
@@ -172,7 +224,7 @@ pub fn render_video(path: &Path) -> Result<()> {
             }
             (None, None) => view_camera(&s, view, request.throw.unwrap_or(0), t)?,
         };
-        draw(&mut s, &eye, t, elapsed as f32);
+        draw_with(&mut s, &eye, t, elapsed as f32, samples);
         let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });
         {
             let target = output.create_view(&Default::default());
@@ -185,7 +237,18 @@ pub fn render_video(path: &Path) -> Result<()> {
         }
         encoder.copy_texture_to_buffer(output.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
         s.gpu.queue.submit([encoder.finish()]);
-        stream.write_all(&crate::encode_png(&s.gpu, &buffer, width, height, [0, 1, 2])?)?;
+        let mut rgb = crate::read_rgb(&s.gpu, &buffer, width, [0, 1, 2])?;
+        if aiming {
+            crosshair(&mut rgb, width, height);
+        }
+        for (_, still) in stills.iter().filter(|(at, _)| (*at).min(frames - 1) == frame) {
+            std::fs::write(still, crate::png_of(&rgb, width, height)?).with_context(|| format!("writing {still}"))?;
+        }
+        if raw {
+            stream.write_all(&rgb)?;
+        } else {
+            stream.write_all(&crate::png_of(&rgb, width, height)?)?;
+        }
         eprintln!("{}", serde_json::json!({"event":"video_progress", "frames":frame + 1, "total":frames}));
     }
     stream.flush()?;

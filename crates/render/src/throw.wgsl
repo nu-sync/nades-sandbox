@@ -84,6 +84,47 @@ fn mesh(in: MeshOut) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb, alpha);
 }
 
+// --- the grenades' own models (S34): textured, lit by the sun over a dim sky as the other meshes are ---
+
+@group(1) @binding(0) var model_texture: texture_2d<f32>;
+@group(1) @binding(1) var model_sampler: sampler;
+
+struct ModelIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) m0: vec4<f32>,
+    @location(4) m1: vec4<f32>,
+    @location(5) m2: vec4<f32>,
+    @location(6) m3: vec4<f32>,
+}
+
+struct ModelOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) world: vec3<f32>,
+}
+
+@vertex
+fn model_vertex(in: ModelIn) -> ModelOut {
+    let m = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
+    let world = m * vec4<f32>(in.position, 1.0);
+    return ModelOut(frame.view_proj * world, (m * vec4<f32>(in.normal, 0.0)).xyz, in.uv, world.xyz);
+}
+
+@fragment
+fn model(in: ModelOut) -> @location(0) vec4<f32> {
+    // the base colour is sRGB-encoded in a linear texture
+    let albedo = pow(textureSample(model_texture, model_sampler, in.uv).rgb, vec3<f32>(2.2));
+    let n = normalize(in.normal);
+    let lit = max(dot(n, frame.sun.xyz), 0.0) * frame.sun.w + 0.35;
+    // a little of the sun's sheen off the metal
+    let to_eye = normalize(frame.eye.xyz - in.world);
+    let sheen = pow(max(dot(reflect(-frame.sun.xyz, n), to_eye), 0.0), 24.0) * 0.4 * frame.sun.w;
+    return vec4<f32>(albedo * lit + vec3<f32>(sheen), 1.0);
+}
+
 // --- glows: a flash's or HE's burst, a white-hot pop the bloom spreads ---
 
 struct GlowIn {

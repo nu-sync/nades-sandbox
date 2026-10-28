@@ -236,6 +236,19 @@ fn catmull_rom(points: &[DVec3], segments: usize) -> Vec<Vec3> {
         .collect()
 }
 
+/// The effects pack's name for a grenade's model.
+fn model_name(grenade: nades_scene::stage::Grenade) -> &'static str {
+    use nades_scene::stage::Grenade;
+    match grenade {
+        Grenade::Smoke => "smokegrenade",
+        Grenade::Flash => "flashbang",
+        Grenade::He => "hegrenade",
+        Grenade::Molotov => "molotov",
+        Grenade::Incendiary => "incendiary",
+        Grenade::Decoy => "decoy",
+    }
+}
+
 fn rgba(rgb: [f64; 3], a: f32) -> [f32; 4] {
     [rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, a]
 }
@@ -256,9 +269,36 @@ struct Book {
     sequences: Sequences,
 }
 
-/// The fire's flipbooks, decoded on the CPU: CS2's own, from the shared effects pack.
+/// The fire's flipbooks and the grenades' models, decoded on the CPU: CS2's own, from the shared effects pack.
 pub struct Flipbooks {
     books: Vec<Book>,
+    grenades: Vec<nades_pack::effects::GrenadeModel>,
+}
+
+/// A vertex of a grenade's model: Hammer units, z up.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ModelVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+/// A grenade's model where it is: its transform's columns.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ModelInstance {
+    columns: [[f32; 4]; 4],
+}
+
+/// A model's part ready to draw in a layer: its vertices, indices, their count, and its texture's bind group.
+type ModelPart = (wgpu::Buffer, wgpu::Buffer, u32, wgpu::BindGroup);
+
+/// A grenade's model on the GPU: each part's vertices, indices and base colour.
+#[derive(Clone)]
+pub struct GpuGrenade {
+    name: String,
+    parts: Vec<(wgpu::Buffer, wgpu::Buffer, u32, wgpu::TextureView)>,
 }
 
 /// The flipbooks on the GPU: one view each, and each one's name, grid and sequences. Made once ([`Flipbooks::upload`])
@@ -267,6 +307,7 @@ pub struct Flipbooks {
 pub struct GpuBooks {
     views: Vec<wgpu::TextureView>,
     layout: Vec<(String, (u32, u32), Sequences)>,
+    grenades: Vec<GpuGrenade>,
 }
 
 impl Flipbooks {
@@ -277,14 +318,32 @@ impl Flipbooks {
             .iter()
             .map(|f| Book { name: f.name.clone(), pixels: f.rgba.clone(), size: (f.columns * f.cell, f.rows * f.cell), grid: (f.columns, f.rows), sequences: f.sequences.clone() })
             .collect();
-        Self { books }
+        Self { books, grenades: effects.grenades.clone() }
     }
 
     /// The flipbooks on the GPU, with every mip.
     pub fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> GpuBooks {
         let views = self.books.iter().map(|b| mipmapped(device, queue, &b.name, &b.pixels, b.size, false).create_view(&Default::default())).collect();
         let layout = self.books.iter().map(|b| (b.name.clone(), b.grid, b.sequences.clone())).collect();
-        GpuBooks { views, layout }
+        let grenades = self
+            .grenades
+            .iter()
+            .map(|g| GpuGrenade {
+                name: g.name.clone(),
+                parts: g
+                    .parts
+                    .iter()
+                    .map(|p| {
+                        let vertices: Vec<ModelVertex> = (0..p.positions.len()).map(|i| ModelVertex { position: p.positions[i], normal: p.normals[i], uv: p.uvs[i] }).collect();
+                        let vertex = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(&g.name), contents: bytemuck::cast_slice(&vertices), usage: wgpu::BufferUsages::VERTEX });
+                        let index = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(&g.name), contents: bytemuck::cast_slice(&p.indices), usage: wgpu::BufferUsages::INDEX });
+                        let texture = mipmapped(device, queue, &g.name, &p.rgba, (p.width, p.height), true).create_view(&Default::default());
+                        (vertex, index, p.indices.len() as u32, texture)
+                    })
+                    .collect(),
+            })
+            .collect();
+        GpuBooks { views, layout, grenades }
     }
 }
 
@@ -366,6 +425,13 @@ pub struct ThrowLayer {
     clamped: wgpu::Sampler,
     /// The flipbooks on the GPU, their names and grids, once loaded.
     books: Option<GpuBooks>,
+    /// The grenades' models: the pipeline, each part's texture's bind group by grenade, and this moment's instances.
+    model: wgpu::RenderPipeline,
+    model_layout: wgpu::BindGroupLayout,
+    models: Vec<(String, Vec<ModelPart>)>,
+    model_instances: Option<(wgpu::Buffer, u32)>,
+    /// Each model's range of this moment's instances.
+    model_ranges: Vec<(usize, std::ops::Range<u32>)>,
     arcs: Option<Arcs>,
     /// What moves, rewritten for each moment: the grenade's mesh, the bursts, the sprites, the patches.
     moving: Option<(wgpu::Buffer, u32)>,
@@ -473,6 +539,19 @@ impl ThrowLayer {
             })
         };
         use wgpu::CompareFunction::{Always, GreaterEqual};
+        let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grenade model"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+        let model_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("grenade models"), bind_group_layouts: &[Some(&group_layout), Some(&model_layout)], immediate_size: 0 });
+        let model_buffers = [
+            Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<ModelVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2] }),
+            Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<ModelInstance>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4] }),
+        ];
+        let model = pipeline("grenade models", &model_pipeline_layout, "model_vertex", "model", &model_buffers, None, (true, GreaterEqual), None);
         let mesh_opaque = pipeline("throw meshes", &layout, "mesh_vertex", "mesh", &mesh_buffers, None, (true, GreaterEqual), Some(wgpu::Face::Back));
         let mesh_tube = pipeline("throw tube", &layout, "mesh_vertex", "mesh", &mesh_buffers, Some(over), (false, GreaterEqual), Some(wgpu::Face::Back));
         let mesh_overlay = pipeline("throw overlay", &layout, "mesh_vertex", "mesh", &mesh_buffers, Some(over), (false, Always), Some(wgpu::Face::Back));
@@ -510,6 +589,11 @@ impl ThrowLayer {
             repeated,
             clamped,
             books: None,
+            model,
+            model_layout,
+            models: Vec::new(),
+            model_instances: None,
+            model_ranges: Vec::new(),
             arcs: None,
             moving: None,
             glows: None,
@@ -547,6 +631,25 @@ impl ThrowLayer {
     /// Plays the fire's flipbooks (on the GPU already, [`Flipbooks::upload`]) in the fires shown from now on.
     pub fn set_flipbooks(&mut self, device: &wgpu::Device, books: &GpuBooks) {
         self.books = Some(books.clone());
+        self.models = books
+            .grenades
+            .iter()
+            .map(|g| {
+                let parts = g
+                    .parts
+                    .iter()
+                    .map(|(vertex, index, count, texture)| {
+                        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some(&g.name),
+                            layout: &self.model_layout,
+                            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(texture) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.repeated) }],
+                        });
+                        (vertex.clone(), index.clone(), *count, group)
+                    })
+                    .collect();
+                (g.name.clone(), parts)
+            })
+            .collect();
         self.rebind(device);
     }
 
@@ -571,7 +674,7 @@ impl ThrowLayer {
     fn group_for(&self, device: &wgpu::Device, frame: &wgpu::Buffer, kind: FireKind) -> wgpu::BindGroup {
         let blank;
         let views: [&wgpu::TextureView; 3] = match &self.books {
-            Some(GpuBooks { views, layout }) => {
+            Some(GpuBooks { views, layout, .. }) => {
                 let names = fire::books(kind);
                 let pick = |k: usize| layout.iter().position(|(n, _, _)| n == names[k]).map_or(&views[0], |i| &views[i]);
                 [pick(0), pick(1), pick(2)]
@@ -645,6 +748,7 @@ impl ThrowLayer {
     pub fn set_moment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, moment: &[(&Stage, f64)], view: &View, size: (u32, u32)) {
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&self.uniform(0.0, view, size, Some(FireKind::Molotov))));
         let mut moving = Meshes::default();
+        let mut instances: Vec<(usize, ModelInstance)> = Vec::new();
         let mut glows = Vec::new();
         let (mut molotov, mut incendiary, mut patches) = (Vec::new(), Vec::new(), Vec::new());
         for (stage, t) in moment {
@@ -653,7 +757,11 @@ impl ThrowLayer {
                 && let Some((at, spin)) = stage.flight.as_ref().and_then(|f| f.grenade_at(t))
             {
                 let turn = Mat4::from_quat(glam::Quat::from_xyzw(spin.x as f32, spin.y as f32, spin.z as f32, spin.w as f32));
-                moving.ellipsoid(v3(at), 1.7 * 1.3, 2.2 * 1.3, turn, rgba(nade_color(stage.grenade), 1.0), [1.0, 0.0]);
+                // the game's own model where the effects pack has it, else a capsule its size in its colour
+                match self.models.iter().position(|(name, _)| name == model_name(stage.grenade)) {
+                    Some(k) => instances.push((k, ModelInstance { columns: (Mat4::from_translation(v3(at)) * turn).to_cols_array_2d() })),
+                    None => moving.ellipsoid(v3(at), 1.7 * 1.3, 2.2 * 1.3, turn, rgba(nade_color(stage.grenade), 1.0), [1.0, 0.0]),
+                }
             }
             if let Some(burst) = stage.burst {
                 let on = burst.on(t) as f32;
@@ -673,6 +781,16 @@ impl ThrowLayer {
             }
         }
         self.moving = upload(device, queue, self.moving.take(), "grenades", &moving.vertices);
+        instances.sort_by_key(|(k, _)| *k);
+        self.model_ranges = Vec::new();
+        for (i, (k, _)) in instances.iter().enumerate() {
+            match self.model_ranges.last_mut() {
+                Some((last, range)) if last == k => range.end = i as u32 + 1,
+                _ => self.model_ranges.push((*k, i as u32..i as u32 + 1)),
+            }
+        }
+        let instances: Vec<ModelInstance> = instances.into_iter().map(|(_, m)| m).collect();
+        self.model_instances = upload(device, queue, self.model_instances.take(), "grenade models", &instances);
         self.glows = upload(device, queue, self.glows.take(), "bursts", &glows);
         self.sprites = upload(device, queue, self.sprites.take(), "fire sprites", &molotov);
         self.patches = upload(device, queue, self.patches.take(), "fire ground", &patches);
@@ -697,6 +815,19 @@ impl ThrowLayer {
             pass.set_pipeline(&self.mesh_opaque);
             pass.set_vertex_buffer(0, arcs.meshes.slice(..));
             pass.draw(arcs.opaque.clone(), 0..1);
+        }
+        // the grenades in flight: the game's models, and stand-ins where there are none
+        if let Some((instances, _)) = self.model_instances.as_ref() {
+            pass.set_pipeline(&self.model);
+            pass.set_vertex_buffer(1, instances.slice(..));
+            for (k, range) in &self.model_ranges {
+                for (vertex, index, count, group) in &self.models[*k].1 {
+                    pass.set_bind_group(1, group, &[]);
+                    pass.set_vertex_buffer(0, vertex.slice(..));
+                    pass.set_index_buffer(index.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..*count, 0, range.clone());
+                }
+            }
         }
         if let Some((buffer, count)) = self.moving.as_ref().filter(|(_, n)| *n > 0) {
             pass.set_pipeline(&self.mesh_opaque);

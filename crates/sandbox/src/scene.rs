@@ -82,7 +82,7 @@ impl SceneState {
         let (send, replies) = std::sync::mpsc::channel();
         let mut others: HashMap<String, Scene> = kept.into_iter().map(|s| (s.map.clone(), s)).collect();
         let scene = others.remove(map).unwrap_or_else(|| Scene::new(map));
-        Self { file: default_file(map), scene, others, built: HashMap::new(), asked: HashSet::new(), send, replies, selected: None, time: 0.0, playing: false, view: ViewName::Free, orbit: None, tool: Tool::default(), arcs: true, preview: None, revision: 0, notice: None }
+        Self { file: default_file(map), scene, others, built: HashMap::new(), asked: HashSet::new(), send, replies, selected: None, time: 0.0, playing: false, view: ViewName::Free, orbit: None, tool: Tool::default(), arcs: false, preview: None, revision: 0, notice: None }
     }
 
     /// Every map's scene with throws, this one's included.

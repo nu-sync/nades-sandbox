@@ -23,7 +23,7 @@
 //! - `--render <file.png> --setpos x,y,z --setang pitch,yaw [--eye 64] [--size 1138x640]` draws one frame offscreen,
 //!   with no window, from a CS2 console position (the player's feet) and angles, and writes it as a PNG: the in-game
 //!   lineup shots' cameras, for the realism check (bench/realism.py).
-//! - `--scene <file.json> --time <s> --render <file.png> [--view orbit|follow|thrower] [--throw k] [--no-arcs]` draws a
+//! - `--scene <file.json> --time <s> --render <file.png> [--view orbit|follow|thrower] [--throw k] [--arcs]` draws a
 //!   moment of a scene file offscreen (or from `--setpos`/`--setang` in place of a view), its smokes averaged over 16
 //!   jittered frames, and prints what each throw did as JSON lines (offscreen.rs). `--render-video <request.json>`
 //!   streams a scene's clip as PNG frames on stdout, for the MCP server. `--scene <file.json>` alone opens the scene in
@@ -44,6 +44,7 @@ mod resident;
 mod scene;
 mod shell;
 mod shot;
+mod lineup;
 mod sim;
 mod state;
 mod views;
@@ -105,7 +106,7 @@ struct Args {
     time: Option<f64>,
     view: Option<nades_control::scene::ViewName>,
     throw: Option<usize>,
-    no_arcs: bool,
+    arcs: bool,
     report: bool,
     render_time: Option<f32>,
     fov: Option<f32>,
@@ -131,7 +132,7 @@ fn args() -> Result<Args> {
             "--time" => args.time = Some(it.next().and_then(|t| t.parse().ok()).filter(|t: &f64| t.is_finite() && *t >= 0.0).context("--time needs seconds on the scene's clock")?),
             "--view" => args.view = Some(it.next().as_deref().and_then(nades_control::scene::ViewName::parse).context("--view needs free, thrower, follow or orbit")?),
             "--throw" => args.throw = Some(it.next().and_then(|n| n.parse().ok()).context("--throw needs a throw's index in the scene")?),
-            "--no-arcs" => args.no_arcs = true,
+            "--arcs" => args.arcs = true,
             "--report" => args.report = true,
             "--ui" => shell::set_shown(true),
             "--render-video" => args.video_request = Some(it.next().context("--render-video needs a request file")?.into()),
@@ -188,14 +189,14 @@ fn run() -> Result<()> {
     assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(request) = &args.video_request {
-        return offscreen::render_video(request);
+        return offscreen::render_video(request, std::env::var_os("NADES_RAW_FRAMES").is_some());
     }
     if let (true, Some(scene)) = (args.report, &args.scene) {
         return offscreen::simulate(scene);
     }
     if let (Some(out), Some(scene)) = (&args.render, &args.scene) {
         let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
-        return offscreen::render(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: !args.no_arcs, size: args.size.unwrap_or((1138, 640)), out });
+        return offscreen::render(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: args.arcs, size: args.size.unwrap_or((1138, 640)), out });
     }
     if let Some(out) = &args.render {
         return render_offscreen(&args, out);
@@ -442,6 +443,12 @@ fn write_png(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, height: u32, path: &P
 }
 
 fn encode_png(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, height: u32, order: [usize; 3]) -> Result<Vec<u8>> {
+    png_of(&read_rgb(gpu, buffer, width, order)?, width, height)
+}
+
+/// A copied frame (rows padded to 256 bytes, four bytes a texel) as packed 8-bit RGB; `order` picks red, green and
+/// blue from each texel.
+fn read_rgb(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, order: [usize; 3]) -> Result<Vec<u8>> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |mapped| { let _ = sender.send(mapped); });
     gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(10)) })?;
@@ -450,13 +457,18 @@ fn encode_png(gpu: &Gpu, buffer: &wgpu::Buffer, width: u32, height: u32, order: 
     let rgb: Vec<u8> = bytes.chunks_exact(row_bytes(width) as usize).flat_map(|row| row[..width as usize * 4].chunks_exact(4).flat_map(|t| order.map(|k| t[k]))).collect();
     drop(bytes);
     buffer.unmap();
+    Ok(rgb)
+}
+
+/// Packed 8-bit RGB as a PNG.
+fn png_of(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     {
         let mut png = png::Encoder::new(&mut output, width, height);
         png.set_color(png::ColorType::Rgb);
         png.set_depth(png::BitDepth::Eight);
         png.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
-        png.write_header()?.write_image_data(&rgb)?;
+        png.write_header()?.write_image_data(rgb)?;
     }
     if output.len() > nades_control::MAX_PNG_BYTES { bail!("PNG exceeds the 16 MiB image limit"); }
     Ok(output)

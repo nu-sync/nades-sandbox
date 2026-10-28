@@ -5,6 +5,7 @@
 //! - **The noise**: `materials/dev/noise/worley_perlin_z0000_tga_37c9ebc1.vtex_c` (the smoke material's
 //!   `g_tSmokeNoiseTex`; the folder holds another texture of the same source name), a 128³ RGBA8 volume read
 //!   straight from `pak01`, kept as R + 0.95 G in f32 as the script computes it.
+//! - **The grenades**: each one's world model (crate::grenades), as the web view's `cs2_effects.py` exports them (D30).
 //! - **The flipbooks**: each of [`FLIPBOOKS`] decompiled by Source 2 Viewer's CLI into its sheet (`.mks`: sequences
 //!   of frames) and one PNG a frame; each frame resized to a [`CELL`]-texel square by Pillow's Lanczos filter (on
 //!   premultiplied alpha, 22-bit fixed point, as Pillow resizes RGBA) and laid out in sequence order, √n columns. A
@@ -50,10 +51,12 @@ pub fn build(cli: &Path, pak: &Path, scratch: &Path) -> Result<Effects> {
             .with_context(|| format!("running {}", cli.display()))?;
         ensure!(output.status.success(), "{} exited {} decompiling the flipbooks: {}", cli.display(), output.status, String::from_utf8_lossy(&output.stderr).trim());
         let src = dir.join(FLIPBOOK_DIR);
-        FLIPBOOKS.iter().map(|name| flipbook(&src, name)).collect::<Result<Vec<_>>>()
+        let flipbooks = FLIPBOOKS.iter().map(|name| flipbook(&src, name)).collect::<Result<Vec<_>>>()?;
+        Ok((flipbooks, crate::grenades::build(cli, pak, &dir)))
     })();
     let _ = std::fs::remove_dir_all(&dir);
-    let effects = Effects { noise, flipbooks: result? };
+    let (flipbooks, grenades) = result?;
+    let effects = Effects { noise, flipbooks, grenades };
     effects.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(effects)
 }

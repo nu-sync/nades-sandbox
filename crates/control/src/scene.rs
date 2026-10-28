@@ -152,25 +152,152 @@ impl SceneThrow {
     }
 }
 
-/// The spot and view a CS2 console string puts a player in: `setpos x y z; setang pitch yaw roll` (either order,
-/// `setpos_exact` too, roll ignored), as `getpos` prints it and practice configs hold it.
+/// The spot and view a CS2 console string puts a player in: `setpos x y z; setang pitch yaw roll`, as `getpos` prints
+/// it and lineup sites post it: either order, with or without the roll, with or without semicolons, `setpos_exact` too,
+/// other words around it ignored.
 pub fn parse_console(text: &str) -> Result<([f64; 3], f64, f64), ControlError> {
     let invalid = |message: String| ControlError::new("invalid_console", message, false);
+    let words: Vec<String> = text.split(|c: char| c.is_whitespace() || c == ';' || c == ',' || c == '"').filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect();
+    let numbers_after = |k: usize| -> Vec<f64> { words[k + 1..].iter().map_while(|w| w.parse::<f64>().ok()).collect() };
     let (mut feet, mut angles) = (None, None);
-    for command in text.split(';').map(str::trim).filter(|c| !c.is_empty()) {
-        let mut words = command.split_whitespace();
-        let name = words.next().unwrap_or_default().to_ascii_lowercase();
-        let numbers: Vec<f64> = words.map(|w| w.parse::<f64>()).collect::<Result<_, _>>().map_err(|_| invalid(format!("Not numbers in {command:?}.")))?;
-        match name.as_str() {
-            "setpos" | "setpos_exact" if numbers.len() == 3 => feet = Some([numbers[0], numbers[1], numbers[2]]),
-            "setang" | "setang_exact" if (2..=3).contains(&numbers.len()) => angles = Some((numbers[0], numbers[1])),
-            _ => return Err(invalid(format!("Expected `setpos x y z` and `setang pitch yaw [roll]`, not {command:?}."))),
+    for (k, word) in words.iter().enumerate() {
+        let numbers = numbers_after(k);
+        match word.as_str() {
+            "setpos" | "setpos_exact" => match numbers.as_slice() {
+                [x, y, z, ..] => feet = Some([*x, *y, *z]),
+                _ => return Err(invalid(format!("`{word}` needs three numbers (x y z), in {text:?}."))),
+            },
+            "setang" | "setang_exact" => match numbers.as_slice() {
+                [pitch, yaw, ..] => angles = Some((*pitch, *yaw)),
+                _ => return Err(invalid(format!("`{word}` needs two numbers (pitch yaw), in {text:?}."))),
+            },
+            _ => {}
         }
     }
     match (feet, angles) {
         (Some(feet), Some((pitch, yaw))) => Ok((feet, pitch, yaw)),
-        _ => Err(invalid("A console string needs both `setpos x y z` and `setang pitch yaw`.".into())),
+        _ => Err(invalid(format!("A lineup needs both `setpos x y z` and `setang pitch yaw`; found {}{} in {text:?}.", if feet.is_some() { "setpos" } else { "no setpos" }, if angles.is_some() { " and setang" } else { " and no setang" }))),
     }
+}
+
+impl Grenade {
+    /// A grenade as people name it: smoke, flash(bang), he / frag / hegrenade, molotov / molly, incendiary / inc,
+    /// decoy, in any case.
+    pub fn parse(name: &str) -> Option<Self> {
+        let n: String = name.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        Some(match n.as_str() {
+            "smoke" | "smokegrenade" | "smokes" => Grenade::Smoke,
+            "flash" | "flashbang" | "flashes" | "popflash" => Grenade::Flash,
+            "he" | "hegrenade" | "frag" | "grenade" | "nade" => Grenade::He,
+            "molotov" | "molly" | "molo" | "molotovs" | "mollies" => Grenade::Molotov,
+            "incendiary" | "inc" | "incgrenade" | "incendiarygrenade" | "incen" => Grenade::Incendiary,
+            "decoy" | "decoygrenade" => Grenade::Decoy,
+            _ => return None,
+        })
+    }
+}
+
+/// How a lineup is thrown, read from the words people use: "jumpthrow", "jump throw", "run jumpthrow", "running
+/// jump throw", "walk", "run", "standing", "crouch" / "duck", "left click" / "lmb", "right click" / "rmb", "middle",
+/// "both" / "lmb+rmb". Words it does not know are left alone; what it found is said in `understood`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Technique {
+    pub movement: Movement,
+    pub click: Click,
+    pub crouch: bool,
+    /// The words it read, in order.
+    pub understood: Vec<String>,
+}
+
+impl Technique {
+    pub fn parse(text: &str) -> Self {
+        let t = text.to_ascii_lowercase().replace(['-', '_', '+', '/', '(', ')', ',', ';', '.'], " ");
+        let words: Vec<&str> = t.split_whitespace().collect();
+        let has = |w: &[&str]| words.iter().any(|x| w.contains(x));
+        let joined = words.join(" ");
+        let jump = has(&["jumpthrow", "jumpthrown", "jt", "jumpbind"]) || joined.contains("jump throw") || has(&["jump"]);
+        let run = has(&["run", "running", "runthrow", "runjumpthrow", "w", "forward", "moving"]) || joined.contains("run jump");
+        let walk = has(&["walk", "walking", "shift"]);
+        let mut understood = Vec::new();
+        let movement = match (jump || has(&["runjumpthrow"]), run || has(&["runjumpthrow"]), walk) {
+            (true, true, _) => Movement::RunJumpthrow,
+            (true, false, _) => Movement::Jumpthrow,
+            (false, true, _) => Movement::Run,
+            (false, false, true) => Movement::Walk,
+            _ => Movement::Stand,
+        };
+        if movement != Movement::Stand || has(&["stand", "standing", "still"]) {
+            understood.push(movement.name().to_string());
+        }
+        let left = has(&["left", "lmb", "m1", "mouse1", "attack", "full", "long"]);
+        let right = has(&["right", "rmb", "m2", "mouse2", "attack2", "underhand", "lob", "short"]);
+        let click = if has(&["middle", "both", "medium", "mid"]) || (left && right) {
+            Click::Middle
+        } else if right {
+            Click::Right
+        } else {
+            Click::Left
+        };
+        if left || right || has(&["middle", "both", "medium", "mid"]) {
+            understood.push(format!("{} click", click.name()));
+        }
+        let crouch = has(&["crouch", "crouched", "crouching", "duck", "ducked", "ducking", "ctrl"]);
+        if crouch {
+            understood.push("crouch".into());
+        }
+        Self { movement, click, crouch, understood }
+    }
+}
+
+/// A lineup as people post it online, for one call: the map, the grenade, the console line (`setpos …; setang …`),
+/// and how it is thrown, in words or as fields (fields win over words).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineupInput {
+    /// The map: de_mirage, or just mirage.
+    pub map: String,
+    /// smoke, flash, he, molotov (molly), incendiary (inc), decoy.
+    pub grenade: String,
+    /// The lineup's console line, as posted: `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0` (semicolons,
+    /// roll and `_exact` optional; other words around it are ignored, and technique words in it are read too).
+    pub lineup: String,
+    /// How it is thrown, in words: "jumpthrow", "run jumpthrow", "walk", "crouch", "right click", "middle click",
+    /// "jumpthrow + left click"… Standing, left click, not crouched when nothing says otherwise.
+    #[serde(default)]
+    pub technique: Option<String>,
+    #[serde(default)]
+    pub movement: Option<Movement>,
+    #[serde(default)]
+    pub click: Option<Click>,
+    #[serde(default)]
+    pub crouch: Option<bool>,
+}
+
+impl LineupInput {
+    /// The map's ID and the throw, with the technique as it was read.
+    pub fn throw(&self) -> Result<(String, SceneThrow, Technique), ControlError> {
+        let map = if self.map.starts_with("de_") || self.map.starts_with("cs_") || self.map.starts_with("ar_") { self.map.to_ascii_lowercase() } else { format!("de_{}", self.map.to_ascii_lowercase()) };
+        validate_map_id(&map)?;
+        let grenade = Grenade::parse(&self.grenade).ok_or_else(|| ControlError::new("invalid_grenade", format!("Not a grenade: {:?}. Use smoke, flash, he, molotov, incendiary or decoy.", self.grenade), false))?;
+        let (feet, pitch, yaw) = parse_console(&self.lineup)?;
+        let mut technique = Technique::parse(&format!("{} {}", self.technique.as_deref().unwrap_or_default(), strip_console(&self.lineup)));
+        if let Some(m) = self.movement {
+            technique.movement = m;
+        }
+        if let Some(c) = self.click {
+            technique.click = c;
+        }
+        if let Some(c) = self.crouch {
+            technique.crouch = c;
+        }
+        let throw = SceneThrow { grenade, feet, pitch, yaw, crouch: technique.crouch, movement: technique.movement, click: technique.click, start: 0.0, label: None }.validated()?;
+        Ok((map, throw, technique))
+    }
+}
+
+/// A lineup line without its commands and numbers, for its technique words.
+fn strip_console(text: &str) -> String {
+    text.split(|c: char| c.is_whitespace() || c == ';').filter(|w| !w.is_empty() && w.parse::<f64>().is_err() && !w.to_ascii_lowercase().starts_with("set")).collect::<Vec<_>>().join(" ")
 }
 
 /// A throw as an agent or another application gives it: the grenade, the spot and view either as a CS2 console string
@@ -424,7 +551,29 @@ mod tests {
         assert_eq!(input(r#"{"grenade":"he","console":"setpos 1 2 3"}"#).unwrap_err().code, "invalid_console");
         assert_eq!(input(r#"{"grenade":"he","console":"setpos 1 2 3; setang 0 0","feet":[0,0,0]}"#).unwrap_err().code, "invalid_throw");
         assert_eq!(input(r#"{"grenade":"he","console":"noclip"}"#).unwrap_err().code, "invalid_console");
+        // as lineup sites post them: no semicolon, no roll, extra spaces, quotes
+        assert_eq!(parse_console("setpos  -1.5 2 3   setang 10 20").unwrap(), ([-1.5, 2.0, 3.0], 10.0, 20.0));
+        assert_eq!(parse_console("\"setpos_exact 1 2 3;setang_exact 4 5 0.000000\"").unwrap(), ([1.0, 2.0, 3.0], 4.0, 5.0));
+        assert!(parse_console("setpos 1 2; setang 4 5").unwrap_err().message.contains("three numbers"));
         let scene: SceneInput = serde_json::from_str(r#"{"map":"de_mirage","throws":[{"grenade":"flash","console":"setpos 1 2 3; setang 0 0 0"}]}"#).unwrap();
         assert_eq!(scene.scene().unwrap().throws[0].feet, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn a_lineup_as_posted_online_is_one_throw() {
+        let lineup = |json: &str| serde_json::from_str::<LineupInput>(json).unwrap().throw();
+        let (map, t, how) = lineup(r#"{"map":"mirage","grenade":"Smoke","lineup":"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0","technique":"jumpthrow, left click"}"#).unwrap();
+        assert_eq!((map.as_str(), t.grenade, t.movement, t.click, t.crouch), ("de_mirage", Grenade::Smoke, Movement::Jumpthrow, Click::Left, false));
+        assert_eq!(how.understood, ["jump-throw", "left click"]);
+        // the technique may sit in the lineup line itself, and fields win over words
+        let (_, t, _) = lineup(r#"{"map":"de_inferno","grenade":"molly","lineup":"setpos 1 2 3; setang 4 5 0 (run jumpthrow, crouch)"}"#).unwrap();
+        assert_eq!((t.grenade, t.movement, t.crouch), (Grenade::Molotov, Movement::RunJumpthrow, true));
+        let (_, t, _) = lineup(r#"{"map":"nuke","grenade":"flashbang","lineup":"setpos 1 2 3 setang 4 5","technique":"RMB","click":"middle"}"#).unwrap();
+        assert_eq!((t.grenade, t.click, t.movement), (Grenade::Flash, Click::Middle, Movement::Stand));
+        assert_eq!(Technique::parse("right click lob").click, Click::Right);
+        assert_eq!(Technique::parse("LMB+RMB").click, Click::Middle);
+        assert_eq!(Technique::parse("walk").movement, Movement::Walk);
+        assert_eq!(Technique::parse("W + jumpthrow").movement, Movement::RunJumpthrow);
+        assert_eq!(lineup(r#"{"map":"mirage","grenade":"rock","lineup":"setpos 1 2 3; setang 4 5"}"#).unwrap_err().code, "invalid_grenade");
     }
 }

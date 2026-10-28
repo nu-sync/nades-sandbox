@@ -13,9 +13,12 @@ use crate::sim::{self, Placed};
 /// How long an orbit takes to ease in from the camera before it.
 const EASE: f64 = 1.0;
 
-/// The moves laid out on the clip's time: each with when it starts and ends (seconds from the clip's start).
+/// The moves laid out on the clip's time: each with when it starts and ends (seconds from the clip's start), and a
+/// lineup move's sequence.
 pub struct Shot {
     moves: Vec<(f64, f64, ShotMove)>,
+    sequences: Vec<Option<crate::lineup::Sequence>>,
+    clip_start: f64,
     /// The camera each move began from, once it has.
     began: Vec<Option<CsView>>,
     last: Option<CsView>,
@@ -24,11 +27,20 @@ pub struct Shot {
 impl Shot {
     /// Lays `moves` out for a clip starting at `clip_start` on the scene's clock: a follow lasts until its throw goes off
     /// (and its `after_seconds`), at least a tenth of a second.
-    pub fn new(moves: &[ShotMove], placed: &[Placed], clip_start: f64) -> Self {
+    pub fn new(moves: &[ShotMove], placed: &[Placed], clip_start: f64, collider: Option<&Collider>) -> Self {
         let mut at = 0.0;
         let mut laid = Vec::new();
+        let mut sequences = Vec::new();
         for m in moves {
+            let sequence = match m {
+                ShotMove::Lineup { throw, seconds } => {
+                    let (b, start) = &placed[*throw];
+                    Some(crate::lineup::Sequence::new(b, *start, collider, *seconds))
+                }
+                _ => None,
+            };
             let seconds = match m {
+                ShotMove::Lineup { .. } => sequence.as_ref().map_or(1.0, crate::lineup::Sequence::seconds),
                 ShotMove::Follow { throw, after_seconds } => {
                     let (b, start) = &placed[*throw];
                     (b.detonates_at(*start) + after_seconds - (clip_start + at)).max(0.1)
@@ -36,9 +48,33 @@ impl Shot {
                 other => other.seconds().unwrap_or(1.0),
             };
             laid.push((at, at + seconds, m.clone()));
+            sequences.push(sequence);
             at += seconds;
         }
-        Self { began: vec![None; laid.len()], moves: laid, last: None }
+        Self { began: vec![None; laid.len()], moves: laid, sequences, clip_start, last: None }
+    }
+
+    /// The move playing at `elapsed`, and how far into it.
+    fn playing(&self, elapsed: f64) -> (usize, f64) {
+        let k = self.moves.iter().position(|(_, end, _)| elapsed < *end).unwrap_or(self.moves.len() - 1);
+        (k, elapsed - self.moves[k].0)
+    }
+
+    /// The scene's clock at `elapsed`: a lineup move's own (it waits for the throw), else the clip's.
+    pub fn scene_time(&self, elapsed: f64) -> f64 {
+        let (k, u) = self.playing(elapsed);
+        self.sequences[k].as_ref().map_or(self.clip_start + elapsed, |s| s.scene_time(u))
+    }
+
+    /// Whether the crosshair shows at `elapsed`: in a lineup move, until its grenade leaves the hand.
+    pub fn crosshair(&self, elapsed: f64) -> bool {
+        let (k, u) = self.playing(elapsed);
+        self.sequences[k].as_ref().is_some_and(|s| s.crosshair(u))
+    }
+
+    /// Seconds into the clip of a lineup move's moment (the first lineup move's).
+    pub fn moment(&self, m: nades_control::video::Moment) -> Option<f64> {
+        self.moves.iter().zip(&self.sequences).find_map(|((from, _, _), s)| s.as_ref().map(|s| from + s.moment(m)))
     }
 
     /// Seconds from the clip's start to the shot's end.
@@ -48,12 +84,13 @@ impl Shot {
 
     /// The camera at `elapsed` seconds into the clip; frames are asked for in order.
     pub fn camera(&mut self, elapsed: f64, placed: &[Placed], clip_start: f64, collider: Option<&Collider>) -> CsView {
-        let k = self.moves.iter().position(|(_, end, _)| elapsed < *end).unwrap_or(self.moves.len() - 1);
+        let (k, _) = self.playing(elapsed);
         let (from, _, m) = self.moves[k].clone();
         let began = *self.began[k].get_or_insert_with(|| self.last.unwrap_or_else(|| first_camera(&m, placed)));
         let u = elapsed - from;
         let t = clip_start + elapsed;
         let camera = match m {
+            ShotMove::Lineup { .. } => self.sequences[k].as_ref().expect("a lineup move's sequence").camera(u),
             ShotMove::Follow { throw, .. } => {
                 let (b, start) = &placed[throw];
                 sim::views::follow(b, b.local(*start, t), collider)
@@ -170,7 +207,7 @@ mod tests {
         let placed = placed();
         let det = placed[0].0.detonates_at(0.5);
         let moves = [ShotMove::Follow { throw: 0, after_seconds: 0.5 }, ShotMove::Orbit { throw: 0, radius: 300.0, height: 100.0, seconds: 4.0, degrees: 360.0, start_degrees: Some(0.0) }];
-        let mut shot = Shot::new(&moves, &placed, 0.0);
+        let mut shot = Shot::new(&moves, &placed, 0.0, None);
         assert!((shot.seconds() - (det + 0.5 + 4.0)).abs() < 1e-9);
         let focus = placed[0].0.stage.focus;
         let mut eyes = Vec::new();

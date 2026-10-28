@@ -24,6 +24,7 @@ pub mod entities;
 pub mod export;
 pub mod geometry;
 pub mod gltf;
+pub mod grenades;
 pub mod lump;
 pub mod ojson;
 pub mod materials;

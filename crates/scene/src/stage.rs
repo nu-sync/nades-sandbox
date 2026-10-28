@@ -117,9 +117,23 @@ fn spin_along(points: &[DVec3], ticks: &[i32]) -> Vec<DQuat> {
             axis = across.normalize();
         }
         let turn = DQuat::from_axis_angle(axis, along / if rolling { ROLL_RADIUS } else { TUMBLE });
-        spins.push(turn * spins[i - 1]);
+        let spun = turn * spins[i - 1];
+        // nearly still on the ground, it settles onto its side, its long axis across the way it last went
+        let settled = if along / seconds < SETTLING_SPEED && step.z.abs() < 1.0 { spun.slerp(lying(axis), 0.25) } else { spun };
+        spins.push(settled);
     }
     spins
+}
+
+/// Slower than this (units a second), a grenade on the ground is settling.
+const SETTLING_SPEED: f64 = 40.0;
+
+/// A grenade lying on its side: its long axis (the model's z) along `across`, flat, its x along the way it rolled.
+fn lying(across: DVec3) -> DQuat {
+    let z = DVec3::new(across.x, across.y, 0.0).normalize_or(DVec3::Y);
+    let x = z.cross(DVec3::Z).normalize_or(DVec3::X);
+    let y = z.cross(x);
+    DQuat::from_mat3(&glam::DMat3::from_cols(x, y, z))
 }
 
 /// A flash's or HE's moment of detonation: a burst of light the size of what it does.
@@ -399,6 +413,17 @@ mod tests {
         s.flames = vec![Flame { pos: [500.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0], start: 0.0, end: 5.5 }];
         assert_eq!(build_stage(s).fire.map(|f| f.kind), Some(FireKind::Incendiary));
         assert!(build_stage(simulated(Grenade::Molotov)).fire.is_none());
+    }
+
+    #[test]
+    fn a_grenade_that_stops_lies_on_its_side() {
+        // thrown along +x, it rolls to a stop on the floor
+        let mut points = vec![DVec3::new(0.0, 0.0, 100.0), DVec3::new(10.0, 0.0, 50.0), DVec3::new(20.0, 0.0, 0.0)];
+        points.extend((1..40).map(|k| DVec3::new(20.0 + 30.0 * (1.0 - 0.9f64.powi(k)), 0.0, 0.0)));
+        let ticks: Vec<i32> = (0..points.len() as i32).collect();
+        let spins = spin_along(&points, &ticks);
+        let long_axis = spins[spins.len() - 1] * DVec3::Z;
+        assert!(long_axis.z.abs() < 0.05 && long_axis.y.abs() > 0.99, "{long_axis}");
     }
 
     #[test]

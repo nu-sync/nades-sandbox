@@ -43,15 +43,85 @@ pub struct VideoRequest {
     pub throw: Option<usize>,
     /// A scripted camera: moves played one after another from the clip's start, the scene's clock running with them
     /// (e.g. follow the throw to its detonation, then orbit 360° around what it left). Exclusive of camera, keyframes
-    /// and view.
+    /// and view. With none of them, the clip is the lineup video of the first throw (`{"move": "lineup"}`).
     #[serde(default)]
     pub shot: Vec<ShotMove>,
+    /// Draw the throws' flight paths (off by default: the camera follows the grenade itself).
+    #[serde(default)]
+    pub arcs: bool,
+    /// Jittered frames each smoke frame averages (1–16, default 4; a still averages 16).
+    #[serde(default)]
+    pub samples: Option<u32>,
+    /// Frames to keep as PNGs as well, each at a named moment of a lineup video or seconds into the clip.
+    #[serde(default)]
+    pub stills: Vec<Still>,
+}
+
+/// A frame of the clip kept as a PNG at `path` (absolute, ending in .png).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Still {
+    pub at: StillAt,
+    pub path: String,
+}
+
+/// When a still is taken: a moment of a lineup video, or seconds into the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum StillAt {
+    Moment(Moment),
+    Seconds(f64),
+}
+
+/// The moments of a lineup video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Moment {
+    /// Where to stand, wide.
+    Spot,
+    /// The aim, with the crosshair.
+    Aim,
+    /// The close-up of what the crosshair lines up with.
+    AimPoint,
+    /// Halfway through the flight.
+    Flight,
+    /// As it goes off.
+    Detonation,
+    /// The effect grown, before the turn.
+    Bloom,
+    /// Halfway round the turn.
+    Result,
+}
+
+impl Moment {
+    pub const ALL: [Moment; 7] = [Moment::Spot, Moment::Aim, Moment::AimPoint, Moment::Flight, Moment::Detonation, Moment::Bloom, Moment::Result];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Moment::Spot => "spot",
+            Moment::Aim => "aim",
+            Moment::AimPoint => "aim_point",
+            Moment::Flight => "flight",
+            Moment::Detonation => "detonation",
+            Moment::Bloom => "bloom",
+            Moment::Result => "result",
+        }
+    }
 }
 
 /// One move of a scripted camera.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "move", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ShotMove {
+    /// The lineup video of `throw`, as jumpthrow.pro's play: where to stand, the aim with the crosshair, a close-up of
+    /// what it lines up with, the throw, the camera after the grenade through the air to where it lands, the effect
+    /// blooming, one slow turn round it. Its phases scale with the flight and the effect; `seconds` makes the whole
+    /// video that long instead. The scene's clock waits for the throw.
+    Lineup {
+        throw: usize,
+        #[serde(default)]
+        seconds: Option<f64>,
+    },
     /// Behind `throw`'s grenade from now until it goes off (and `after_seconds` more, looking at what it left).
     Follow {
         throw: usize,
@@ -106,7 +176,7 @@ impl ShotMove {
     /// The throw it is about, if any.
     pub fn throw(&self) -> Option<usize> {
         match self {
-            ShotMove::Follow { throw, .. } | ShotMove::Orbit { throw, .. } | ShotMove::Thrower { throw, .. } => Some(*throw),
+            ShotMove::Lineup { throw, .. } | ShotMove::Follow { throw, .. } | ShotMove::Orbit { throw, .. } | ShotMove::Thrower { throw, .. } => Some(*throw),
             ShotMove::Hold { .. } => None,
         }
     }
@@ -115,6 +185,7 @@ impl ShotMove {
     pub fn seconds(&self) -> Option<f64> {
         match self {
             ShotMove::Follow { .. } => None,
+            ShotMove::Lineup { seconds, .. } => *seconds,
             ShotMove::Orbit { seconds, .. } | ShotMove::Thrower { seconds, .. } | ShotMove::Hold { seconds, .. } => Some(*seconds),
         }
     }
@@ -159,8 +230,19 @@ impl VideoRequest {
             if self.shot.iter().filter_map(ShotMove::seconds).sum::<f64>() > 60.0 {
                 return Err(invalid("A shot lasts at most 60 seconds."));
             }
+        } else if self.camera.is_none() && self.camera_keyframes.is_empty() && self.view.is_none() && !self.scene.throws.is_empty() {
+            self.shot = vec![ShotMove::Lineup { throw: self.throw.unwrap_or(0), seconds: None }];
         } else if self.end_seconds.is_none() {
             return Err(invalid("Give end_seconds, or a shot the clip ends with."));
+        }
+        if self.samples.is_some_and(|n| !(1..=16).contains(&n)) {
+            return Err(invalid("samples is 1–16."));
+        }
+        for still in &self.stills {
+            let path = std::path::Path::new(&still.path);
+            if !path.is_absolute() || path.extension().is_none_or(|e| e != "png") || matches!(still.at, StillAt::Seconds(s) if !s.is_finite() || s < 0.0) {
+                return Err(invalid("A still's path is absolute and ends in .png; its seconds are 0 or more."));
+            }
         }
         let end = self.end_seconds.unwrap_or(self.start_seconds + 1.0);
         let duration = end - self.start_seconds;
@@ -297,6 +379,9 @@ mod tests {
             view: None,
             throw: None,
             shot: Vec::new(),
+            arcs: false,
+            samples: None,
+            stills: Vec::new(),
         }
         .validated()
         .unwrap();
@@ -357,7 +442,13 @@ mod tests {
         assert_eq!(bad(serde_json::json!([{"move":"orbit","throw":0,"seconds":61}])), "invalid_video");
         let both = serde_json::json!({"scene":scene,"view":"orbit","shot":[{"move":"follow","throw":0}]});
         assert_eq!(serde_json::from_value::<VideoRequest>(both).unwrap().validated().unwrap_err().code, "invalid_video");
-        let no_end = serde_json::json!({"scene":scene});
-        assert_eq!(serde_json::from_value::<VideoRequest>(no_end).unwrap().validated().unwrap_err().code, "invalid_video");
+        // with no camera at all, a throw's lineup video
+        let plain = serde_json::from_value::<VideoRequest>(serde_json::json!({"scene":scene})).unwrap().validated().unwrap();
+        assert_eq!(plain.shot, [ShotMove::Lineup { throw: 0, seconds: None }]);
+        let stills = serde_json::json!({"scene":scene,"stills":[{"at":"aim_point","path":"/tmp/a.png"},{"at":2.5,"path":"/tmp/b.png"}]});
+        let stills = serde_json::from_value::<VideoRequest>(stills).unwrap().validated().unwrap().stills;
+        assert_eq!((stills[0].at, stills[1].at), (StillAt::Moment(Moment::AimPoint), StillAt::Seconds(2.5)));
+        let relative = serde_json::json!({"scene":scene,"stills":[{"at":"aim","path":"a.png"}]});
+        assert_eq!(serde_json::from_value::<VideoRequest>(relative).unwrap().validated().unwrap_err().code, "invalid_video");
     }
 }

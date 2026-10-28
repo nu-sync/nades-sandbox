@@ -62,8 +62,8 @@ pub struct SceneShot {
     /// The throw the view is of (its index; the first by default).
     #[serde(default)]
     pub throw: Option<usize>,
-    /// Draw every throw's flight.
-    #[serde(default = "crate::yes")]
+    /// Draw the throws' flight paths (off by default).
+    #[serde(default)]
     pub arcs: bool,
 }
 
@@ -816,8 +816,8 @@ impl Backend {
             if let Some(k) = shot.throw {
                 command.args(["--throw", &k.to_string()]);
             }
-            if !shot.arcs {
-                command.arg("--no-arcs");
+            if shot.arcs {
+                command.arg("--arcs");
             }
         }
         command
@@ -1590,7 +1590,7 @@ for line in sys.stdin:
         let shot = |map: &str, throws: usize, throw: Option<usize>| {
             let throw_input = nades_control::scene::ThrowInput::from(nades_control::scene::SceneThrow::new(nades_control::scene::Grenade::Smoke, [0.0; 3], 0.0, 0.0));
             let scene = nades_control::scene::SceneInput { format: None, version: None, map: map.into(), throws: vec![throw_input; throws] };
-            Some(SceneShot { scene, time_seconds: 1.0, view: None, throw, arcs: true })
+            Some(SceneShot { scene, time_seconds: 1.0, view: None, throw, arcs: false })
         };
         assert_eq!(backend.render("de_cache", None, 640, 360, 0.0, shot("de_mirage", 1, None)).await.unwrap_err().code, "invalid_render");
         assert_eq!(backend.render("de_cache", None, 640, 360, 0.0, shot("de_cache", 0, None)).await.unwrap_err().code, "invalid_render");

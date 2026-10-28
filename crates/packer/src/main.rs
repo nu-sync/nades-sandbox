@@ -81,7 +81,7 @@ fn setup(flags: &Flags, moved: Vec<(String, PathBuf)>, started: Instant) -> Resu
     Ok(())
 }
 
-/// `--effects`: the game's smoke noise and fire flipbooks, from `pak01`, into the shared effects pack.
+/// `--effects`: the game's smoke noise, fire flipbooks and grenade models, from `pak01`, into the shared effects pack.
 fn effects(flags: &Flags, moved: Vec<(String, PathBuf)>, started: Instant) -> Result<()> {
     let inputs = Inputs::with("effects", flags)?;
     let cli = inputs.cli().with_context(|| nades_packer::no_cli(&inputs))?;
@@ -100,6 +100,10 @@ fn effects(flags: &Flags, moved: Vec<(String, PathBuf)>, started: Instant) -> Re
     println!("  smoke noise: 128³ R + 0.95 G from {}", nades_packer::effects::NOISE);
     for f in &effects.flipbooks {
         println!("  {}: {} frames in {} sequences, {}×{} cells of {} texels", f.name, f.sequences.iter().map(|s| s.1).sum::<u32>(), f.sequences.len(), f.columns, f.rows, f.cell);
+    }
+    for g in &effects.grenades {
+        let triangles: usize = g.parts.iter().map(|p| p.indices.len() / 3).sum();
+        println!("  {}: {} parts, {triangles} triangles", g.name, g.parts.len());
     }
     Ok(())
 }

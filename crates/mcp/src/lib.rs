@@ -19,7 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const INSTRUCTIONS: &str = "This server drives a CS2 grenade simulator: it throws grenades on CS2 maps, flies them through the map with CS2's physics, sets them off (smoke, fire, flash, HE, decoy) and renders images and videos. The person talks to you; you drive it. A throw is a grenade and a spot: a CS2 console string `setpos x y z; setang pitch yaw 0` (positions are the player's feet in Hammer units, Z up; positive pitch looks down) or feet/pitch/yaw, plus movement (stand, walk, run, jumpthrow, run_jumpthrow), click (left = full throw, middle = medium, right = lob), crouch and start (seconds on the scene's clock). A scene is a map (e.g. de_mirage; maps_list lists them) and its throws. Without a window: throws_simulate answers where and when each throw lands and goes off; view_render renders a moment of a scene as a PNG; video_render renders an MP4 with a scripted shot, e.g. shot=[{move:follow,throw:0},{move:orbit,throw:0,radius:350,height:120,seconds:8,degrees:360}] follows the flight then pans 360° around what it left (poll video_status; pass output to choose the file). With a window (app_start opens one showing only the 3D view and returns the instance_id every window tool takes): scene_set (also the way to change map), throw_add, throw_update, throw_remove, scene_get (with what each throw did), time_set, view_set (thrower, follow, orbit, free), camera_set, camera_look_at, frame_capture to see it. app_status (start here) and diagnostics_get report state; app_stop closes the window. No tool builds packs or exports game assets.";
+const INSTRUCTIONS: &str = "This server renders CS2 grenade lineups: it throws a grenade on a CS2 map with CS2's physics, sets it off (smoke, fire, flash, HE, decoy) and renders videos and images, headlessly. For a lineup someone found online, one call does it: lineup_render with the map, the grenade, the lineup's console line exactly as posted (setpos x y z; setang pitch yaw 0) and the technique in words (jumpthrow, run jumpthrow, crouch, right click…); it waits and returns the MP4 (a jumpthrow.pro-style lineup video: the spot, the aim, the aim point, the throw, the flight followed, the landing, the bloom, a 360° turn), stills, a JSON, and where and when the grenade went off. throws_simulate answers where and when without rendering. For more control: view_render (a moment of a scene as a PNG), video_render (a scene with a scripted shot: lineup, follow, orbit, thrower, hold moves; poll video_status). Positions are the player's feet in Hammer units, Z up; positive pitch looks down. A window is secondary: app_start opens one showing only the 3D view and returns the instance_id every window tool takes (scene_set, which also changes map in place; throw_add, throw_update, throw_remove, scene_get, time_set, view_set, camera_set, camera_look_at, frame_capture). app_status (start here) and diagnostics_get report state; app_stop closes the window. maps_list lists the maps packed on this machine. No tool builds packs or exports game assets.";
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusResponse {
@@ -135,7 +135,7 @@ impl From<Snapshot> for StatusResponse {
         } else if snapshot.lifecycle == "starting" || snapshot.lifecycle == "stopping" {
             vec!["app_status", "diagnostics_get"]
         } else {
-            vec!["maps_list", "throws_simulate", "view_render", "video_render", "app_start"]
+            vec!["lineup_render", "throws_simulate", "maps_list", "view_render", "video_render", "app_start"]
         }
         .into_iter()
         .map(str::to_owned)
@@ -386,9 +386,75 @@ pub struct VideoParams {
     #[serde(default)]
     pub throw: Option<usize>,
     /// An absolute path ending in .mp4 to write the finished video to (its folder must exist); else the MCP's runs
-    /// folder. video_status gives the path.
+    /// folder. video_status gives the path; a JSON of what happened is written beside it.
     #[serde(default)]
     pub output: Option<String>,
+    /// Draw the throws' flight paths (off by default: the camera follows the grenade).
+    #[serde(default)]
+    pub arcs: bool,
+    /// Jittered frames each smoke frame averages, 1–16 (default 4).
+    #[serde(default)]
+    pub samples: Option<u32>,
+    /// Frames to keep as PNGs too: {"at": "aim_point" | "aim" | "spot" | "flight" | "detonation" | "bloom" | "result" | seconds, "path": "/abs/x.png"}.
+    #[serde(default)]
+    pub stills: Vec<nades_control::video::Still>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineupRenderParams {
+    /// The map: de_mirage, or just mirage.
+    pub map: String,
+    /// smoke, flash, he, molotov (molly), incendiary (inc), decoy.
+    pub grenade: String,
+    /// The lineup's console line as posted: "setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0" (semicolons, roll
+    /// and _exact optional; technique words in it are read too).
+    pub lineup: String,
+    /// How it is thrown, in words: "jumpthrow", "run jumpthrow", "walk", "crouch", "right click", "middle click", …
+    /// (standing, left click, not crouched when nothing says otherwise).
+    #[serde(default)]
+    pub technique: Option<String>,
+    /// Overrides of what the words say.
+    #[serde(default)]
+    pub movement: Option<nades_control::scene::Movement>,
+    #[serde(default)]
+    pub click: Option<nades_control::scene::Click>,
+    #[serde(default)]
+    pub crouch: Option<bool>,
+    /// An absolute .mp4 path (its folder must exist); by default the MCP's runs folder. The stills and a JSON of what
+    /// happened go beside it, named after it.
+    #[serde(default)]
+    pub output: Option<String>,
+    /// The whole video's length in seconds (its phases stretch or shrink; the flight keeps its real time). By default
+    /// about 20–26 s, from the grenade's airtime and effect.
+    #[serde(default)]
+    pub seconds: Option<f64>,
+    /// Default 1920×1080 at 60 fps (lower for drafts: 1280×720 at 30 renders about four times faster).
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<u32>,
+    /// Keep stills of the aim, the aim point, the flight, the bloom and the result beside the video (default true).
+    #[serde(default = "yes")]
+    pub stills: bool,
+    /// Wait for the video and return its files (default true); false returns the job at once for video_status.
+    #[serde(default = "yes")]
+    pub wait: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LineupRenderResponse {
+    pub summary: String,
+    /// The map ID and the throw as read, with the technique words understood.
+    pub map: String,
+    pub throw: nades_control::scene::SceneThrow,
+    pub technique: nades_control::scene::Technique,
+    /// The job; completed when the call waited, with the MP4's path, the JSON's and what the throw did.
+    pub video: video::VideoStatus,
+    /// The stills' paths, by moment.
+    pub stills: Vec<(String, String)>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -718,6 +784,83 @@ impl NadesMcp {
         }
     }
 
+    #[tool(description = "Render a grenade lineup found online to an MP4, headlessly, in one call. Give the map, the grenade and the lineup's console line exactly as posted (\"setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0\"), with the technique in words (\"jumpthrow\", \"run jumpthrow\", \"crouch\", \"right click\"…). The video plays like jumpthrow.pro's lineup videos: where to stand, the aim with the crosshair, a close-up of what it lines up with, the throw, the camera following the grenade through the air to where it lands, the effect blooming, then a slow 360° turn around it (no crosshair after the release, no drawn paths, the timing from the grenade's airtime and effect; 1920×1080 at 60 fps). Stills of the aim, the aim point, the flight, the bloom and the result, and a JSON of what happened (release, bounces, landing, detonation, effect), are written beside it. Waits until it is done (about a minute for a 25 s smoke at 1080p60) and returns the paths, the technique as understood, and where and when the grenade went off.", output_schema = output_schema::<LineupRenderResponse>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
+    pub async fn lineup_render(&self, Parameters(params): Parameters<LineupRenderParams>) -> CallToolResult {
+        let input = nades_control::scene::LineupInput { map: params.map.clone(), grenade: params.grenade.clone(), lineup: params.lineup.clone(), technique: params.technique.clone(), movement: params.movement, click: params.click, crouch: params.crouch };
+        let (map, throw, technique) = match input.throw() {
+            Ok(read) => read,
+            Err(e) => return self.fail(e).await,
+        };
+        let output = match &params.output {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                let _ = std::fs::create_dir_all(&self.config.runs_dir);
+                self.config.runs_dir.join(format!("lineup-{map}-{:?}-{stamp}.mp4", throw.grenade).to_lowercase())
+            }
+        };
+        let stem = output.with_extension("");
+        let moments = [nades_control::video::Moment::Aim, nades_control::video::Moment::AimPoint, nades_control::video::Moment::Flight, nades_control::video::Moment::Bloom, nades_control::video::Moment::Result];
+        let stills: Vec<nades_control::video::Still> = if params.stills {
+            moments.iter().map(|m| nades_control::video::Still { at: nades_control::video::StillAt::Moment(*m), path: format!("{}-{}.png", stem.display(), m.name()) }).collect()
+        } else {
+            Vec::new()
+        };
+        let mut scene = nades_control::scene::Scene::new(&map);
+        scene.throws.push(throw.clone());
+        let request = nades_control::video::VideoRequest {
+            scene,
+            start_seconds: 0.0,
+            end_seconds: None,
+            width: params.width.unwrap_or(1920),
+            height: params.height.unwrap_or(1080),
+            fps: params.fps.unwrap_or(60),
+            camera: None,
+            camera_keyframes: Vec::new(),
+            view: None,
+            throw: None,
+            shot: vec![nades_control::video::ShotMove::Lineup { throw: 0, seconds: params.seconds }],
+            arcs: false,
+            samples: None,
+            stills: stills.clone(),
+        };
+        let mut status = match self.backend.video_start(request, Some(output)).await {
+            Ok(status) => status,
+            Err(e) => return self.fail(e).await,
+        };
+        if params.wait {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(900);
+            while status.state == "running" && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                match self.backend.video_status(&status.job_id).await {
+                    Ok(s) => status = s,
+                    Err(e) => return self.fail(e).await,
+                }
+            }
+        }
+        let summary = match (status.state.as_str(), status.reports.first()) {
+            ("completed", Some(r)) => format!(
+                "Rendered {map}'s {:?} lineup ({}) to {}: it goes off {:.2} s after the release at ({:.0}, {:.0}, {:.0}) after {} bounces; {:.1} s of video.",
+                throw.grenade,
+                if technique.understood.is_empty() { "standing, left click".into() } else { technique.understood.join(", ") },
+                status.path.as_deref().unwrap_or("?"),
+                r.flight_seconds,
+                r.detonation.at[0],
+                r.detonation.at[1],
+                r.detonation.at[2],
+                r.bounces.len(),
+                status.duration_seconds
+            ),
+            ("running", _) => format!("Rendering job {}: poll video_status.", status.job_id),
+            (state, _) => format!("The render {state}: {}", status.error.as_deref().unwrap_or("no detail")),
+        };
+        let stills = stills.iter().map(|s| (match s.at { nades_control::video::StillAt::Moment(m) => m.name().to_string(), nades_control::video::StillAt::Seconds(v) => format!("{v}") }, s.path.clone())).collect();
+        if status.state == "failed" {
+            return self.fail(ControlError::new("render_failed", summary, true)).await;
+        }
+        success(LineupRenderResponse { summary, map, throw, technique, video: status, stills })
+    }
+
     #[tool(description = "Render a video of a scene to MP4, headlessly (no window): its throws simulated and played with the scene's clock. The camera is a `shot`, a list of moves played one after another: {\"move\":\"follow\",\"throw\":k,\"after_seconds\":s} trails the grenade until it goes off (plus s seconds); {\"move\":\"orbit\",\"throw\":k,\"radius\":350,\"height\":120,\"seconds\":8,\"degrees\":360} circles horizontally around what the throw left (its smoke, fire or burst), looking at it, starting from the camera's current bearing and easing in; {\"move\":\"thrower\",\"throw\":k,\"seconds\":2} is the thrower's eye; {\"move\":\"hold\",\"camera\":{…},\"seconds\":2} a fixed camera. E.g. follow the flight then a 360° pan around the smoke: shot=[{\"move\":\"follow\",\"throw\":0},{\"move\":\"orbit\",\"throw\":0}]. With a shot, end_seconds may be left out. Alternatively a fixed camera, camera_keyframes or a view of a throw for the whole clip. Give `output` (an absolute .mp4 path) to choose where it is written. Returns a job at once: poll video_status until completed for the path and what each throw did; video_cancel stops it.", output_schema = output_schema::<video::VideoStatus>(), annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false))]
     pub async fn video_render(
         &self,
@@ -739,6 +882,9 @@ impl NadesMcp {
             view: params.view,
             throw: params.throw,
             shot: params.shot,
+            arcs: params.arcs,
+            samples: params.samples,
+            stills: params.stills,
         };
         match self.backend.video_start(request, params.output.map(std::path::PathBuf::from)).await {
             Ok(v) => success(v),
@@ -1089,6 +1235,7 @@ mod tests {
                 "camera_set",
                 "diagnostics_get",
                 "frame_capture",
+                "lineup_render",
                 "map_open",
                 "maps_list",
                 "scene_get",

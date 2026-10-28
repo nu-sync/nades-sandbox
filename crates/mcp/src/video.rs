@@ -30,6 +30,8 @@ pub struct VideoStatus {
     pub request: VideoRequest,
     /// What each throw of the scene did, once the renderer has simulated them.
     pub reports: Vec<nades_control::scene::ThrowReport>,
+    /// The JSON beside the finished video: the scene, the stills and the reports.
+    pub report_path: Option<String>,
 }
 struct Job {
     status: VideoStatus,
@@ -67,6 +69,7 @@ impl VideoJobs {
             duration_seconds: f64::from(request.frame_count().unwrap_or(0)) / f64::from(request.fps),
             request: request.clone(),
             reports: Vec::new(),
+            report_path: None,
         };
         self.jobs.lock().await.insert(
             id.clone(),
@@ -86,6 +89,12 @@ impl VideoJobs {
                     Ok(path) => {
                         job.status.state = "completed".into();
                         job.status.path = Some(path.to_string_lossy().into_owned());
+                        // what happened, beside the video
+                        let report = path.with_extension("json");
+                        let what = serde_json::json!({"video": path, "stills": job.status.request.stills, "scene": job.status.request.scene, "reports": job.status.reports});
+                        if std::fs::write(&report, serde_json::to_vec_pretty(&what).unwrap_or_default()).is_ok() {
+                            job.status.report_path = Some(report.to_string_lossy().into_owned());
+                        }
                     }
                     Err(e) if e == "cancelled" => {
                         job.status.state = "cancelled".into();
@@ -177,9 +186,11 @@ impl VideoJobs {
                 "error",
                 "-y",
                 "-f",
-                "image2pipe",
-                "-vcodec",
-                "png",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                &format!("{}x{}", request.width, request.height),
                 "-framerate",
                 &request.fps.to_string(),
                 "-i",
@@ -202,6 +213,7 @@ impl VideoJobs {
         let worker = Command::new(&config.sandbox_binary)
             .arg("--render-video")
             .arg(&request_path)
+            .env("NADES_RAW_FRAMES", "1")
             .env("NADES_PACK", pack)
             .env("NADES_SANDBOX_PACKS", &config.packs_dir)
             .env("NADES_SANDBOX_STATE", temp.path().join("state.json"))
