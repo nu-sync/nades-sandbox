@@ -30,7 +30,7 @@ pub struct Model {
 
 impl Default for Model {
     fn default() -> Self {
-        Self { volume: 1800.0, first_volume: 450.0, spread_frames: 15.0, bricks: 78, up: 1.75, down: 0.75, emitters: 44, frames: 202, fading_from: 174 }
+        Self { volume: 1800.0, first_volume: 450.0, spread_frames: 15.0, bricks: 74, up: 1.4, down: 0.75, emitters: 44, frames: 202, fading_from: 174 }
     }
 }
 
