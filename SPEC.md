@@ -5,82 +5,43 @@ through the map, bounce and go off, instantly ([docs/simulator.md](docs/simulato
 files, packed on this machine. Nothing in it depends on recorded matches; lineup libraries, statistics and demo analysis
 belong to other applications (`show-me-the-nades`, a separate project, keeps its own).
 
-Status: **a lineup renderer for agents** (2026-10-27, S34). An agent renders any lineup found online in one MCP call
+Status: **a lineup renderer for agents** (S34–S38). An agent renders any lineup found online in one MCP call
 (`lineup_render`: map, grenade, the posted `setpos …; setang …` line, the technique in words) as a jumpthrow.pro-style
 MP4 with stills and a JSON, headlessly; the game's own grenade models fly, with no crosshair after the release and no
-drawn paths. mirage-smoke-0002's 26.5 s at 1920×1080, 60 fps rendered in 35 s from that one line. The window shows
-only the 3D view (`--ui` or F1 for the developer shell).
+drawn paths. The window shows only the 3D view (`--ui` or F1 for the developer shell).
 - Throws are given as CS2's console string (`setpos …; setang …`) or feet/pitch/yaw; every tool that places throws
   returns what each did (release, bounces, landing, detonation, effect). `throws_simulate` answers that with no window
   and no GPU in a second or two; `camera_look_at` points the camera; `video_render` plays a scripted shot (follow the
-  flight, a 360° orbit round what it left at a radius and height, the thrower's eye, a fixed camera) to an MP4 at a
-  path of the agent's choosing.
-- Acting as the agent over stdio, the user's first case (mirage-smoke-0002: a jump-throw smoke from `setpos 1296.00
-  32.00 -167.97; setang -28.89 -166.00 0`) went off at (−970, −587, −286) 6.16 s after the release, against the game's
-  (−1164, −630, −166) at 6.73 s: 232 units apart (199 across, 120 down), 0.57 s early (S32's smoke tail). Its video,
-  following the flight and circling the smoke 360°, is 18.3 s of 1280×720 H.264.
-- Flashes and HEs go off as a white-hot pop the bloom spreads; the "flat grey disk" was the arcs' release mark at the
-  thrower's hand, gone.
+  flight, a 360° orbit round what it left, the thrower's eye, a fixed camera) to an MP4 at a path of the agent's
+  choosing. The MCP server has 22 tools ([docs/mcp-spec.md](docs/mcp-spec.md)); `just verify-mcp` runs 66 checks.
+- The user's first case (mirage-smoke-0002: a jump-throw smoke from `setpos 1296.00 32.00 -167.97; setang -28.89
+  -166.00 0`, `speed` 30) goes off at (−1117, −648, −166) 7.19 s after the release, against the game's (−1164, −630,
+  −166) at 6.73 s: 50 units, on the right floor, 0.46 s late (S35; S34's still throw was 232 units off). A smoke's
+  lineup video at 1920×1080, 60 fps renders in 12–14 s (S38; 38 s before, at load 10–20).
+- The simulator (S31): the throw tool, the scene (list, select, re-aim, edit, duplicate, delete, start times), play,
+  pause and scrub with every grenade flying and going off at its own time, the four views (free, the thrower's eye,
+  following the grenade, an orbit of the result), the practice command, and scene files (JSON,
+  `nades-sandbox-scene` version 1). Each throw is simulated once per spot, on the thread pool, after the first frame:
+  its flight by `crates/physics` (S32), its smoke's grid and fire's flames by `crates/effects` (S33), drawn by the
+  scene's ports of the web view's smoke and fire. `--scene f.json --time s --render out.png` draws a moment offscreen
+  and reports what each throw did; `--scene f.json --report` reports with no GPU.
+- The first frame on screen: de_cache 139.3 ms from process start with the simulator, against 139.0 before it (S31;
+  medians of 7 alternated launches, load ≈18). §9 has the earlier figures.
+- Every packed map stays on the GPU within an 8 GiB budget (M4); `just bundle` makes a macOS app; the workspace
+  checks and lints clean for Windows (DX12) and has not run there (S19–S23).
+- Packs come from the game's files alone: `nades-pack setup <map>` fetches a map from Steam's CS2 depot,
+  `nades-pack <map>` builds its pack, `nades-pack --effects` the smoke noise, fire flipbooks and grenade models once
+  (S26, S29).
 
-Before it, **the simulator** (2026-10-27, S31).
-
-- The recorded-data features are gone: the lineup library and its filters, the data adapters (cs2-throws files, the
-  demo reader, `check`, `--data`), the replay, the viewpoints and callouts from recorded players, `crates/model`'s data
-  modules, the MCP tools about recorded throws and the benches that compared recorded throws with the web view. The
-  decisions behind them (S24, S25, S28, S30) and docs/standalone-api.md stay as history.
-- The throw tool, the scene (list, select, re-aim, edit, duplicate, delete, start times), play, pause and scrub with
-  every grenade flying and going off at its own time, the four views (free, the thrower's eye, following the grenade,
-  an orbit of the result), the practice command, and scene files (JSON, `nades-sandbox-scene` version 1) to save and
-  open. Each throw is simulated once per spot, angles and technique on the thread pool, after the first frame: its
-  flight by `crates/physics` (S32), its smoke's grid and fire's flames by `crates/effects` (S33), drawn by the scene's
-  ports of the web view's smoke and fire.
-- `--scene f.json --time s --render out.png` draws a scene's moment offscreen and reports what each throw did; MCP tools
-  place and edit throws, play time and render images and videos of scenes.
-- The first frame is unchanged: de_cache on screen 139.3 ms from process start against 139.0 before the simulator
-  (medians of 7 alternated launches, load ≈18).
-
-Before it, **M5** (2026-10-26):
-Status: **M5 built** (2026-10-26; its windowed checks wait for a screen, S30).
-- M5, the replay: a demo's round on the map in 3D with every player (where they stand and look, alive or dead, in
-  their side's colour, faint through walls) and every grenade in flight, then its smoke, fire, flash or HE at its own
-  time; play, pause, scrub and speed; a free camera, a player's eyes or a camera behind them; a lineup view opened from
-  any throw in the round. Players move between points 16 a second (cs2-throws 2.1's `player_tracks`, which the demo
-  reader writes), else between their samples. Offscreen, `--replay` renders a moment and `--bench-replay` times the
-  frames: 3.9–4.5 ms median at 1444×1420 with up to 8 throws live, the moment's set-up 0.5–0.6 ms. Checked against the
-  facts in 11 moments on four maps: every living player drawn where its track puts it, in its side's colour
-  (`bench/replay_check.py`).
-- Every pool map stays on the GPU. Once the first frame is on screen the other six open in the background, one at a
-  time, with their lineups read and their first stages built, all within 1.6–1.75 s of start-up. The seven hold 6.2 GB
-  of an 8 GiB budget; a map that does not fit lets go of the one shown least recently (S19).
-- Picking a map shows it at its lineup in the next frame: 42 of 42 picks, the switching frame 5.3 ms (median, worst
-  8.9) and 5.7 ms on a map's first visit in a session (worst 8.0), where M3 took 1.55–1.72 s.
-- de_cache's 2.0 GB peak is accounted for, and it is not the upload's staging (S20). de_cache is on screen 168.8 ms
-  after the process starts and de_inferno 185.1 ms (medians of 9; 167–170 and 178–194 over three runs each); the first
-  frame no longer waits on the GPU (S21).
-- `just bundle` makes a macOS app that runs from Finder (S22). The workspace checks and lints clean for Windows
-  (x86_64-pc-windows-msvc, DX12); it has not run on Windows yet (S23).
-- Standalone, step 1 (S24): the throws come from cs2-throws files through a `ThrowSource`, and grouping, technique,
-  practice commands, round time, landing callouts and viewpoints are the sandbox's own rules (`crates/model`); the
-  workspace builds with no sibling checkout.
-- Standalone, step 2 (S28): CS2 demos are read directly (`crates/source-demo`, awpy): `--data` takes `.dem` files and
-  folders, a demo dropped onto the window is imported with its progress shown, and each is parsed once into the cache.
-  On six ESL Pro League demos its files match show-me-the-nades' export row for row.
-- Standalone, step 3 (S26, S29): packs come from the game's files alone. `nades-pack setup <map>` fetches a map from
-  Steam's CS2 depot; `nades-pack <map>` makes its geometry export, collider, light, sky and post-processing records
-  itself, with Source 2 Viewer's CLI and glTF-Transform; `nades-pack --effects` packs the smoke's noise and the fire's
-  flipbooks once. Every pool map's pack rebuilds byte for byte, and de_vertigo, outside the pool, packs and renders.
-- M3 made it the lineup sandbox: a map's lineups from the nades database, cut by side, grenade, team, player and phase;
-  each seen from the thrower's eye, zoomed on the aim point, from an opponent's eye or orbiting it, with the flight, the
-  smoke, fire, flash or HE as the round had it, a time scrubber and the practice command; every view of 84 throws opens
-  from exactly the web view's camera, and a lineup switch costs the window 0.5 ms (S16–S18).
-- M2 gave the map CS2's look: materials, baked light and sun shadows, light probes, sky, 3D skybox, fog, bloom, tone
-  curve and colour lookup table, each pool map differing from the game no more than the web view does (S12). M1 put
-  the textured de_cache on screen in 111 ms; it was built twice, as our own renderer and with Bevy as the shell
-  ([docs/m1-bakeoff.md](docs/m1-bakeoff.md)), and the user chose our own renderer (S7).
+History: the recorded-data features (the lineup library, cs2-throws files, the demo reader, `check`, `--data`, the
+round replay of M5) were removed in S31. Their milestones stay in §10; the evidence is in
+[docs/decisions.md](docs/decisions.md) (S24–S30) and [docs/standalone-api.md](docs/standalone-api.md). M1 put the
+textured de_cache on screen in 111 ms; it was built twice, as our own renderer and with Bevy as the shell
+([docs/m1-bakeoff.md](docs/m1-bakeoff.md)), and the user chose our own renderer (S7). M2 gave the map CS2's look (S12).
 
 ## 1. What it is like to use
 
-You open it, and the map you last looked at is on screen in about a seventh of a second, with the throws you left on it.
+You open it, and the map you last looked at is on screen in about a seventh of a second. By default the window is the 3D view alone and an agent drives it over MCP; the sketch is the developer shell (`--ui` or F1).
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────┐
@@ -148,7 +109,7 @@ The stack, with what each choice rests on. [docs/decisions.md](docs/decisions.md
 | UI | egui, drawn by egui-wgpu into the frame's last pass, input from egui-winit | 0.37 |
 | Engine | none: our own renderer over wgpu | |
 | Shaders | WGSL, checked by naga at build time, composed with naga_oil, a few uber-shaders with overridable constants | naga 30.0.1, naga_oil 0.23 |
-| Data | scene files in JSON (`crates/control`, serde); the config file in TOML, its folder from `directories` (until S31: cs2-throws files in SQLite, rusqlite) | serde_json 1, toml 1, directories 6 |
+| Data | scene files in JSON (`crates/control`, serde); the config file in TOML, its folder from `directories` | serde_json 1, toml 1, directories 6 |
 | Assets | packs memory-mapped (memmap2), tables in postcard, LZ4 (lz4_flex), our own VTEX and VPK readers; meshopt for the export's geometry; when packing, Source 2 Viewer's CLI (export and decompiles, S9, S26), glTF-Transform through Bun (S29), DepotDownloader for `setup` | 0.9, 1.1, 0.14, 0.7; glTF-Transform 4.5.1 |
 | Maths, threads | glam, rayon | 0.34, 1.12 |
 | Profiling | start-up marks (JSON), wgpu-profiler (GPU timestamps; built on the same wgpu 30), tracing with Tracy | 0.28, 0.1 |
@@ -304,7 +265,7 @@ From show-me-the-nades' `web/app/src/scene/`, GLSL to WGSL by hand (naga cannot 
 | `render/bloom.ts` (208), the present pass in `composite.ts` | bloom, exposure, tone curve, lookup table | M2 (`post.wgsl`) |
 | `render/csgoEffects.ts` (297), `render/effects.ts` (133) | the effects pass, the flight, flash and HE bursts | the effects pass in M2; the rest in M3 (`stage.rs`; `throw.rs`) |
 | `camera.ts` (165), `stage.ts` (198) | CS2 cameras (vertical field of view 73.74°, aim 28°), the result camera | M3 (`camera.rs`, `stage.rs`, `collider.rs`): the same cameras as the web view's, to the bit (S18) |
-| `flight.ts` (379) | the orbit view's scripted chase and turn | not ported: the orbit is free from the thrower's view on (S18) |
+| `flight.ts` (379) | the orbit view's scripted chase and turn | M7 (S34): the lineup video's chase and turn; the orbit view stays free from the thrower's view on (S18) |
 | `render/engine.ts` (978) | the frame graph above | M2 |
 
 The web-only half (posters, resident maps, prefetch, sRGB upload workarounds, worker image decoding, the loading
@@ -313,8 +274,7 @@ panel) has no native counterpart: it exists to work around the browser.
 **Then, beyond the web view's look,** what the game files hold and the web view leaves out, all in M2:
 - the directional lightmap, so normal maps answer the baked light;
 - the baked sun shadows, which replace the real-time shadow map;
-- the light probe volumes, which light the meshes the game does not lightmap (S9, S10) and will light moving things
-  in a replay;
+- the light probe volumes, which light the meshes the game does not lightmap (S9, S10);
 - facing masks on blend layers, which keep moss and dirt to the faces that point up (S10).
 
 ## 8. Scenes
@@ -355,8 +315,6 @@ panel) has no native counterpart: it exists to work around the browser.
 | Pipelines at start-up | warm: none waited for (macOS's shader cache); ≈360–440 ms on the first launch after a shader change (M2's pipelines, in parallel), and 497–630 ms on the first launch of a binary at a new path or a new app bundle: the cache is the program's | |
 | Peak memory, de_cache | 2.07–2.19 GB footprint (M4; M3 2.07, M2 2.0; M1's 640 MB pack 0.72–0.75 GB): the textures as Metal allocates them 983 MB, the driver's first submission 119 MB and first render pass ≈200 MB, what drawing the map's triangles holds 170–360 MB, the window ≈150 MB; the upload's staging none (S20) | |
 | Pack build | 1.5–3.9 s a map (M2) | |
-| **Replay frame (M5)** | **3.9–4.5 ms** median at 1444×1420 offscreen, finished on the GPU, p95 4.2–5.2, worst 5.3–7.6 (600 frames of de_cache round 16, up to 8 throws live, 10 players; overview, behind a player, through their eyes); the moment's set-up on the CPU 0.50–0.58 ms: S30 | ≤ 8.3 ms: met |
-| Data: list | a map's first: 0.25–0.37 s on 247 demos (reading 180–275 ms, the rules 66–110 ms); each filter change after it 6–12 ms in memory (S24). M3's DuckDB read: 93–114 ms per change on ≈96 demos | off the first frame's path: met |
 
 Timing runs: `nades-sandbox --exit-after-first-frame` prints every stage as JSON. `python3 bench/startup.py` runs the
 first frame, both steady-frame benches and peak memory with the load average beside each, into
@@ -371,9 +329,9 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | **M2** ✓ | CS2 materials, directional lightmap and baked shadows, light probes, sky and skybox, fog, bloom, tone curve, lookup table, GPU exposure; offscreen renders from the in-game lineup shots' cameras | met: every pool map's render differs from the game's shot no more than the web view's, by blurred \|Δ\| whole and top half (S12; the skill's references read in place); de_cache on screen 172 ms from process start (median of 9); a 4.1 ms frame at 2880×1800 |
 | **M3** ✓ | the database: lineup list and filters; the four views; flight path; smoke from its voxel log; fire, flash, HE; time scrubber; result camera through the collider; practice command; a map selector; each map opening at one of its lineups | met: every view of 84 throws on the seven maps opens from the web view's camera, 0.0000 units apart (`bench/cameras.py`); the effects beside the web view's for 12 throws (`bench/effects.py`); a lineup switch shown in the next frame for 0.5 ms of the window's time; de_cache on screen 172 ms from process start (S16–S18) |
 | **M4** ✓ | every pool map packed and resident; map switch; macOS app bundle; a Windows build | met: a resident map shows in the next frame (42 of 42 picks; that frame 5.3 ms, 5.7 on a first visit, worst 8.9); all seven maps in one session, 6.2 GB of an 8 GiB budget, least recently shown let go beyond it; de_cache on screen 168.8 ms from process start, de_inferno 185.1 (medians of 9); `just bundle` runs from Finder; the workspace checks and lints clean for Windows (S19–S23) |
-| **M7** (built) | MCP-first, then lineups found online (S34): `lineup_render` in one call, loose lineup and technique text, the jumpthrow.pro-style sequence (ported chase and turn), stills and JSON, the game's grenade models from `nades-pack --effects`, no lines or late crosshair, raw frames to FFmpeg; the window the 3D view alone; console-string throws; reports of what each throw did in every tool that places them; `throws_simulate`, `camera_look_at`; video shots (follow, orbit, thrower, hold) to an MP4 at a chosen path; the flash's burst | met: acting as the agent over stdio, the user's smoke placed from its console string on de_mirage, its detonation reported against the game's, and its MP4 (follow, then a 360° pan round the smoke) rendered and checked frame by frame; `verify-mcp` 66 checks, all 21 tools positive and negative; tests debug and release; clippy clean |
+| **M7** (built) | MCP-first, then lineups found online (S34): `lineup_render` in one call, loose lineup and technique text, the jumpthrow.pro-style sequence (ported chase and turn), stills and JSON, the game's grenade models from `nades-pack --effects`, no lines or late crosshair, raw frames to FFmpeg; the window the 3D view alone; console-string throws; reports of what each throw did in every tool that places them; `throws_simulate`, `camera_look_at`; video shots (follow, orbit, thrower, hold) to an MP4 at a chosen path; the flash's burst | met: acting as the agent over stdio, the user's smoke placed from its console string on de_mirage, its detonation reported against the game's, and its MP4 (follow, then a 360° pan round the smoke) rendered and checked frame by frame; `verify-mcp` 66 checks, all 22 tools positive and negative; tests debug and release; clippy clean |
 | **M6** (built) | the simulator (S31): the recorded-data features removed; the throw tool with a live preview arc; the scene (list, select, re-aim, edit, duplicate, delete, start times); play, pause and scrub with every grenade flying and going off (smoke through `smoke_grid` and `fill_cloud`, fire through `fire_flames` and `build_fire`, flash, HE, decoy); the views (free, thrower, follow, orbit); the practice command; scene files; MCP tools for scenes, throws, time, views, images and videos; `--scene … --render` offscreen | met: offscreen renders of placed throws, each grenade kind, on three maps; the window driven over app control (scene in, each view, captures with the shell); the first frame unchanged (139.3 ms against 139.0, medians of 7 alternated); tests in debug and release and clippy `-D warnings` clean. How right a flight or an effect is, is the physics' (S32) and the effects' (S33) |
-| **M5** (built, removed in M6) | demo replay: pick a demo and a round; play, pause, scrub and speed (¼–4×); every player's position, view, life and side, every grenade in flight and its smoke, fire, flash or HE at its time, several smokes at once; a free camera, a player's eyes, a camera behind them; a lineup view from any throw of the round; players 16 a second (cs2-throws 2.1 `player_tracks`), else from the samples; `--replay` and `--bench-replay` offscreen | met offscreen: 11 moments on four maps rendered at chosen times, every living player (72 of 72) and the dead in view (4 of 4) drawn where the facts put them in their side's colour, each live effect seen at its point unless a wall hides it (`bench/replay_check.py`); a replay frame 3.9–4.5 ms median at 1444×1420 (p95 ≤ 5.2) with up to 8 throws live; the map's frame and every lineup view unchanged (3.45 ms either way; renders identical but GPU noise); no change on the first frame's path. Not yet: driving it in the window (the screen was locked, S30) |
+| **M5** (built, removed in S31) | demo replay, with its own checks and benches; gone with the other recorded-data features | see S30 in docs/decisions.md |
 
 ## 11. Rules
 
@@ -399,9 +357,7 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | With `pak01` mounted, the CLI passes over a file whose archive is missing in silence | `nades-pack setup` finds a map's archives with `pak01` unmounted, where the CLI names what it cannot load (S29) |
 | Smoke at Retina resolution (4× the pixels) | at 1444×1420 a smoke in view costs 1–2 ms a frame (median 5.6–7.1 against 4.9), p95 under 8.9; a smoke filling a 2880×1800 frame is not measured yet: GPU timestamps of the composite at 1× and 2×, and half resolution with a depth-aware upsample if it needs it |
 | The effects' point lights on CS2's baked light: three.js's model (Lambert over π) added to a CS2-style diffuse | `bench/effects.py`: Inferno's flash reaches further up the walls than the web view's (0.21 of the frame against 0.13) |
-| A producer leaves facts out (show-me-the-nades' export: blinded players' positions, samples' duck amounts) | the sandbox derives what the facts allow (a blinded player stands at their sample nearest the flash, S24) and `check` names the rest |
 | Game updates change the files | packs keyed by game build; `setup` pins the depot's manifest to the one the game folder holds, so a fetch never mixes builds; rebuild on change |
-| Two front-ends to keep | the web app keeps analytics; the sandbox replaces `/scene` only when M3 matches it |
 
 ## 13. Choices still open
 
@@ -410,20 +366,3 @@ first frame, both steady-frame benches and peak memory with the load average bes
 - **The pack's geometry source:** the packer's own export through Source 2 Viewer's CLI and glTF-Transform (S29) stays
   the input until a Rust reader for the game's meshes (VBIB in `vmdl`/`vwrld`) earns its cost; it would also have to
   reproduce glTF-Transform's welding, instancing and quantization to keep the packs the same.
-- ~~**Replay data (M5)**~~ settled (S30): tracks 16 a second in cs2-throws 2.1, measured against every tick; the
-  samples, two a second, when a file has none.
-
-
-
-
-The local MCP has its own [specification and per-tool acceptance checks](docs/mcp-spec.md). It uses shared application
-commands and camera/state types, and supports map/camera operation, frame capture, diagnostics and headless map
-rendering and recorded-throw video. Its verification entry point is `just verify-mcp`; live M3 throw controls are a
-separate extension.
-
-## Agent control
-
-The local MCP has its own [specification and per-tool acceptance checks](docs/mcp-spec.md). It uses the shared
-application commands, camera, state and scene types, and supports map and camera operation, frame capture, diagnostics,
-the window's scene (read, replace, add, update and remove throws, the clock, the views), and headless images and videos
-of scenes. Its verification entry point is `just verify-mcp`.

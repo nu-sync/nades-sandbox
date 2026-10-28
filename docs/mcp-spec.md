@@ -10,9 +10,8 @@ The server owns one window. Another MCP session and manually opened windows are 
 restart the owned window; this is explicitly reported. A ready window survives MCP disconnect and becomes the user's
 normal window. It cannot be reclaimed by later MCP sessions. Offscreen workers never become retained windows.
 
-M4 resident map switching; semantic location navigation, picking, visibility,
-saved views and batch rendering are follow-up capabilities. V1 does not advertise them. Database writes, arbitrary
-SQL, shell execution and raw game/pack exports are excluded. Assets and the database stay local.
+Semantic location navigation, picking, visibility, saved views and batch rendering are follow-up capabilities. V1 does
+not advertise them. Arbitrary SQL, shell execution and raw game/pack exports are excluded. Assets stay local.
 
 ## Architecture
 
@@ -82,7 +81,7 @@ scene's clock.
   physical dimensions, UI inclusion and material-animation timestamp. Live captures also identify their instance,
   revision and frame ID; independent headless jobs have no live-instance identity. Textual results and verification
   logs omit base64. An image path alone does not establish success.
-  `viewport` is the whole physical window and `scene_viewport` is the 3D rectangle within M3's panels. Scene-only PNGs
+  `viewport` is the whole physical window and `scene_viewport` is the 3D rectangle within the developer shell's panels. Scene-only PNGs
   crop that rectangle; their explicit image width/height can differ from the full-window viewport.
 - Status summarizes what is shown and suggests applicable next operations. It includes actual camera/viewport,
   lifecycle, supported capabilities and frame identity. Diagnostics expose startup stage marks, build/GPU information,
@@ -163,7 +162,7 @@ gives as `setpos 1296.00 32.00 -167.97; setang -28.89 -166.00 0`, a jump-throw o
 32.00 -167.97; setang -28.89 -166.00 0"}]}, "shot": [{"move": "follow", "throw": 0}, {"move": "orbit", "throw": 0,
 "radius": 380, "height": 320, "seconds": 12}], "output": "/abs/mirage-smoke-0002.mp4"}`.
 
-The renderer simulates the scene once, , emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
+The renderer simulates the scene once, emits frames to FFmpeg with libx264, and stores finished MP4s under the configured
 runs directory. It shares the single headless-worker limit with `view_render`. A job belongs to its MCP session;
 disconnect cancels running work, while completed files remain local. FFmpeg is required and a missing encoder is
 reported in the job failure. The output has no audio. Live video recording is not supported.
@@ -179,8 +178,8 @@ begins, failure does not pretend that old state still exists. No graceful final 
 
 ## Verification and completion
 
-Run `just verify-mcp` against the real MCP stdio server and real sandbox. FFmpeg with libx264, ffprobe, the
-de_dust2 pack and a database with a Dust II A-site Molotov are required for video acceptance. Retain machine-readable verdicts, tool
+Run `just verify-mcp` against the real MCP stdio server and real sandbox. FFmpeg with libx264, ffprobe and
+the de_dust2 pack are required for video acceptance. Retain machine-readable verdicts, tool
 metadata, sandbox PNGs and build IDs in `.runs/mcp-*`. Every tool has a positive and negative scenario. Missing local
 packs, GPU or desktop are unavailable coverage, not a passing test. Mock protocol tests cannot satisfy local acceptance.
 
@@ -190,8 +189,8 @@ The required journeys are:
    start de_cache, repeat start, inspect ready state, capture, stop, and start again.
 2. Set distinct known camera poses; independently assert conversion and numerical readback. Capture the actual
    resulting revision and compare scene-only pixels with offscreen output at the same pose, size and material time.
-   First wait for M3 loading to finish and the paused scene to stabilize; require no active effects for the base-map
-   comparison. A background M3 selection arriving is a legitimate revision change, not a headless-render mutation.
+   First wait for map loading to finish and the paused scene to stabilize; require no active effects for the base-map
+   comparison. A background map or scene change arriving is a legitimate revision change, not a headless-render mutation.
    Decoded mean absolute channel error must be at most 1 display level. Repeated fixed offscreen inputs use the stricter
    per-channel ≤1 and mean ≤0.001 display-level gate; bit-identical PNGs are not assumed.
 3. Reject a missing map while preserving the current view; open de_mirage; confirm old child exit, fresh identity,
@@ -212,49 +211,13 @@ V1 is complete only when all twenty-two real-tool criteria and the five journeys
 verification skill can be rerun by a fresh agent, and unresolved coverage is explicitly reported. No commit or external
 client configuration change is part of this implementation.
 
-## Verified locally · 2026-10-26
+## Verified locally
 
-- `just verify-mcp`: **48 checks passed**, all nine tools exercised with positive/negative scenarios; every structured
-  result checked against its advertised JSON Schema. [Report](../.runs/mcp-1793049074199691000/results.json); binary
-  SHA256s and environment are beside it. The verifier clones the database before launching clients and confirms
-  window/worker cleanup before deleting that copy.
-- Desktop movement and normal ⌘Q after MCP disconnect were exercised with native UI tools using a byte-identical
-  temporary app fixture. [Desktop proof](../.runs/mcp-ui-handoff-latest/results.json). Later native shutdown changes
-  were checked separately with ten protected-copy startup probes and three immediate controlled shutdowns, all exit
-  code zero: [regression proof](../.runs/mcp-app-shutdown-fixed/stress.json). The final public verifier also requires
-  successful graceful exits; unexpected nonzero exits and forced cleanup are explicit tool errors.
-- Release workspace tests, Clippy, ignored local assets, strict MCP checks and justfile formatting passed. Logs are
-  local under `.runs/`. The optimizer-elided memory-allocation test now keeps the measured allocation alive across the
-  actual OS reading; status exposes physical footprint, peak and graphics-ledger bytes with their precise definitions.
-- Protected-copy startup: median **170.25 ms over nine measured launches**, below the 200 ms target; initial executable
-  checks were discarded. [Report](../.runs/startup-20261026-160217/report.md). Seven alternated baseline/candidate pairs
-  measured 187.4/176.2 ms at recorded load averages 15.93–16.35. No speedup is claimed; the baseline predates concurrent
-  M3 work. [Paired report](../.runs/m1-compare-20261026-160249/report.md). Database and remembered-view paths were isolated.
-- Seven-map realism metrics match the previous accepted run: blurred whole-frame and top-half gates pass on all
-  seven maps; existing per-map luminance differences remain unchanged.
-  [Report](../.runs/realism-20261026-152803/report.md).
-- Numerical-port checks: all four views match for **84/84 throws** against the web camera selection.
-  [Camera report](../.runs/cameras-20261026-153524/report.md). Twelve effect comparisons were also run against the web
-  view on database clones; their existing visual differences are recorded, not claimed identical.
-  [Effects report](../.runs/effects-20261026-153705/report.md).
+`just verify-mcp` runs 66 checks against the real stdio server and the real application, with all twenty-two tools
+exercised with positive and negative scenarios and every structured result checked against its advertised JSON Schema
+(SPEC §10, M7). Evidence stays local under `.runs/` and is ignored by Git; each report identifies its tested build, and
+saved success is not proof of new code.
 
-Evidence stays local and is ignored by Git. Each report identifies its tested build; concurrent M3 changes require
-fresh verification. Saved success is not proof of new code.
-
-## Headless video verification · 2026-10-26
-
-The real MCP verifier passed 54 checks against the local application, including all thirteen tool schemas; a moving
-A-site Molotov MP4, fixed-camera smoke, invalid inputs, missing throw and encoder, busy rejection, cancellation after
-both subprocesses start, disconnect cleanup, and preservation of the live view.
-[Report](../.runs/mcp-1793055808478007000/results.json). The desktop movement check is a separate manual journey and
-is marked pending in that automated report.
-
-A six-second Dust II A-site clip was separately rendered at 1280×720, 30 fps: ffprobe found 180 H.264 frames.
-[Video](../.runs/video-accept/runs/video-1ce27ae2-9818-48de-8dac-0f80f3246824.mp4),
-[metadata](../.runs/video-accept/panorama-result.json). Decoded frames before and after detonation were inspected.
-A fixed-camera smoke video frame was also inspected against a standalone still at the same effect time; the encoded
-frame includes H.264 loss and material animation advances, so exact pixel identity is not assumed.
-Camera comparison matched all four views of 84 throws ([report](../.runs/cameras-20261026-175923/report.md));
-effect comparison ran for twelve throws ([report](../.runs/effects-20261026-180047/report.md)).
-Protected-copy startup was 149.84 ms median over nine runs at the recorded load
-([report](../.runs/startup-20261026-180559/report.md)); this is not a speedup claim.
+The first verification, on 2026-10-26, ran 48 then 54 checks over the first nine and thirteen tools, against a build
+that still read a lineup database (removed in S31, with the 84-throw camera and twelve-effect comparisons made against
+the web view). Its figures are not carried here; decisions S31 and S34 have what replaced them.

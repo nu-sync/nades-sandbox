@@ -1,13 +1,13 @@
-# The grenade simulator (the product, from 2026-10-27)
+# The grenade simulator (the product, from 2026-10-27, S31)
 
 nades-sandbox is a generic CS2 map and grenade simulator. You pick a map, stand somewhere, aim, choose how to throw,
 and see the grenade fly through the map, bounce, and go off: the smoke filling around walls, the fire spreading over
 the floor, the flash, the HE. Nothing in it depends on recorded matches or on show-me-the-nades. Lineup libraries,
 team and player statistics and demo analysis belong to other applications.
 
-## What goes
+## What went
 
-The recorded-data features leave the app:
+S31 removed the recorded-data features from the app:
 - the lineup library: grouping, the lineup list, its team, player, side and round-time filters;
 - the data adapters: `crates/source-file` (cs2-throws), `crates/source-demo` (the demo reader), `nades-sandbox check`,
   `tools/cs2_throws.py`, the `--data` flag and the `[data]` setting;
@@ -18,7 +18,7 @@ The recorded-data features leave the app:
 - MCP tools about recorded throws (`lineups_list`, video of a recorded throw), and benches that compare recorded
   throws with show-me-the-nades' web view (`cameras.py`, `effects.py`, `tag_parity`, `replay_check.py`).
 
-`docs/standalone-api.md` and decisions S24, S25, S28 and S30 stay as history; a new decision records the change.
+`docs/standalone-api.md` and decisions S24, S25, S28 and S30 stay as history; S31 records the change.
 
 ## What the app is
 
@@ -33,7 +33,10 @@ The recorded-data features leave the app:
 - **The practice command** of the selected throw (`setpos …; setang …`), to copy into CS2.
 - **Scenes as files.** Save and open a scene (JSON: map, throws, their start times): the one generic port. Other
   applications (a lineup library, show-me-the-nades) can write a scene file to show throws here.
-- **Agent control (MCP).** Tools to pick a map, place and change throws, play time, and render an image or video.
+- **Agent control (MCP).** The way the app is mainly used (S34): 22 tools ([mcp-spec.md](mcp-spec.md)) to pick a map, place
+  and change throws (CS2 console strings work), report what each did without a window (`throws_simulate`), play time,
+  and render images and videos, among them `lineup_render`, a lineup found online as an MP4 in one call. The window
+  shows only the 3D view; `--ui` or F1 shows the developer shell with the throw tool and the scene's list.
 
 ## Contracts (crates)
 
@@ -49,6 +52,9 @@ The recorded-data features leave the app:
   tools. A scene file is versioned (`"format": "nades-sandbox-scene", "version": 1`).
 
 ## Done when (per unit)
+
+Met: the app by M6 and M7 (SPEC §10), the physics by S32 and the effects by S33. The criteria stay as the way to
+re-check them.
 
 - **Physics:** for recorded throws (a local, uncommitted cs2-throws export as the oracle; a small committed fixture
   of recorded p0/v0, flights and detonations for CI), the simulated flight from the recorded release lands where the
