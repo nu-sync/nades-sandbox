@@ -1,6 +1,10 @@
 //! A lineup's video as jumpthrow.pro's lineup videos play it (S34): where to stand, the aim, a close-up of what the
-//! crosshair lines up with, the throw, the camera after the grenade through the air down to where it lands, the effect
-//! blooming, then one slow turn around it. The crosshair shows until the grenade leaves the hand.
+//! crosshair lines up with, the aim again and the throw, the camera after the grenade through the air down to where it
+//! lands, the effect blooming, then one slow turn around it. Their phases and holds, but where theirs cut ours moves:
+//! every change eases in and out of rest, the zoom at an even rate, the eye rises with a jump-throw's jump, and the
+//! camera carries its speed from one move into the next, so nothing jumps from one frame to the next. After it goes
+//! off the camera pulls out of the effect rather than staying on the grenade (theirs does, into the walls). The
+//! crosshair shows until the grenade leaves the hand.
 //!
 //! The chase and the turn are ports of show-me-the-nades' Orbit view (`web/app/src/scene/flight.ts`, its D29): the chase
 //! rides the grenade's own path a little behind and above it, easing back before it goes off; the turn circles the
@@ -13,16 +17,22 @@ use nades_scene::collider::Collider;
 
 use crate::sim::Built;
 
-/// The phases' lengths before scaling, seconds: the spot, the aim, the aim point, and the hold on the aim before the
-/// release.
-const SPOT: f64 = 2.0;
-const AIM: f64 = 2.0;
-const ZOOM: f64 = 2.2;
-const THROW: f64 = 1.6;
-/// The field of view the spot is shown with, wide.
-const WIDE_FOV: f64 = 100.0;
+/// The phases' lengths before scaling, seconds: the spot (level), the aim, the aim point (zoomed), and the aim again up
+/// to the release, the throw at its end.
+const SPOT: f64 = 0.5;
+const AIM: f64 = 0.8;
+const ZOOM: f64 = 3.0;
+const THROW: f64 = 1.2;
+/// The moves that begin the aim, the aim point and the aim again: the turn from level to the setang, the zoom in and
+/// the zoom out. Each phase holds still for the rest of its length (the aim point two seconds); a phase shorter than
+/// its move hurries the move.
+const TURN_DOWN: f64 = 0.8;
+const ZOOM_IN: f64 = 1.0;
+const ZOOM_OUT: f64 = 0.8;
 /// How long the eye takes to leave the thrower's view and fall in behind the grenade.
-const LEAVE: f64 = 0.5;
+const LEAVE: f64 = 0.8;
+/// How long before the release a jump-throw's eye starts to rise.
+const RISE: f64 = 0.3;
 /// How far behind the grenade the chase rides its path, and above it; over the last SETTLE seconds it eases back to
 /// SETTLED_LAG so it is not inside what blooms where the grenade lies.
 const LAG: f64 = 70.0;
@@ -34,7 +44,7 @@ const SMOOTH_EYE: f64 = 0.08;
 const SMOOTH_LOOK: f64 = 0.14;
 const RATE: f64 = 120.0;
 /// Once it goes off: how long the eye takes to pull out to where it watches the bloom, and to turn to the effect.
-const PULL: f64 = 1.3;
+const PULL: f64 = 1.0;
 const TURN_TO: f64 = 0.9;
 /// The share of the turn spent speeding up, and again slowing down.
 const RAMP: f64 = 0.2;
@@ -42,7 +52,7 @@ const BEARINGS: usize = 72;
 const CLEARANCE: f64 = 24.0;
 
 /// How a kind of grenade's result is framed: the turn's radius, how clear of the effect's points it keeps, how long
-/// the bloom is watched and the turn takes.
+/// the bloom is watched before the turn (a second, the pull-out's length) and the turn takes.
 struct Framing {
     radius: f64,
     clear: f64,
@@ -53,13 +63,13 @@ struct Framing {
 fn framing(b: &Built) -> Framing {
     let s = &b.stage;
     if s.cloud.is_some() {
-        Framing { radius: 400.0, clear: 100.0, bloom: 4.5, turn: 8.0 }
+        Framing { radius: 400.0, clear: 100.0, bloom: 1.0, turn: 8.0 }
     } else if let Some(fire) = &s.fire {
         // a fire burns about seven seconds: the turn ends a second before it dies
         let lasts = fire.lasts();
-        Framing { radius: 320.0, clear: 40.0, bloom: 2.5, turn: (lasts - 3.5).clamp(4.0, 8.0) }
+        Framing { radius: 320.0, clear: 40.0, bloom: 1.0, turn: (lasts - 2.0).clamp(4.0, 8.0) }
     } else {
-        Framing { radius: 360.0, clear: 0.0, bloom: 1.5, turn: 5.0 }
+        Framing { radius: 360.0, clear: 0.0, bloom: 1.0, turn: 5.0 }
     }
 }
 
@@ -76,6 +86,9 @@ pub struct Sequence {
     end: f64,
     /// The throw's own clock: seconds from its start to the release, and to its detonation.
     released_at: f64,
+    /// A jump-throw's jump: how far the eye has moved at the release, and its upward speed at take-off.
+    jumped: DVec3,
+    takeoff: f64,
     start: f64,
     air: f64,
     chase_eyes: Vec<DVec3>,
@@ -106,6 +119,11 @@ impl Sequence {
         let bloom = detonate + f.bloom * k;
         let turn = f.turn * k;
         let thrower = b.stage.thrower;
+        // the jump moves the hand by what it moves the eye: the release against a standing one's
+        let standing = nades_physics::Throw { movement: nades_physics::Movement::Stand, ..crate::sim::physics_throw(&b.throw) };
+        let jumped = if b.path.release.t > 0.0 { b.path.release.p0 - nades_physics::release(&standing).p0 } else { DVec3::ZERO };
+        let fall = if b.throw.crouch { nades_physics::CROUCH_JUMPTHROW_VZ } else { nades_physics::JUMPTHROW_VZ };
+        let takeoff = fall + nades_physics::PLAYER_GRAVITY * b.path.release.t;
 
         // the chase, sampled from release to detonation and smoothed
         let points = &b.path.points;
@@ -156,7 +174,7 @@ impl Sequence {
         let from = near().find(|&k| seen(k) && shows(k)).or_else(|| near().find(|&k| shows(k))).or_else(|| near().find(|&k| seen(k))).unwrap_or(chased.round());
         let sweep = Some(Sweep { from, steps: -(BEARINGS as f64) });
         let pull = sweep.as_ref().map(|s| circle.at(s.at(0.0))).map(|to| collider.map_or(Pull::Straight(to), |c| Pull::plan(c, end_eye, to)));
-        let mut sequence = Self { thrower, spot, aim, zoom, release, detonate, bloom, end: bloom + turn, released_at: b.path.release.t, start, air, chase_eyes, chase_looks, raw_looks, focus, marks, circle, sweep, pull, turn, shifts: Vec::new() };
+        let mut sequence = Self { thrower, spot, aim, zoom, release, detonate, bloom, end: bloom + turn, released_at: b.path.release.t, jumped, takeoff, start, air, chase_eyes, chase_looks, raw_looks, focus, marks, circle, sweep, pull, turn, shifts: Vec::new() };
         // last, every pose of the chase and the pull moved off the surfaces its near plane would cut, eased
         if let Some(c) = collider {
             let n = ((bloom - release) * RATE).ceil() as usize + 1;
@@ -188,7 +206,7 @@ impl Sequence {
         use nades_control::video::Moment;
         match m {
             Moment::Spot => self.spot * 0.6,
-            Moment::Aim => (self.spot + self.aim) / 2.0 + 0.4,
+            Moment::Aim => self.aim,
             Moment::AimPoint => self.zoom - 0.3,
             Moment::Flight => self.release + self.air / 2.0,
             Moment::Detonation => self.detonate,
@@ -229,18 +247,18 @@ impl Sequence {
         let t = self.thrower;
         let aim = |fov: f64| CsView { fov, ..t };
         if v < self.spot {
-            // where to stand: wide, looking a little down past the feet along the throw's way
-            return (CsView { pitch: t.pitch.max(28.0), fov: WIDE_FOV, ..t }, None);
+            // where to stand: level, along the throw's way
+            return (CsView { pitch: 0.0, ..aim(vertical_fov()) }, None);
         }
         if v < self.aim {
-            let w = smoothstep((v - self.spot) / 0.9);
-            return (CsView { pitch: lerp(t.pitch.max(28.0), t.pitch, w), fov: lerp(WIDE_FOV, vertical_fov(), w), ..t }, None);
+            return (CsView { pitch: lerp(0.0, t.pitch, smootherstep((v - self.spot) / TURN_DOWN.min(self.aim - self.spot))), ..aim(vertical_fov()) }, None);
         }
         if v < self.zoom {
-            return (aim(lerp(vertical_fov(), AIM_FOV, smoothstep((v - self.aim) / 0.7))), None);
+            return (aim(zoom(vertical_fov(), AIM_FOV, smootherstep((v - self.aim) / ZOOM_IN.min(self.zoom - self.aim)))), None);
         }
         if v < self.release {
-            return (aim(lerp(AIM_FOV, vertical_fov(), smoothstep((v - self.zoom) / 0.5))), None);
+            let fov = zoom(AIM_FOV, vertical_fov(), smootherstep((v - self.zoom) / ZOOM_OUT.min(self.release - self.zoom)));
+            return (CsView { eye: self.jump(self.release - v).0, ..aim(fov) }, None);
         }
         if v < self.detonate {
             let (eye, look) = self.chase(v - self.release);
@@ -248,15 +266,21 @@ impl Sequence {
             return (CsView { eye, pitch, yaw, fov: vertical_fov() }, Some(self.grenade(v - self.release)));
         }
         let (end_eye, end_look) = self.chase(self.air);
+        // the chase's last speed, eye and look, carried into the pull-out and dying away
+        let (before_eye, before_look) = self.chase(self.air - 1.0 / RATE);
+        let (eye_speed, look_speed) = ((end_eye - before_eye) * RATE, (end_look - before_look) * RATE);
         let since = v - self.detonate;
+        // the pull-out ends where the turn begins
+        let (pull_for, turn_to) = (PULL.min(self.bloom - self.detonate), TURN_TO.min(self.bloom - self.detonate));
+        let look = end_look.lerp(self.focus, smoothstep(since / turn_to)) + carry(look_speed, turn_to, since);
         let (eye, look) = match (&self.sweep, &self.pull) {
             (Some(sweep), Some(pull)) if v >= self.bloom => {
                 let u = ((v - self.bloom) / self.turn).clamp(0.0, 1.0);
                 (self.circle.at(sweep.at(turn_ease(u))), self.focus)
             }
             // close on the effect as it grows: out to where the turn begins, turning to the effect
-            (Some(_), Some(pull)) => (pull.at(end_eye, 1.0 - (1.0 - (since / PULL).min(1.0)).powi(2)), end_look.lerp(self.focus, smoothstep(since / TURN_TO))),
-            _ => (end_eye, end_look.lerp(self.focus, smoothstep(since / TURN_TO))),
+            (Some(_), Some(pull)) => (pull.at(end_eye, smoothstep(since / pull_for)) + carry(eye_speed, pull_for, since), look),
+            _ => (end_eye + carry(eye_speed, pull_for, since), look),
         };
         let (pitch, yaw) = angles_to(eye, look);
         (CsView { eye, pitch, yaw, fov: vertical_fov() }, Some(self.focus))
@@ -293,16 +317,34 @@ impl Sequence {
         self.raw_looks[((since / self.air * (n - 1) as f64).round() as usize).min(n - 1)]
     }
 
-    /// The chase `since` seconds after the release: out of the thrower's eye onto the grenade's path, turning from the
-    /// aim to the grenade.
+    /// The thrower's eye `before` seconds before the release, and how fast it moves: still, or rising with a
+    /// jump-throw's jump to where it lets go at the speed it lets go with. The game's take-off is a kick from rest;
+    /// this one begins RISE early and gathers speed instead.
+    fn jump(&self, before: f64) -> (DVec3, DVec3) {
+        if self.released_at <= 0.0 || before >= RISE {
+            return (self.thrower.eye, DVec3::ZERO);
+        }
+        let t = self.released_at;
+        let flat = DVec3::new(self.jumped.x, self.jumped.y, 0.0);
+        let end_speed = flat / t + DVec3::Z * (self.takeoff - nades_physics::PLAYER_GRAVITY * t);
+        // a cubic from rest at RISE before to the release's place and speed
+        let u = (1.0 - before.max(0.0) / RISE).clamp(0.0, 1.0);
+        let at = self.jumped * (3.0 * u * u - 2.0 * u * u * u) + end_speed * RISE * (u * u * u - u * u);
+        let speed = self.jumped * (6.0 * u - 6.0 * u * u) / RISE + end_speed * (3.0 * u * u - 2.0 * u);
+        (self.thrower.eye + at, speed)
+    }
+
+    /// The chase `since` seconds after the release: out of the thrower's eye onto the grenade's path, keeping the
+    /// jump's speed as it goes, turning from the aim to the grenade.
     fn chase(&self, since: f64) -> (DVec3, DVec3) {
         let n = self.chase_eyes.len();
         let f = (since / self.air * (n - 1) as f64).clamp(0.0, (n - 1) as f64);
         let i = (f.floor() as usize).min(n - 2);
         let eye = self.chase_eyes[i].lerp(self.chase_eyes[i + 1], f - i as f64);
         let look = self.chase_looks[i].lerp(self.chase_looks[i + 1], f - i as f64);
-        let w = smoothstep(since / LEAVE);
-        let from = self.thrower.eye.lerp(eye, w);
+        let w = smootherstep(since / LEAVE);
+        let (leaving, speed) = self.jump(0.0);
+        let from = leaving.lerp(eye, w) + carry(speed, LEAVE, since);
         let toward = look - from;
         let dist = toward.length().max(1.0);
         let dir = forward(self.thrower.pitch, self.thrower.yaw).lerp(toward / dist, w).normalize_or(DVec3::X);
@@ -611,6 +653,25 @@ fn smoothstep(x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// From rest to rest with no jolt at either end: its speed and its acceleration are nought at both.
+fn smootherstep(x: f64) -> f64 {
+    let t = x.clamp(0.0, 1.0);
+    t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+}
+
+/// A field of view `w` of the way from `a` to `b`, degrees, at an even rate of magnification.
+fn zoom(a: f64, b: f64, w: f64) -> f64 {
+    let (ta, tb) = ((a.to_radians() / 2.0).tan(), (b.to_radians() / 2.0).tan());
+    (2.0 * (ta * (tb / ta).powf(w)).atan()).to_degrees()
+}
+
+/// What a move carries over of the speed `speed` the one before it ended with, `since` seconds into its `over`
+/// seconds: that speed at its start, dying away to nothing, still, at its end.
+fn carry(speed: DVec3, over: f64, since: f64) -> DVec3 {
+    let u = (since / over).clamp(0.0, 1.0);
+    speed * over * u * (1.0 - u) * (1.0 - u)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,10 +760,11 @@ mod tests {
         let b = sim::simulate(&SceneThrow::new(Grenade::Flash, [0.0, 0.0, 0.0], -20.0, 90.0), None, DVec3::Z);
         let s = Sequence::new(&b, 0.0, None, None);
         let air = b.path.detonation.t - b.path.release.t;
-        assert!((s.seconds() - (SPOT + AIM + ZOOM + THROW + air + 1.5 + 5.0)).abs() < 1e-9);
-        // the spot is wide, the aim point zoomed, the release the thrower's own view
-        assert_eq!(s.camera(1.0).fov, WIDE_FOV);
-        assert!((s.camera(SPOT + AIM + 1.5).fov - AIM_FOV).abs() < 1e-9);
+        assert!((s.seconds() - (SPOT + AIM + ZOOM + THROW + air + 1.0 + 5.0)).abs() < 1e-9);
+        // the spot level, the aim on the setang, the aim point zoomed, the release the thrower's own view
+        assert_eq!(s.camera(SPOT / 2.0).pitch, 0.0);
+        assert!((s.camera(SPOT + AIM).pitch - b.stage.thrower.pitch).abs() < 1e-9);
+        assert!((s.camera(SPOT + AIM + ZOOM - 0.1).fov - AIM_FOV).abs() < 1e-9);
         let at_release = s.camera(s.release - 1e-6);
         assert!(at_release.eye.distance(b.stage.thrower.eye) < 1e-9 && (at_release.fov - vertical_fov()).abs() < 1e-9);
         assert!(s.crosshair(s.release - 0.01) && !s.crosshair(s.release + 0.01));
@@ -715,8 +777,39 @@ mod tests {
         assert!(mid.eye.distance(grenade) < 160.0, "{}", mid.eye.distance(grenade));
         let last = s.camera(s.seconds());
         assert!(forward(last.pitch, last.yaw).dot((b.stage.focus - last.eye).normalize()) > 0.999);
+        // nothing jumps from one frame to the next at 120 a second, and nothing starts or stops dead
+        smooth_throughout(&s);
+        let jumping = sim::simulate(&SceneThrow { movement: nades_control::scene::Movement::Jumpthrow, ..SceneThrow::new(Grenade::Flash, [0.0, 0.0, 0.0], -30.0, 90.0) }, None, DVec3::Z);
+        let j = Sequence::new(&jumping, 0.0, None, None);
+        smooth_throughout(&j);
+        // a jump-throw's eye rises with the jump, from the thrower's eye to where it lets go
+        assert!((j.camera(j.release - 1e-6).eye - b_eye_at_release(&jumping)).length() < 0.01);
         // a longer video stretches the phases, not the flight
-        let long = Sequence::new(&b, 0.0, None, Some(40.0));
-        assert!((long.seconds() - 40.0).abs() < 1e-6 && (long.detonate - long.release - air).abs() < 1e-9);
+        let long = Sequence::new(&b, 0.0, None, Some(30.0));
+        assert!((long.seconds() - 30.0).abs() < 1e-6 && (long.detonate - long.release - air).abs() < 1e-9);
+    }
+
+    /// The thrower's eye at the release: where the hand lets go, back by the hand's reach from a standing eye.
+    fn b_eye_at_release(b: &Built) -> DVec3 {
+        let standing = nades_physics::Throw { movement: nades_physics::Movement::Stand, ..sim::physics_throw(&b.throw) };
+        b.stage.thrower.eye + b.path.release.p0 - nades_physics::release(&standing).p0
+    }
+
+    /// Frame to frame at 120 a second: the eye moves less than the grenade could, the view turns and zooms by less
+    /// than a few degrees, and the eye's speed changes by less than a jolt would.
+    fn smooth_throughout(s: &Sequence) {
+        let dt = 1.0 / 120.0;
+        let frames = (s.seconds() / dt) as usize;
+        let views: Vec<CsView> = (0..=frames).map(|i| s.camera(i as f64 * dt)).collect();
+        for (i, w) in views.windows(3).enumerate() {
+            let v = (i + 1) as f64 * dt;
+            let (a, b, c) = (w[0], w[1], w[2]);
+            let turned = forward(a.pitch, a.yaw).angle_between(forward(b.pitch, b.yaw)).to_degrees();
+            assert!(b.eye.distance(a.eye) < 12.0, "the eye jumps {:.1} at {v:.3}", b.eye.distance(a.eye));
+            assert!(turned < 3.0, "the view turns {turned:.1}° at {v:.3}");
+            assert!((b.fov - a.fov).abs() < 1.0, "the zoom jumps at {v:.3}");
+            let jolt = ((c.eye - b.eye) - (b.eye - a.eye)).length() / (dt * dt);
+            assert!(jolt < 6000.0, "the eye's speed jumps ({jolt:.0} u/s²) at {v:.3}");
+        }
     }
 }

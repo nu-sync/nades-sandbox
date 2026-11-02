@@ -30,14 +30,18 @@
 
 | Phase | Base seconds | Camera |
 |---|---|---|
-| spot | 2.0 | thrower's eye, pitch at least 28° down, FOV 100° |
-| aim | 2.0 | eases to the setang and CS2's 73.74° in 0.9 s |
-| aim point | 2.2 | zooms to 28° (`AIM_FOV`) in 0.7 s |
-| throw | 1.6 | back to 73.74° in 0.5 s; release at its end |
-| chase | the flight's real airtime | flight.ts's chase (below) |
+| spot | 2.0 | thrower's eye, level, CS2's 73.74° |
+| aim | 2.0 | turns to the setang in 1.0 s (`TURN_DOWN`), then holds |
+| aim point | 3.0 | zooms to 28° (`AIM_FOV`) in 1.0 s (`ZOOM_IN`), then holds |
+| throw | 2.8 | zooms back to 73.74° in 0.8 s (`ZOOM_OUT`); a jump-throw's eye rises over the last 0.3 s (`RISE`) to where it lets go; release at its end |
+| chase | the flight's real airtime | flight.ts's chase (below), left from the eye over 0.8 s (`LEAVE`) |
 | bloom | smoke 4.5, fire 2.5, else 1.5 | pulls out to the turn's start in 1.3 s, turning to the effect in 0.9 s |
 | turn | smoke 8, fire lasts−3.5 (4–8), else 5 | one turn round the effect, clockwise, eased |
 
+- jumpthrow.pro's phases and holds ([jumpthrow-reference](../../jumpthrow-reference/SKILL.md)), but where theirs cut
+  ours moves: every move starts and ends at rest (`smootherstep`), the zoom magnifies at an even rate (`zoom`, in
+  tan(fov/2)), and a move begins with the speed the last one ended with (`carry`: the jump's into the chase, the
+  chase's into the pull-out). The test's `smooth_throughout` checks every frame at 120 a second.
 - A `seconds` length scales every phase but the chase (factor clamped 0.3–3).
 - The scene's clock is held at the throw's start until the release falls at the throw phase's end, then runs 1:1
   (`scene_time`). The crosshair shows while the video time is before the release (`crosshair`). A flash lineup holds its
@@ -48,7 +52,7 @@ The chase and the turn port show-me-the-nades' `web/app/src/scene/flight.ts` (it
 
 - **Chase:** sampled 120 a second from the release to the detonation; the eye rides the grenade's own path by arc length,
   `LAG` 70 units behind, easing to `SETTLED_LAG` 150 over the last `SETTLE` 0.6 s, lifted `LIFT` 12 (less under a
-  ceiling); eye and look Gaussian-smoothed (σ 0.08 s, 0.14 s); it leaves the thrower's eye over `LEAVE` 0.5 s. Round
+  ceiling); eye and look Gaussian-smoothed (σ 0.08 s, 0.14 s). Round
   a corner the eye closes in (`CLOSER`: 1 down to 0.15 of the lag) until `chase_fits` (10 units from every surface,
   the grenade in sight); where smoothing cuts a corner the sample falls back to the path, else is `nudge`d off the wall.
 - **Turn** (`Circle::new`, S36): one level circle, once round, clockwise, at an even pace (`Sweep`): radius 400 (smoke,

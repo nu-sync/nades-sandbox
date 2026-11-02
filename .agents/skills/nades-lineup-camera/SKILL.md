@@ -57,7 +57,7 @@ It writes `.runs/lineup-<time>/`: `lineup.mp4`, stills, `lineup.json`, `calls.js
 Run the journeys in [references/journeys.md](references/journeys.md). Always look at `frames.png` (or frames along the
 MP4) before calling a render right: the checks below are what a person sees.
 
-- the spot (wide) and the aim with a green crosshair; the aim point zoomed; no crosshair from the release on;
+- the spot (level) and the aim with a green crosshair; the aim point zoomed; no crosshair from the release on;
 - the game's own grenade model in the chase, never a grey capsule (unless the effects pack lacks models);
 - no drawn trajectory lines; no flat grey disks;
 - the camera arrives near the landing, holds on the bloom, then turns once round the effect, staying outside it and

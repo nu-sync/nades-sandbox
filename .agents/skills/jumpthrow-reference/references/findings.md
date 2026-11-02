@@ -46,13 +46,13 @@ weak part is the end, where the grenade camera never lets go.
 | | jumpthrow | nades-sandbox |
 |---|---|---|
 | Player | first-person arms, no body | no arms, no body |
-| Spot → aim | hard cut, holds about 2 s each | eases to the setang in 0.9 s |
-| Aim-point zoom | hard cut to a narrow FOV, held about 3 s | zooms to 28° in 0.7 s, holds 2.2 s |
-| Back out | hard cut, holds about 3 s with the grenade in hand | back to 73.74° in 0.5 s |
-| Throw | real animation, jump visible | release at the throw phase's end |
-| Chase | grenade-locked, real time | smoothed chase 70→150 units behind, real time |
+| Spot → aim | hard cut, holds about 2 s each | 2.0 s level, then turns to the setang in 1.0 s and holds 1.0 s |
+| Aim-point zoom | hard cut to a narrow FOV, held about 3 s | zooms to 28° in 1.0 s at an even rate, holds 2.0 s |
+| Back out | hard cut, holds about 3 s with the grenade in hand | zooms out in 0.8 s, holds 2.0 s |
+| Throw | real animation, jump visible | a jump-throw's eye rises to the release point; release at 9.8 s |
+| Chase | grenade-locked, real time | leaves the eye over 0.8 s keeping the jump's speed; smoothed chase 70→150 units behind, real time |
 | After the burst | camera stuck to the grenade, clips | pull-out, then one turn round the effect |
 | Length | 21–27 s | about 26 s for a smoke |
 
-To feel like theirs: use cuts and longer still holds rather than eased moves before the release. Keep our pull-out and
-turn; they are better than their ending.
+Since 2026-11-02 ours keeps their phases and holds but moves where they cut, with no jump in place, speed or zoom
+from one frame to the next. Left: arms. Keep our pull-out and turn; they are better than their ending.
