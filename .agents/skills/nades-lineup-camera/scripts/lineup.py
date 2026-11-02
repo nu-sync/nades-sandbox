@@ -11,6 +11,7 @@ frames.png (a contact sheet when Pillow is importable). The server and its rende
 with it; nothing else is touched. Exit 0 on success, 1 on a failed render, 2 when a prerequisite is missing.
 """
 import argparse, json, shutil, subprocess, sys, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -117,15 +118,18 @@ def sheet(out: Path, duration: float) -> None:
         return
     frames = out / "frames"
     frames.mkdir(exist_ok=True)
-    tiles = []
-    for k in range(16):
+    def extract(k):
         t = duration * (k + 0.5) / 16
         f = frames / f"{t:06.2f}.png"
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.2f}", "-i", str(out / "lineup.mp4"), "-frames:v", "1", "-vf", "scale=480:-2", str(f)], check=False)
         if f.exists():
             im = Image.open(f).convert("RGB")
             ImageDraw.Draw(im).text((6, 6), f"{t:.1f} s", fill=(255, 255, 0))
-            tiles.append(im)
+            return im
+        return None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        tiles = [im for im in pool.map(extract, range(16)) if im is not None]
     if tiles:
         w, h = tiles[0].size
         c = Image.new("RGB", (w * 4, h * ((len(tiles) + 3) // 4)))

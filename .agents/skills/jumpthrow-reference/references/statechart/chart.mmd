@@ -1,0 +1,64 @@
+---
+title: "A jumpthrow.pro lineup video"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: First person
+    lg1: Flight
+    lg2: Effect
+    lg3: Breaks CameraOutsideMap
+    lg4: Path to the CameraOutsideMap bug
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 orange
+  class lg3 breaks
+  class lg4 bugPath
+  s0: Last frame of the previous spot
+  s1: At the spot, level, drawing the grenade
+  s2: Looking along the setang
+  s3: One mostly black frame
+  s4: Zoomed on the aim point, no arms
+  s5: Lineup again, grenade in hand
+  s6: Throw animation and jump
+  s7: Riding the grenade in flight
+  s8: Effect going off, grenade still falling
+  s9: Riding the grenade, at rest, not yet gone off
+  s10: Effect going off, camera on the resting grenade
+  [*] --> s0
+  s0 --> s1: 0.1 s: cut to the lineup spot
+  s1 --> s2: 2.1 s: cut to the aim
+  s2 --> s3: 3.2 s: cut to black
+  s3 --> s4: 3.3 s: cut to the zoom
+  s4 --> s5: 6.5 s: cut back out
+  s5 --> s6: 9.7 s: the throw starts
+  s6 --> s7: 10.3 s: cut to the grenade camera
+  s7 --> s8: release + airtime: it goes off
+  s7 --> s9: the grenade comes to rest
+  s8 --> s0: the clip ends and loops
+  s8 --> s10: the grenade comes to rest
+  s9 --> s10: release + airtime: it goes off
+  s10 --> s0: the clip ends and loops
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 blue
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 orange
+  class s9 teal
+  class s9 breaks
+  class s9 bugPath
+  class s10 orange
+  class s10 breaks
