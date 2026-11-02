@@ -1,0 +1,42 @@
+{
+  "about": "The jumpthrow.pro lineup video as data. Phase names match statechart/JumpthrowVideo.tla. Times are seconds into the MP4 of the reference video, observed in the built-in browser on 2026-11-02 at 0.1 s around each cut. scripts/template.py reads this file.",
+  "reference": {
+    "nade": "0197a968-ba67-7410-8f7b-4e5423a35df3",
+    "title": "Ancient Smoke by Cloud9 interz",
+    "grenade": "smoke",
+    "duration": 26.27,
+    "airtime": 5.9
+  },
+  "phases": [
+    {"name": "leftover", "start": 0.0, "end": 0.1, "view": "eye", "grenade": "holstered",
+     "shows": "the last frame of the previous spot", "enter": "the video starts (or loops)"},
+    {"name": "spot", "start": 0.1, "end": 2.1, "view": "eye", "grenade": "held",
+     "shows": "first person at the setpos, view level, arms drawing the grenade", "enter": "cut (setpos teleport)"},
+    {"name": "aim", "start": 2.1, "end": 3.2, "view": "eye", "grenade": "held",
+     "shows": "first person along the setang", "enter": "cut, no turn"},
+    {"name": "black", "start": 3.2, "end": 3.3, "view": "dark", "grenade": "held",
+     "shows": "one mostly black frame as the zoomed view loads", "enter": "cut"},
+    {"name": "aimpoint", "start": 3.3, "end": 6.5, "view": "zoom", "grenade": "held",
+     "shows": "narrow FOV on the aim point, no arms, crosshair on it", "enter": "cut, no zoom animation"},
+    {"name": "lineup", "start": 6.5, "end": 9.7, "view": "eye", "grenade": "held",
+     "shows": "the setang at normal FOV with the grenade in hand", "enter": "cut"},
+    {"name": "throw", "start": 9.7, "end": 10.3, "view": "eye", "grenade": "held",
+     "shows": "the game's throw animation; the jump lifts the view", "enter": "the throw starts, real time"},
+    {"name": "chase", "start": 10.3, "end": 16.5, "view": "grenade", "grenade": "flying",
+     "shows": "a camera locked just behind the grenade along its flight, real time", "enter": "cut at the release"},
+    {"name": "aftermath", "start": 16.5, "end": 26.27, "view": "grenade", "grenade": "resting",
+     "shows": "the effect going off, the camera still locked to the grenade, clipping into walls and floor",
+     "enter": "the grenade goes off: release + airtime"}
+  ],
+  "events": [
+    {"name": "release", "at": 10.3},
+    {"name": "detonation", "at": 16.5, "rule": "release + airtime (10.3 + 5.9 = 16.2; seen at about 16.5)"},
+    {"name": "loop", "at": 26.27, "rule": "the MP4 loops back to leftover"}
+  ],
+  "others": [
+    {"nade": "0197a96c-357f-779c-a147-b02fd57e4fd9", "title": "Ancient Smoke by MIBR saffee", "duration": 26.66,
+     "sampled_every": 0.75, "matches": "the same phases; zoomed hold seen at 3.75 s, chase from about 9.75 s, the same clipping at rest"},
+    {"nade": "019e5533-8df6-7449-b2d0-3af57e4bb18c", "title": "Mirage Flash by The MongolZ cobrazera", "duration": 21.33,
+     "sampled_every": 0.15, "matches": "zoomed hold about 3.6-6.0 s, cut back about 6.6 s, throw about 9.6-9.9 s, grenade camera from about 9.95 s with the grenade in view and heading snaps at bounces; at rest and frozen from about 19.8 s"}
+  ]
+}

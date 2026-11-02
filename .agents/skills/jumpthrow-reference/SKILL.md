@@ -10,6 +10,23 @@ arms, no third-person player model), with two stills and the `setpos`/`setang` l
 `lineup_render` ([nades-lineup-camera](../nades-lineup-camera/SKILL.md)). Read [what they do](references/findings.md)
 for the template and how it differs from ours; run the [journeys](references/journeys.md) to re-observe it.
 
+## The template as data
+
+- [references/template.json](references/template.json): every phase of the reference video with start, end, view
+  (`eye`, `zoom`, `dark`, `grenade`), grenade state, what shows and how it is entered; the release, detonation
+  (release + airtime) and loop; how the other sampled videos match.
+- [`scripts/template.py`](scripts/template.py): `python3 scripts/template.py` prints the timeline; `--at 12.4` names
+  the phase at a time; `--check` checks the phases are contiguous, end at the duration, put the detonation at release
+  + airtime, and use the spec's phase and view names (exit 1 otherwise).
+- [references/statechart/](references/statechart/): the same template as a TLA+ model (`JumpthrowVideo.tla`, `.cfg`),
+  its chart view (`view.ts`) and the chart (`chart.mmd`, Mermaid). The model checks four rules; three hold, and
+  `CameraOutsideMap` breaks on purpose: their camera stays locked to the grenade once it rests, which is the clipping
+  seen in every video. Rebuild with the `statechart` skill:
+  `sh <statechart skill>/scripts/statechart JumpthrowVideo.tla --config JumpthrowVideo.cfg --view view.ts --out <scratch dir>`
+  run in `references/statechart/`, then copy `chart.mmd` back.
+
+When findings change, change `template.json` and the spec together and run `template.py --check`.
+
 ## Rules
 
 - **Their footage stays local and uncommitted.** Frames, sheets and clips made from jumpthrow videos go in a scratch

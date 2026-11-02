@@ -20,11 +20,11 @@ Ancient smoke (26.3 s, airtime 5.9 s); the flash matches within a few tenths.
 
 | Time | Phase | Camera | Transition |
 |---|---|---|---|
-| 0.0–0.2 s | leftover | the previous position | cut (the `setpos` teleport) |
-| 0.2–2.1 s | spot | first person, level, grenade being drawn | static |
+| 0.0–0.1 s | leftover | the previous position | cut (the `setpos` teleport) |
+| 0.1–2.1 s | spot | first person, level, grenade being drawn | static |
 | 2.1 s | aim | snaps to the `setang` (pitch −34°) | **hard cut**, no turn |
-| 3.2 s | — | one black frame | cut |
-| 3.4–6.3 s | aim point | narrow FOV on the aim point, no arms, crosshair on it | **hard cut** in and out |
+| 3.2 s | — | one mostly black frame as the zoom loads | cut |
+| 3.3–6.4 s | aim point | narrow FOV on the aim point, no arms, crosshair on it | **hard cut** in and out |
 | 6.5–9.6 s | lineup again | normal FOV, arms holding the grenade | static, about 3 s |
 | 9.7–10.2 s | throw | the game's throw animation; the jump lifts the view | real time |
 | 10.3 s | chase | **cut** to a camera just behind the grenade, looking along its flight | — |
