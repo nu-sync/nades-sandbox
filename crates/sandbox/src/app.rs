@@ -505,7 +505,7 @@ impl Sandbox {
         if !force && self.accumulated >= nades_render::smoke::ACCUMULATE && sim::smoking(&placed, t) {
             return None;
         }
-        Some(sim::show(gpu, map, &placed, t, eye, size, self.accumulated))
+        Some(sim::show(gpu, map, &placed, t, eye, size, sim::FrameOptions { accumulated: self.accumulated, lineup_flash: None }))
     }
 
     /// Whether frames must keep coming: the clock playing, a smoke still averaging, throws being simulated, a copy note

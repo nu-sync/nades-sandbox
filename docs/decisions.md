@@ -1624,3 +1624,20 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
 ||||||| 87d605a
 ||||||| 87d605a
 ||||||| 87d605a
+
+## S43 · Flash detonation as a 3D marker
+
+- **Decision:** show a short-lived yellow, twelve-point 3D burst with an inverted-hull outline at flash detonation instead of the white billboard burst.
+  It grows then contracts over the existing quarter-second lifetime; the light on the map remains and HE retains its burst. This is a readable marker for
+  inspecting grenade results, not a claim to reproduce the game's flash particle.
+- **Evidence:** the Dust II Long flash's offscreen MCP render at 1.78 s shows the star at the detonation location,
+  while preserving the surrounding Long Doors landmarks.
+
+
+## S44 · Hold the flash marker through a lineup's turn
+
+- **Decision:** during a lineup move, hold its flash's 3D marker at the detonation point with a small pulse until the
+  move ends. Only the drawn marker is held: the scene clock, flash light, simulation report, still renders, other
+  throws and other camera moves retain their normal timing. The held symbol communicates the burst's location, not a
+  claim that the flash itself lasts for the orbit.
+- **Evidence:** a Dust II Long flash rendered over MCP at 1080p60 shows the marker at multiple bearings in the turn.

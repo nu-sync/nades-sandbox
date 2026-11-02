@@ -40,7 +40,8 @@
 
 - A `seconds` length scales every phase but the chase (factor clamped 0.3–3).
 - The scene's clock is held at the throw's start until the release falls at the throw phase's end, then runs 1:1
-  (`scene_time`). The crosshair shows while the video time is before the release (`crosshair`).
+  (`scene_time`). The crosshair shows while the video time is before the release (`crosshair`). A flash lineup holds its
+  pulsing location marker through the turn, without extending the simulated flash or its light.
 - Moments for stills: `Sequence::moment`.
 
 The chase and the turn port show-me-the-nades' `web/app/src/scene/flight.ts` (its D29):
