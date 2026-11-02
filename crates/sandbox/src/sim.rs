@@ -257,11 +257,26 @@ pub mod views {
 /// A throw on the scene's clock: what it built and when it starts.
 pub type Placed = (Arc<Built>, f64);
 
+#[derive(Default)]
+pub struct FrameOptions {
+    pub accumulated: u32,
+    pub lineup_flash: Option<usize>,
+}
+
+fn flash_marker_time(local: f64) -> f64 {
+    if local <= 0.1 { local } else { 0.1 + 0.015 * ((local - 0.1) * 4.0).sin() }
+}
+
 /// What `throws` show at `t` on the scene's clock, readied on `map` for a frame from `eye` into targets of `size`:
 /// each grenade in flight, its burst, its fire, its smoke, and the strongest light on the map.
-pub fn show(gpu: &Gpu, map: &mut Map, throws: &[Placed], t: f64, eye: &nades_render::View, size: (u32, u32), accumulated: u32) -> FrameEffects {
+pub fn show(gpu: &Gpu, map: &mut Map, throws: &[Placed], t: f64, eye: &nades_render::View, size: (u32, u32), options: FrameOptions) -> FrameEffects {
+    let accumulated = options.accumulated;
     let moment: Vec<(&Stage, f64)> = throws.iter().map(|(b, start)| (&b.stage, b.local(*start, t))).collect();
-    map.throw.set_moment(&gpu.device, &gpu.queue, &moment, eye, size);
+    let marker_moment: Vec<(&Stage, f64)> = moment.iter().enumerate().map(|(i, (stage, local))| {
+        let marker_time = if options.lineup_flash == Some(i) && stage.burst.is_some_and(|b| b.flash) { flash_marker_time(*local) } else { *local };
+        (*stage, marker_time)
+    }).collect();
+    map.throw.set_moment(&gpu.device, &gpu.queue, &marker_moment, eye, size);
     let clouds: Vec<(u64, &nades_scene::smoke::Cloud, &[u8], Option<SmokeFrame>)> = throws
         .iter()
         .filter_map(|(b, start)| {
@@ -333,6 +348,17 @@ pub fn pick(collider: &Collider, camera: &CsView, (x, y): (f64, f64), aspect: f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lineup_flash_marker_keeps_pulsing_after_the_real_burst() {
+        assert_eq!(flash_marker_time(-0.5), -0.5);
+        assert_eq!(flash_marker_time(0.05), 0.05);
+        let at_two = flash_marker_time(2.0);
+        let at_eight = flash_marker_time(8.0);
+        assert!((0.085..=0.115).contains(&at_two));
+        assert!((0.085..=0.115).contains(&at_eight));
+        assert!((at_two - at_eight).abs() > 0.001);
+    }
 
     #[test]
     fn a_throw_is_simulated_on_its_own_clock_and_placed_on_the_scenes() {
