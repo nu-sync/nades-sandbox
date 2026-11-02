@@ -80,6 +80,15 @@ impl Shot {
         self.sequences[k].as_ref().map_or(self.clip_start + elapsed, |s| s.scene_time(u))
     }
 
+    /// The throw whose flash marker is held for a lineup's result, never for other shot moves.
+    pub fn lineup_throw(&self, elapsed: f64) -> Option<usize> {
+        let (k, _) = self.playing(elapsed);
+        match self.moves[k].2 {
+            ShotMove::Lineup { throw, .. } => Some(throw),
+            _ => None,
+        }
+    }
+
     /// Whether the crosshair shows at `elapsed`: in a lineup move, until its grenade leaves the hand.
     pub fn crosshair(&self, elapsed: f64) -> bool {
         let (k, u) = self.playing(elapsed);
@@ -214,6 +223,15 @@ mod tests {
 
     fn placed() -> Vec<Placed> {
         vec![(Arc::new(sim::simulate(&SceneThrow::new(Grenade::Flash, [0.0, 0.0, 0.0], -20.0, 0.0), None, DVec3::Z)), 0.5)]
+    }
+
+    #[test]
+    fn only_lineup_moves_hold_their_own_flash_marker() {
+        let placed = placed();
+        let moves = [ShotMove::Lineup { throw: 0, seconds: None }, ShotMove::Thrower { throw: 0, seconds: 2.0 }];
+        let shot = Shot::new(&moves, &placed, 0.0, None);
+        assert_eq!(shot.lineup_throw(0.0), Some(0));
+        assert_eq!(shot.lineup_throw(shot.seconds() - 1.0), None);
     }
 
     #[test]

@@ -84,15 +84,15 @@ fn view_camera(s: &Staged, view: ViewName, k: usize, t: f64) -> Result<Eye> {
 
 /// Draws `t` of the staged scene from `eye`, its smokes averaged over the jittered frames a still view takes.
 fn draw(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32) {
-    draw_with(s, eye, t, material_seconds, nades_render::smoke::ACCUMULATE);
+    draw_with(s, eye, t, material_seconds, nades_render::smoke::ACCUMULATE, None);
 }
 
 /// Draws `t` from `eye`, a smoke averaged over `samples` jittered frames.
-fn draw_with(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32, samples: u32) {
+fn draw_with(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32, samples: u32, lineup_flash: Option<usize>) {
     let size = s.targets.size();
     let frames = if sim::smoking(&s.placed, t) { samples.max(1) } else { 1 };
     for k in 0..frames {
-        let effects = sim::show(&s.gpu, &mut s.map, &s.placed, t, eye, size, k);
+        let effects = sim::show(&s.gpu, &mut s.map, &s.placed, t, eye, size, sim::FrameOptions { accumulated: k, lineup_flash });
         let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene") });
         s.map.render(&s.gpu.queue, &mut encoder, &s.targets, eye, material_seconds, &effects);
         s.gpu.queue.submit([encoder.finish()]);
@@ -279,6 +279,7 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             let elapsed = f64::from(frame) / f64::from(request.fps);
             let t = shot.as_ref().map_or(request.start_seconds + elapsed, |shot| shot.scene_time(elapsed));
             let aiming = shot.as_ref().is_some_and(|shot| shot.crosshair(elapsed));
+            let lineup_flash = shot.as_ref().and_then(|shot| shot.lineup_throw(elapsed));
             let eye = match (&mut shot, request.camera_at(elapsed)) {
                 (Some(shot), _) => views::of(&shot.camera(elapsed, &s.placed, request.start_seconds, s.collider.as_ref())),
                 (None, Some(camera)) => {
@@ -293,9 +294,9 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             // a device's first two draws bloom a little unlike every later one (up to 28 levels in 0.5% of the pixels, S41):
             // the first frame is drawn a few times over before the one kept
             for _ in 0..if frame == 0 { WARM_UP } else { 0 } {
-                draw_with(&mut s, &eye, t, elapsed as f32, samples);
+                draw_with(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
             }
-            draw_with(&mut s, &eye, t, elapsed as f32, samples);
+            draw_with(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
             let slot = frame as usize % AHEAD;
             let (buffer, mapped, _) = &readbacks[slot];
             let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });

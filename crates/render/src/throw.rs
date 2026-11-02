@@ -123,6 +123,52 @@ impl Meshes {
         }
     }
 
+    fn flash_star(&mut self, outline: &mut Meshes, centre: Vec3, radius: f32) {
+        let phi = (1.0 + 5.0_f32.sqrt()) * 0.5;
+        let directions = [
+            Vec3::new(-1.0, phi, 0.0), Vec3::new(1.0, phi, 0.0), Vec3::new(-1.0, -phi, 0.0), Vec3::new(1.0, -phi, 0.0),
+            Vec3::new(0.0, -1.0, phi), Vec3::new(0.0, 1.0, phi), Vec3::new(0.0, -1.0, -phi), Vec3::new(0.0, 1.0, -phi),
+            Vec3::new(phi, 0.0, -1.0), Vec3::new(phi, 0.0, 1.0), Vec3::new(-phi, 0.0, -1.0), Vec3::new(-phi, 0.0, 1.0),
+        ].map(Vec3::normalize);
+        let faces = [
+            [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+            [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+            [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+            [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        ];
+        const STEPS: usize = 24;
+        for face in faces {
+            let [a, b, c] = face.map(|i| directions[i]);
+            let point = |i: usize, j: usize| {
+                let u = i as f32 / STEPS as f32;
+                let v = j as f32 / STEPS as f32;
+                let w = 1.0 - u - v;
+                let direction = (a * w + b * u + c * v).normalize();
+                let peak = w.max(u).max(v);
+                direction * (0.46 + 0.54 * peak.powi(4))
+            };
+            for i in 0..STEPS {
+                for j in 0..STEPS - i {
+                    let triangles = [[point(i, j), point(i + 1, j), point(i, j + 1)], [point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)]];
+                    let count = if i + j + 1 < STEPS { 2 } else { 1 };
+                    for mut points in triangles.into_iter().take(count) {
+                        let mut normal = (points[1] - points[0]).cross(points[2] - points[0]).normalize();
+                        if normal.dot(points[0] + points[1] + points[2]) < 0.0 {
+                            points.swap(1, 2);
+                            normal = -normal;
+                        }
+                        for point in points {
+                            let smooth_normal = point.normalize();
+                            let shade = 0.75 + 0.25 * smooth_normal.dot(Vec3::new(0.3, -0.5, 0.8).normalize()).max(0.0);
+                            self.vertices.push(Vertex { position: (centre + point * radius).into(), normal: smooth_normal.into(), color: [shade, shade * 0.82, 0.025, 1.0], params: [0.0, 0.0] });
+                        }
+                        outline.push(points.map(|p| centre + p * radius * 1.09), [normal; 3], [0.11, 0.028, 0.0, 1.0], [0.0, 0.0]);
+                    }
+                }
+            }
+        }
+    }
+
     fn sphere(&mut self, centre: Vec3, radius: f32, color: [f32; 4], params: [f32; 2]) {
         self.ellipsoid(centre, radius, 0.0, Mat4::IDENTITY, color, params);
     }
@@ -414,6 +460,7 @@ pub struct ThrowLayer {
     group_layout: wgpu::BindGroupLayout,
     depth_layout: wgpu::BindGroupLayout,
     mesh_opaque: wgpu::RenderPipeline,
+    mesh_outline: wgpu::RenderPipeline,
     mesh_tube: wgpu::RenderPipeline,
     mesh_overlay: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
@@ -435,6 +482,7 @@ pub struct ThrowLayer {
     arcs: Option<Arcs>,
     /// What moves, rewritten for each moment: the grenade's mesh, the bursts, the sprites, the patches.
     moving: Option<(wgpu::Buffer, u32)>,
+    outlines: Option<(wgpu::Buffer, u32)>,
     glows: Option<(wgpu::Buffer, u32)>,
     sprites: Option<(wgpu::Buffer, u32)>,
     patches: Option<(wgpu::Buffer, u32)>,
@@ -553,6 +601,7 @@ impl ThrowLayer {
         ];
         let model = pipeline("grenade models", &model_pipeline_layout, "model_vertex", "model", &model_buffers, None, (true, GreaterEqual), None);
         let mesh_opaque = pipeline("throw meshes", &layout, "mesh_vertex", "mesh", &mesh_buffers, None, (true, GreaterEqual), Some(wgpu::Face::Back));
+        let mesh_outline = pipeline("flash outline", &layout, "mesh_vertex", "mesh", &mesh_buffers, None, (true, GreaterEqual), Some(wgpu::Face::Front));
         let mesh_tube = pipeline("throw tube", &layout, "mesh_vertex", "mesh", &mesh_buffers, Some(over), (false, GreaterEqual), Some(wgpu::Face::Back));
         let mesh_overlay = pipeline("throw overlay", &layout, "mesh_vertex", "mesh", &mesh_buffers, Some(over), (false, Always), Some(wgpu::Face::Back));
         let glow = pipeline("throw glow", &layout, "glow_vertex", "glow", &glow_buffers, Some(add), (false, GreaterEqual), None);
@@ -579,6 +628,7 @@ impl ThrowLayer {
             group_layout,
             depth_layout,
             mesh_opaque,
+            mesh_outline,
             mesh_tube,
             mesh_overlay,
             glow,
@@ -596,6 +646,7 @@ impl ThrowLayer {
             model_ranges: Vec::new(),
             arcs: None,
             moving: None,
+            outlines: None,
             glows: None,
             sprites: None,
             patches: None,
@@ -748,6 +799,7 @@ impl ThrowLayer {
     pub fn set_moment(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, moment: &[(&Stage, f64)], view: &View, size: (u32, u32)) {
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&self.uniform(0.0, view, size, Some(FireKind::Molotov))));
         let mut moving = Meshes::default();
+        let mut outlines = Meshes::default();
         let mut instances: Vec<(usize, ModelInstance)> = Vec::new();
         let mut glows = Vec::new();
         let (mut molotov, mut incendiary, mut patches) = (Vec::new(), Vec::new(), Vec::new());
@@ -766,9 +818,12 @@ impl ThrowLayer {
             if let Some(burst) = stage.burst {
                 let on = burst.on(t) as f32;
                 if on > 0.0 {
-                    // a pop: bright for a few frames, then gone (the light it lends the map lasts the quarter second)
-                    let (size, color) = if burst.flash { (150.0, [60.0, 60.0, 66.0]) } else { (190.0, [30.0, 12.0, 3.5]) };
-                    glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, size], color: [color[0], color[1], color[2], on.powi(3)] });
+                    if burst.flash {
+                        let growth = (t as f32 / 0.04).clamp(0.0, 1.0);
+                        moving.flash_star(&mut outlines, v3(burst.at), 65.0 * growth * on.sqrt());
+                    } else {
+                        glows.push(GlowInstance { centre: [burst.at.x as f32, burst.at.y as f32, burst.at.z as f32, 190.0], color: [30.0, 12.0, 3.5, on.powi(3)] });
+                    }
                 }
             }
             if let Some(f) = &stage.fire {
@@ -781,6 +836,7 @@ impl ThrowLayer {
             }
         }
         self.moving = upload(device, queue, self.moving.take(), "grenades", &moving.vertices);
+        self.outlines = upload(device, queue, self.outlines.take(), "flash outlines", &outlines.vertices);
         instances.sort_by_key(|(k, _)| *k);
         self.model_ranges = Vec::new();
         for (i, (k, _)) in instances.iter().enumerate() {
@@ -828,6 +884,11 @@ impl ThrowLayer {
                     pass.draw_indexed(0..*count, 0, range.clone());
                 }
             }
+        }
+        if let Some((buffer, count)) = self.outlines.as_ref().filter(|(_, n)| *n > 0) {
+            pass.set_pipeline(&self.mesh_outline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..*count, 0..1);
         }
         if let Some((buffer, count)) = self.moving.as_ref().filter(|(_, n)| *n > 0) {
             pass.set_pipeline(&self.mesh_opaque);
