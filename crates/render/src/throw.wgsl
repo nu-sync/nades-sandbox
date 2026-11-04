@@ -172,13 +172,13 @@ fn glow(in: GlowOut) -> @location(0) vec4<f32> {
 struct SpriteIn {
     @builtin(vertex_index) corner: u32,
     @location(0) pos: vec4<f32>,
-    // half-width, half-height, roll, seed
+    // radius, roll, seed
     @location(1) shape: vec4<f32>,
     // alpha, age, the gradient's row, what it is (0 a flame, 1 steam, 2 a fleck)
     @location(2) look: vec4<f32>,
     // linear colour × overbright, and whether it covers
     @location(3) colour: vec4<f32>,
-    // level, desaturation
+    // level, desaturation, the gradient's share of a texel's colour
     @location(4) tone: vec4<f32>,
     // the flipbook's slot (−1 none), its sequence's first frame and count, the frame-rate jitter
     @location(5) book: vec4<f32>,
@@ -190,7 +190,7 @@ struct SpriteOut {
     @location(1) uv: vec2<f32>,
     @location(2) look: vec4<f32>,
     @location(3) colour: vec4<f32>,
-    @location(4) tone: vec2<f32>,
+    @location(4) tone: vec3<f32>,
     @location(5) seed: f32,
     @location(6) distance: f32,
     @location(7) book_uv: vec2<f32>,
@@ -207,28 +207,23 @@ fn sprite_vertex(in: SpriteIn) -> SpriteOut {
     let y = normalize(mix(vec2<f32>(0.0, 1.0), up.xy, smoothstep(0.05, 0.3, level)) + vec2<f32>(0.0, 1e-5));
     let x = vec2<f32>(y.y, -y.x);
     let radius = in.shape.x;
-    // an ellipsoid of this half-width and half-height, seen from this elevation: flat from the side, round from above
-    let tall = sqrt(in.shape.y * in.shape.y * level * level + radius * radius * (1.0 - level * level));
-    view = vec4<f32>(view.xy + x * position.x * radius + y * position.y * tall, view.zw);
+    view = vec4<f32>(view.xy + x * position.x * radius + y * position.y * radius, view.zw);
     var out: SpriteOut;
     out.clip = frame.projection * view;
-    let c = cos(in.shape.z);
-    let s = sin(in.shape.z);
+    let c = cos(in.shape.y);
+    let s = sin(in.shape.y);
     let roll = mat2x2<f32>(vec2<f32>(c, s), vec2<f32>(-s, c));
-    // the noise keeps its grain however flat the sprite is
-    out.uv = roll * vec2<f32>(position.x, position.y * tall / radius) * clamp(radius / 30.0, 0.5, 2.0);
+    out.uv = roll * position * clamp(radius / 30.0, 0.5, 2.0);
     out.quad = position;
-    out.seed = in.shape.w;
+    out.seed = in.shape.z;
     out.distance = -view.z;
     // CS2 fades a sprite as it grows from 45% to 57.5% of the screen
     let screen = radius * frame.projection[1][1] / max(-view.z, 1.0);
     out.look = vec4<f32>(in.look.x * (1.0 - smoothstep(0.45, 0.575, screen)), in.look.yzw);
     out.colour = in.colour;
-    out.tone = in.tone.xy;
-    // the flipbook: the frames either side of where its life is, and how far between them. The flames fill about the
-    // middle of their frames (x 0.15–0.85, y 0.1–0.85 up from the bottom): that box is stretched over the sprite
-    let r = roll * position;
-    out.book_uv = vec2<f32>(0.15, 0.1) + (r * 0.5 + 0.5) * vec2<f32>(0.7, 0.75);
+    out.tone = in.tone.xyz;
+    // the flipbook: the frames either side of where its life is, and how far between them
+    out.book_uv = roll * position * 0.5 + 0.5;
     let f = clamp(in.look.y * in.book.w, 0.0, 1.0) * max(in.book.z - 1.0, 0.0);
     let first = floor(f);
     out.book_frame = vec4<f32>(select(-1.0, in.book.x, frame.flip.x > 0.5), in.book.y + first, in.book.y + min(first + 1.0, in.book.z - 1.0), f - first);
@@ -285,10 +280,10 @@ fn sprite(in: SpriteOut) -> @location(0) vec4<f32> {
             grid = frame.grid2.xy;
         }
         let t = mix(cell(slot, grid, in.book_frame.y, in.book_uv, dbook), cell(slot, grid, in.book_frame.z, in.book_uv, dbook), in.book_frame.w);
-        // the texel's brightness picks the gradient's colour, half and half with its own (flTextureBlend 0.5)
+        // the texel's brightness picks the gradient's colour, mixed with its own (flTextureBlend)
         let level = clamp(max(t.r, max(t.g, t.b)) * in.tone.x, 0.0, 1.0);
         let own = pow(t.rgb, vec3<f32>(2.2));
-        colour = mix(own, gradient_at(level, in.look.z), 0.5);
+        colour = mix(own, gradient_at(level, in.look.z), in.tone.z);
         colour = mix(colour, vec3<f32>(dot(colour, vec3<f32>(0.2126, 0.7152, 0.0722))), in.tone.y);
         // a texel covers what is behind it only as far as it is bright
         a = t.a;

@@ -240,8 +240,8 @@ pub fn build_stage(s: Simulated) -> Stage {
             let kind = if s.grenade == Grenade::Incendiary { FireKind::Incendiary } else { FireKind::Molotov };
             let points: Vec<DVec3> = s.flames.iter().map(|f| DVec3::from_array(f.pos)).collect();
             if let Some(f) = build_fire(s.flames, kind) {
-                // the fire is a carpet a foot deep: a result shot looks at the flame nearest the fire's middle, since
-                // the middle of a fire that ran down a floor is inside a wall
+                // a result shot looks at the flame nearest the fire's middle, since the middle of a fire that ran down a
+                // floor is inside a wall
                 let centre = DVec3::from_array(f.centre);
                 let middle = points.iter().copied().min_by(|a, b| centre.distance_squared(*a).total_cmp(&centre.distance_squared(*b))).unwrap_or(centre);
                 focus = middle + DVec3::new(0.0, 0.0, 12.0);
