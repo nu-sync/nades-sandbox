@@ -1641,3 +1641,14 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   throws and other camera moves retain their normal timing. The held symbol communicates the burst's location, not a
   claim that the flash itself lasts for the orbit.
 - **Evidence:** a Dust II Long flash rendered over MCP at 1080p60 shows the marker at multiple bearings in the turn.
+
+## S45 · A fire stands up: round flames, lifted as CS2's systems lift them
+
+- **Decision:** a fire's flames are round billboards, no longer ellipsoids squashed to a 5–21 unit carpet (show-me-the-nades' D24 and D28). This replaces the user's estimate those decisions rested on with the definitions and in-game shots. `CARPET`, `PEAK` and the heaps are gone: the fire is tallest at its heart because the definitions make the flames biggest there.
+- **From the definitions** (`particles/inferno_fx/molotov_*`):
+  - Flames rise by each system's `C_OP_BasicMovement` gravity (fill 35, lick 75, outline 20 units/s²); the pillar starts 16 units up and leaves at up to 15 or 20 units/s.
+  - The flipbook fills the whole sprite; the old stretched box was for the squash.
+  - The outline's radius is 20–30 units: the old 0.3 scale is gone. Its colour is the gradient alone (no `flTextureBlend`), which is what makes it purple; the other layers keep 0.5.
+  - The pillar plays `fire_small_sim_b`, as `child_flame01a` does. `child_flame03a`'s `fire_gas_batch` is not in the effects pack, so it plays the same flipbook.
+- **Fitted to the user's four in-game shots, not read from the files:** gravity alone lifts the fill and lick, because the velocities' direction depends on the `fire_core` snapshot's normals, which the game builds at run time and the files do not hold; at 40 units/s straight up the fire would stand far taller than the shots. The overbrights are lower than the definitions' (fill 2.2, lick 1.2, pillar 1.8, incendiary fill 1.5) because this renderer has no bloom pass or the game's tone mapping. The fill has 11 slots a flame, the outline 3. The outline's level (0.66, incendiary 0.7) and its fade-in over 0.3–1.3 s after its flame catches are judged by eye.
+- **Not compared:** the jumpthrow.pro video the user pointed at: Cloudflare refuses a headless browser and no in-app browser was available. No in-game reference from the same camera and time exists yet, so this is an approximation.

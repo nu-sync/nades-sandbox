@@ -7,7 +7,8 @@
 //! burning point with dimmer licks among them, flames along the fire's outline whose faint edges run through blue and
 //! purple, a pillar of flame where the grenade broke, a fireball when the bottle breaks, a glowing film on the ground
 //! and a scorch, and when it goes out, glowing flecks and thin steam. Lifetimes, sizes and colours are the
-//! definitions' own, in seconds and Hammer units.
+//! definitions' own, in seconds and Hammer units. Every flame is a round billboard that its system lifts off the
+//! ground, so the fire stands tallest at its heart, where the definitions make the flames biggest (S45).
 //!
 //! Every particle is a pure function of time: an emitter's slots each emit once per period at their own phase, and a
 //! particle's random draws hash its emitter, slot and cycle. Scrubbing the time shows the same fire at the same moment,
@@ -18,7 +19,7 @@ use std::f64::consts::PI;
 #[expect(clippy::approx_constant, reason = "Preserve the web fire.ts ember phase exactly.")]
 const EMBER_PHASE: f64 = 6.28;
 
-use crate::camera::{hypot2, hypot3};
+use crate::camera::hypot3;
 
 pub type V3 = [f64; 3];
 
@@ -54,12 +55,9 @@ pub enum Layer {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sprite {
     pub layer: Layer,
-    /// The ellipsoid's centre.
+    /// Its centre.
     pub pos: V3,
-    /// Its half-width.
     pub radius: f64,
-    /// Its half-height: a flame reaches about 0.75 of it above its centre.
-    pub height: f64,
     pub rotation: f64,
     pub alpha: f64,
     /// 0 at birth, 1 at death: it plays the sprite's flipbook.
@@ -88,15 +86,6 @@ struct Edge {
     end: f64,
 }
 
-/// A heap within the fire: its middle on the ground, how wide, how tall (of PEAK), and when it breathes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Peak {
-    at: V3,
-    radius: f64,
-    strength: f64,
-    phase: f64,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fire {
     pub kind: FireKind,
@@ -107,30 +96,27 @@ pub struct Fire {
     pub end: f64,
     edge: Vec<Edge>,
     pub centre: V3,
-    /// How far from the centre the fire's fill reaches, along the ground.
-    reach: f64,
-    peaks: Vec<Peak>,
 }
 
 /// Everything still burning fades out this fast once the fire goes out.
 const END_CAP: f64 = 0.25;
 /// Flecks and steam are shown for this long after the fire; the scrubber runs this far past it.
 pub const AFTERMATH: f64 = 2.5;
-/// When the break's fireball has gone and the fire has settled onto the ground.
-const SETTLED: f64 = 0.7;
 const FILL_SPREAD: f64 = 24.0;
+/// What lifts each system's flames off the ground, units a second squared (the definitions' `C_OP_BasicMovement`).
+const FILL_LIFT: f64 = 35.0;
+const LICK_LIFT: f64 = 75.0;
+const OUTLINE_LIFT: f64 = 20.0;
 const EDGE_RADIUS: f64 = 38.0;
 const EDGE_POINTS: usize = 14;
-const SLOTS_FILL: usize = 7;
+const SLOTS_FILL: usize = 11;
 const SLOTS_LICK: usize = 4;
-const SLOTS_OUTLINE: usize = 2;
+const SLOTS_OUTLINE: usize = 3;
 const SLOTS_PILLAR: usize = 10;
 const FIREBALLS: usize = 7;
 const FLASHES: usize = 4;
 const EMBERS: usize = 4;
 const STEAM: usize = 2;
-const TOP: f64 = 0.75;
-const FOOT: f64 = 0.35;
 const CREAM: V3 = [244.0 / 255.0, 237.0 / 255.0, 208.0 / 255.0];
 const WHITE: V3 = [1.0, 1.0, 1.0];
 // emitter ids keep every system's random draws apart
@@ -140,12 +126,6 @@ const OUTLINE: i64 = 3_000;
 const PILLAR: i64 = 50_000;
 const BURST: i64 = 60_000;
 const AFTER: i64 = 70_000;
-const PEAKS: i64 = 80_000;
-/// How far up a flame of the carpet reaches, in units off the ground, as it is born and as it dies.
-pub const CARPET: [f64; 2] = [5.0, 12.0];
-/// How much higher than CARPET the tongues reach where the fire heaps highest.
-pub const PEAK: f64 = 9.0;
-
 fn burns(kind: FireKind) -> f64 {
     match kind {
         FireKind::Molotov => 7.031_25,
@@ -181,45 +161,13 @@ pub fn build_fire(flames: Vec<Flame>, kind: FireKind) -> Option<Fire> {
     }
     let n = flames.len() as f64;
     let centre = flames.iter().fold([0.0; 3], |c, f| [c[0] + f.pos[0] / n, c[1] + f.pos[1] / n, c[2] + f.pos[2] / n]);
-    let reach = flames.iter().map(|f| hypot2(f.pos[0] - centre[0], f.pos[1] - centre[1])).fold(f64::NEG_INFINITY, f64::max) + FILL_SPREAD;
-    // the fire's own draws: the same fire heaps the same way every time it is shown
-    let seed = js_round(centre[0]) * 31.0 + js_round(centre[1]);
-    let draw = |k: i64, c: i64| hash(PEAKS, k, seed as i64, c);
-    let count = 2 + (draw(0, 0) * 3.0).floor() as usize;
-    let peaks = (0..count)
-        .map(|k| {
-            let k = k as i64;
-            let f = &flames[((draw(k + 1, 1) * n).floor() as usize) % flames.len()];
-            let (u, v) = basis(f.normal);
-            Peak { at: on_disc(f.pos, u, v, FILL_SPREAD * draw(k + 1, 2), draw(k + 1, 3)), radius: lerp(35.0, 70.0, draw(k + 1, 4)), strength: lerp(0.55, 0.95, draw(k + 1, 5)), phase: draw(k + 1, 6) }
-        })
-        .collect();
     let end = flames.iter().map(|f| f.end).fold(f64::NEG_INFINITY, f64::max);
-    Some(Fire { kind, flames, origin, end, edge, centre, reach, peaks })
-}
-
-/// A carpet flame's top at normalized age n: it climbs through CARPET as it burns, a little higher or lower each.
-fn climb(n: f64, r: f64) -> f64 {
-    lerp(CARPET[0], CARPET[1], n) * lerp(0.94, 1.06, r)
+    Some(Fire { kind, flames, origin, end, edge, centre })
 }
 
 impl Fire {
     fn origin(&self) -> &Flame {
         &self.flames[self.origin]
-    }
-
-    /// What a tongue standing on `ground`, born at `born`, adds to its climb: up to PEAK where the fire heaps highest.
-    fn rise(&self, ground: V3, born: f64, n: f64, spike: f64) -> f64 {
-        let heap = |at: V3, radius: f64| {
-            let out = clamp01(hypot2(ground[0] - at[0], ground[1] - at[1]) / radius);
-            (1.0 - out * out).powf(1.5)
-        };
-        let mut shape = 0.75 * heap(self.centre, self.reach);
-        for p in &self.peaks {
-            let breath = lerp(0.5, 1.0, 0.5 + 0.5 * (2.0 * PI * (born / lerp(2.0, 3.0, p.phase) + p.phase)).sin());
-            shape += p.strength * breath * heap(p.at, p.radius);
-        }
-        PEAK * shape.min(1.0) * lerp(0.3, 1.0, spike.powf(1.8)) * lerp(0.35, 1.0, smoothstep(0.0, 0.7, n))
     }
 
     /// The most sprites alive at once, which the renderer sizes its buffers by.
@@ -271,13 +219,10 @@ impl Fire {
             }
             let n = age / life;
             let ground = on_disc(f.pos, u, v, FILL_SPREAD * r(2).sqrt(), r(3));
-            let up = self.rise(ground, t - age, n, r(10));
-            let (pos, height) = standing(ground, (climb(n, r(9)) + up) * cap);
             out.push(Sprite {
                 layer: Layer::Fill,
-                pos,
-                height,
-                radius: (lerp(36.0, 55.0, r(4)) * near).clamp(10.0, 55.0) * 0.75 * lerp(0.6, 1.2, smoothstep(0.0, 1.0, n)) * lerp(0.25, 1.0, cap) * slim(up),
+                pos: lifted(ground, lerp(-1.0, 4.0, r(9)) + 0.5 * FILL_LIFT * age * age * cap),
+                radius: (lerp(36.0, 55.0, r(4)) * near).clamp(10.0, 55.0) * 0.75 * lerp(0.6, 1.2, smoothstep(0.0, 1.0, n)) * lerp(0.25, 1.0, cap),
                 rotation: lerp(-60.0, 90.0, r(5)) * (PI / 180.0),
                 alpha: lerp(0.39, 0.59, r(6)) * clamp01(age / 0.12) * clamp01((life - age) / 0.5) * cap,
                 age: n,
@@ -300,13 +245,10 @@ impl Fire {
             }
             let n = age / life;
             let ground = on_disc(f.pos, u, v, FILL_SPREAD * r(2).sqrt(), r(3));
-            let up = self.rise(ground, t - age, n, r(10));
-            let (pos, height) = standing(ground, (climb(n, r(9)) + up) * late * cap);
             out.push(Sprite {
                 layer: Layer::Lick,
-                pos,
-                height,
-                radius: (lerp(25.0, 55.0, r(4)) * near).clamp(20.0, 65.0) * lerp(0.5, 1.0, n.powf(0.75)) * late * lerp(0.25, 1.0, cap) * slim(up),
+                pos: lifted(ground, lerp(-6.0, 4.0, r(9)) + 0.5 * LICK_LIFT * age * age * late * cap),
+                radius: (lerp(25.0, 55.0, r(4)) * near).clamp(20.0, 65.0) * lerp(0.5, 1.0, n.powf(0.75)) * late * lerp(0.25, 1.0, cap),
                 rotation: lerp(-60.0, 90.0, r(5)) * (PI / 180.0),
                 alpha: clamp01(age / 0.1) * (1.0 - smoothstep(0.85, 1.0, n)) * cap,
                 age: n,
@@ -335,13 +277,11 @@ impl Fire {
                 let n = age / life;
                 let grow = (p.grow)(n);
                 let ground = on_disc(o.pos, u, v, (p.disc)(at) * r(2).sqrt(), r(3));
-                let settled = climb(n, r(5)) + self.rise(ground, t - age, n, r(10));
-                let (pos, height) = standing(ground, pillar_top(t - o.start, r(5), settled) * cap);
+                let radius = (p.size)(at) * lerp(0.35, 1.0, r(4)) * grow * lerp(0.25, 1.0, cap);
                 out.push(Sprite {
                     layer: Layer::Pillar,
-                    pos,
-                    height,
-                    radius: (p.size)(at) * lerp(0.35, 1.0, r(4)) * grow * if t - o.start < SETTLED { 1.0 } else { 0.7 } * lerp(0.25, 1.0, cap),
+                    pos: lifted(ground, 16.0 + 0.1 * radius + p.speed * r(5) * age),
+                    radius,
                     rotation: lerp(-45.0, 45.0, r(6)) * (PI / 180.0),
                     alpha: lerp(p.alpha[0], p.alpha[1], r(7)) * (p.fade)(n) * gone * cap,
                     age: n,
@@ -371,7 +311,6 @@ impl Fire {
                 layer: Layer::Fireball,
                 pos: add(o.pos, scale(dir, 6.0 + lerp(45.0, 65.0, r(4)) * age)),
                 radius,
-                height: radius,
                 rotation: 2.0 * PI * r(6),
                 alpha: 1.0 - smoothstep(0.7, 1.0, n),
                 age: n,
@@ -392,7 +331,6 @@ impl Fire {
                 layer: Layer::Flash,
                 pos: [o.pos[0] + lerp(-8.0, 8.0, r(2)), o.pos[1] + lerp(-8.0, 8.0, r(3)), o.pos[2] + 6.0 + 40.0 * age],
                 radius,
-                height: radius,
                 rotation: lerp(-45.0, 45.0, r(5)) * (PI / 180.0),
                 alpha: 1.0 - smoothstep(0.5, 1.0, n),
                 age: n,
@@ -422,7 +360,6 @@ impl Fire {
                     layer: Layer::Ember,
                     pos: add(on_disc(f.pos, u, v, 34.0 * r(2).sqrt(), r(3)), scale(f.normal, 1.5)),
                     radius,
-                    height: radius,
                     rotation: 0.0,
                     alpha: (1.0 - since / life).powf(1.5) * (0.6 + 0.4 * (t * lerp(6.0, 13.0, r(5)) + EMBER_PHASE * r(6)).sin()),
                     age: since / life,
@@ -443,7 +380,6 @@ impl Fire {
                     layer: Layer::Steam,
                     pos: [at[0] + 6.0 * since * lerp(-1.0, 1.0, r(4)), at[1] + 6.0 * since * lerp(-1.0, 1.0, r(5)), at[2] + 10.0 + 5.0 * since],
                     radius,
-                    height: radius * 1.2,
                     rotation: 2.0 * PI * r(7),
                     alpha: 0.32 * smoothstep(0.0, 0.12, n) * (1.0 - n).powf(1.3),
                     age: n,
@@ -511,7 +447,8 @@ impl Fire {
     }
 }
 
-/// outline: narrow flames along the edge, black as they appear and orange as they die, blended over the scene.
+/// outline: flames along the edge, black as they appear and orange as they die, blended over the scene. An edge shows
+/// once the flame behind it has grown in: the flipbook's first frames are nearly empty.
 fn outline(e: &Edge, i: i64, t: f64, cap: f64, out: &mut Vec<Sprite>) {
     emitted(OUTLINE + i, e.start, e.end, SLOTS_OUTLINE, 1.2, t, |slot, cycle, age, _| {
         let r = |c: i64| hash(OUTLINE + i, slot, cycle, c);
@@ -521,14 +458,12 @@ fn outline(e: &Edge, i: i64, t: f64, cap: f64, out: &mut Vec<Sprite>) {
         }
         let n = age / life;
         let ground = [e.pos[0] + lerp(-6.0, 6.0, r(2)), e.pos[1] + lerp(-6.0, 6.0, r(3)), e.pos[2]];
-        let (pos, height) = standing(ground, climb(n, r(8)) * cap);
         out.push(Sprite {
             layer: Layer::Outline,
-            pos,
-            height,
-            radius: lerp(20.0, 30.0, r(4)) * lerp(0.5, 1.0, n.powf(0.85)) * 0.3 * lerp(0.25, 1.0, cap),
+            pos: lifted(ground, 7.0 + 0.5 * OUTLINE_LIFT * age * age * cap),
+            radius: lerp(20.0, 30.0, r(4)) * lerp(0.5, 1.0, n.powf(0.85)) * lerp(0.25, 1.0, cap),
             rotation: lerp(-25.0, 25.0, r(5)) * (PI / 180.0),
-            alpha: (2.0 * clamp01(age / 0.08) * (1.0 - n).powf(0.6)).min(1.0) * clamp01(n / 0.1) * cap,
+            alpha: (2.0 * clamp01(age / 0.08) * (1.0 - n).powf(0.6)).min(1.0) * clamp01(n / 0.1) * smoothstep(0.3, 1.3, t - e.start) * cap,
             age: n,
             seed: r(7),
             tint: if n < 0.6 { WHITE } else { mix(WHITE, [1.0, 140.0 / 255.0, 0.0], (n - 0.6) / 0.4) },
@@ -538,6 +473,8 @@ fn outline(e: &Edge, i: i64, t: f64, cap: f64, out: &mut Vec<Sprite>) {
 
 struct PillarSystem {
     id: i64,
+    /// Units a second it leaves the ground at, at most.
+    speed: f64,
     rate: [f64; 2],
     life: fn(f64) -> f64,
     disc: fn(f64) -> f64,
@@ -552,6 +489,7 @@ struct PillarSystem {
 const PILLARS: [PillarSystem; 2] = [
     PillarSystem {
         id: PILLAR,
+        speed: 15.0,
         rate: [10.0, 5.0],
         life: |at| lerp(0.65, 1.5, clamp01(at / 0.5)),
         disc: |at| lerp(8.0, 50.0, clamp01((at - 3.0) / 4.0)),
@@ -563,6 +501,7 @@ const PILLARS: [PillarSystem; 2] = [
     },
     PillarSystem {
         id: PILLAR + 100,
+        speed: 20.0,
         rate: [10.0, 2.0],
         life: |at| lerp(0.75, 1.5, clamp01(at)),
         disc: |at| lerp(5.0, 50.0, clamp01((at - 2.0) / 6.0)),
@@ -574,21 +513,9 @@ const PILLARS: [PillarSystem; 2] = [
     },
 ];
 
-/// How far up a pillar flame reaches, t after the break: 36–50 units as the bottle breaks, down into the carpet by the
-/// time the fire settles.
-fn pillar_top(t: f64, r: f64, settled: f64) -> f64 {
-    lerp(lerp(36.0, 50.0, r), settled, smoothstep(0.0, SETTLED, t))
-}
-
-/// How much narrower a tongue is for what `rise` added to it: up to a third at the full PEAK.
-fn slim(up: f64) -> f64 {
-    1.0 - 0.35 * (up / PEAK)
-}
-
-/// A flame standing on `ground`, reaching `top` above it: its centre and half-height.
-fn standing(ground: V3, top: f64) -> (V3, f64) {
-    let height = top / (FOOT + TOP);
-    ([ground[0], ground[1], ground[2] + FOOT * height], height)
+/// `ground` raised `up` units.
+fn lifted(ground: V3, up: f64) -> V3 {
+    [ground[0], ground[1], ground[2] + up]
 }
 
 /// Calls `visit` for each particle a continuous emitter has alive at t, by slot and cycle. Every slot also fires once
@@ -800,8 +727,9 @@ pub fn fire_noise() -> Vec<u8> {
 }
 
 /// How a layer draws: its gradient, overbright, whether it covers what is behind (1) or only adds light (0), what it
-/// is (0 a flame, 1 steam, 2 a fleck), how far up its gradient its texels reach, its desaturation, and the flipbook it
-/// plays (by slot in the fire's three: fill, lick, outline; None for the stand-in alone).
+/// is (0 a flame, 1 steam, 2 a fleck), how far up its gradient its texels reach, its desaturation, how much of a
+/// texel's colour the gradient replaces (flTextureBlend), and the flipbook it plays (by slot in the fire's three: fill,
+/// lick, outline; None for the stand-in alone).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
     pub gradient: Gradient,
@@ -810,23 +738,25 @@ pub struct Style {
     pub kind: f64,
     pub level: f64,
     pub desaturate: f64,
+    pub blend: f64,
     pub book: Option<usize>,
 }
 
 pub fn style(kind: FireKind, layer: Layer) -> Style {
     let incendiary = kind == FireKind::Incendiary;
     let fill = if incendiary {
-        Style { gradient: Gradient::FillIncendiary, overbright: 3.0, cover: 0.0, kind: 0.0, level: 1.2, desaturate: 0.25, book: Some(0) }
+        Style { gradient: Gradient::FillIncendiary, overbright: 1.5, cover: 0.0, kind: 0.0, level: 1.0, desaturate: 0.25, blend: 0.5, book: Some(0) }
     } else {
-        Style { gradient: Gradient::Fill, overbright: 4.0, cover: 0.0, kind: 0.0, level: 1.0, desaturate: 0.1, book: Some(0) }
+        Style { gradient: Gradient::Fill, overbright: 2.2, cover: 0.0, kind: 0.0, level: 1.0, desaturate: 0.15, blend: 0.5, book: Some(0) }
     };
-    let plain = |overbright: f64| Style { gradient: Gradient::Warm, overbright, cover: 0.0, kind: 0.0, level: 1.0, desaturate: 0.0, book: None };
+    let plain = |overbright: f64| Style { gradient: Gradient::Warm, overbright, cover: 0.0, kind: 0.0, level: 1.0, desaturate: 0.0, blend: 1.0, book: None };
     match layer {
         Layer::Fill => fill,
-        Layer::Lick => Style { overbright: 2.0, book: Some(1), ..fill },
-        Layer::Outline if incendiary => Style { gradient: Gradient::OutlineIncendiary, overbright: 1.5, cover: 1.0, kind: 0.0, level: 0.95, desaturate: 0.15, book: Some(2) },
-        Layer::Outline => Style { gradient: Gradient::Outline, overbright: 3.0, cover: 1.0, kind: 0.0, level: 0.92, desaturate: 0.0, book: Some(2) },
-        Layer::Pillar => Style { desaturate: 0.15, ..plain(3.5) },
+        Layer::Lick => Style { overbright: 1.2, book: Some(1), ..fill },
+        Layer::Outline if incendiary => Style { gradient: Gradient::OutlineIncendiary, overbright: 1.5, cover: 1.0, kind: 0.0, level: 0.7, desaturate: 0.15, blend: 1.0, book: Some(2) },
+        Layer::Outline => Style { gradient: Gradient::Outline, overbright: 3.0, cover: 1.0, kind: 0.0, level: 0.66, desaturate: 0.0, blend: 1.0, book: Some(2) },
+        // child_flame01a's flipbook, for both systems of the pillar
+        Layer::Pillar => Style { overbright: 1.8, book: Some(1), ..fill },
         Layer::Fireball => plain(2.5),
         Layer::Flash => plain(2.0),
         Layer::Ember => Style { kind: 2.0, ..plain(4.0) },
@@ -850,13 +780,13 @@ pub struct Instance {
     /// Centre (Hammer units).
     pub pos: [f32; 3],
     pub pad: f32,
-    /// Half-width, half-height, roll, seed.
+    /// Radius, roll, seed, and unused.
     pub shape: [f32; 4],
     /// Alpha, age, the gradient's row, what it is.
     pub look: [f32; 4],
     /// Linear colour times overbright, and whether it covers.
     pub colour: [f32; 4],
-    /// Level, desaturation, and unused.
+    /// Level, desaturation, the gradient's share of a texel's colour, and unused.
     pub tone: [f32; 4],
     /// The flipbook's slot (−1 for none), its sequence's first frame and count, and the frame-rate jitter.
     pub book: [f32; 4],
@@ -883,10 +813,10 @@ pub fn instances(kind: FireKind, sprites: &[Sprite], sequences: Option<&[Vec<(u3
             Instance {
                 pos: s.pos.map(|v| v as f32),
                 pad: 0.0,
-                shape: [s.radius as f32, s.height as f32, s.rotation as f32, s.seed as f32],
+                shape: [s.radius as f32, s.rotation as f32, s.seed as f32, 0.0],
                 look: [s.alpha as f32, s.age as f32, st.gradient.row(), st.kind as f32],
                 colour: [colour[0], colour[1], colour[2], st.cover as f32],
-                tone: [st.level as f32, st.desaturate as f32, 0.0, 0.0],
+                tone: [st.level as f32, st.desaturate as f32, st.blend as f32, 0.0],
                 book,
             }
         })
@@ -924,8 +854,10 @@ mod tests {
         assert!(burning.iter().all(|s| !matches!(s.layer, Layer::Fireball | Layer::Flash | Layer::Ember | Layer::Steam)));
         assert!(burning.iter().filter(|s| s.layer == Layer::Fill).count() > 10);
         assert!(burning.len() <= fire.sprite_bound());
-        // the carpet hugs the ground: no flame of it reaches 30 units up
-        assert!(burning.iter().filter(|s| s.layer != Layer::Pillar).all(|s| s.pos[2] + s.height * TOP < 30.0));
+        // the fill's flames stand off the ground, and the ones near the heart are the biggest
+        let fill = |far: fn(f64) -> bool| burning.iter().filter(|s| s.layer == Layer::Fill && far(s.pos[0])).map(|s| s.radius).fold(0.0, f64::max);
+        assert!(fill(|x| x < 25.0) > fill(|x| x > 75.0), "the heart stands tallest");
+        assert!(burning.iter().filter(|s| s.layer == Layer::Fill).any(|s| s.pos[2] > 10.0));
         // out, then flecks and steam
         let after = fire.sprites_at(8.0);
         assert!(after.iter().all(|s| matches!(s.layer, Layer::Ember | Layer::Steam)) && !after.is_empty());
