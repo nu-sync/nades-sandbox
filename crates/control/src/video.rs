@@ -64,6 +64,10 @@ pub struct VideoRequest {
 /// The size an MP4 keeps under when none is asked for, megabytes.
 pub const DEFAULT_MAX_MEGABYTES: f64 = 25.0;
 
+/// The fewest rows a frame has for the renderer to hand the encoder NV12 (S51): under it FFmpeg's chroma filter, eight
+/// rows deep, treats the frame's edges unlike the renderer's conversion, so such a clip goes as RGBA for FFmpeg to convert.
+pub const NV12_MIN_HEIGHT: u32 = 12;
+
 /// A lineup video's camera checked frame by frame against what the map draws (S36): the chase and the pull-out (the
 /// thrower's view is the lineup's own, and the turn may pass through walls).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

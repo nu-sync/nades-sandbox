@@ -27,12 +27,14 @@ cargo clippy --release --workspace --all-targets -- -D warnings
 ./target/release/nades-sandbox --scene <file.json>          # the simulator on a scene file's map, with its throws
 ./target/release/nades-sandbox --scene <file.json> --time 4 --view orbit --throw 0 --render out.png   # a moment offscreen; what each throw did as JSON
 ./target/release/nades-sandbox --scene <file.json> --report       # what each throw did, no GPU (the MCP's throws_simulate)
+./target/release/nades-sandbox --scene <file.json> --time 14 --size 2880x1800 --bench-offscreen 330   # a scene's frame time, its smoke in view
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
 ./target/release/nades-pack setup de_vertigo                # fetch a map's files from Steam (DepotDownloader), once
 cargo run --release -p nades-packer --example physics_vs_awpy -- de_cache   # the pack's collider against awpy's mesh
 cargo run --release -p nades-packer --example lump_vs_export -- de_cache    # entities, post, sky, skybox against export_map.py's
 cargo run --release -p nades-packer --example effects_vs_web                # the effects against cs2_effects.py's
+cargo run --release -p nades-render --example nv12_vs_ffmpeg                # a video's NV12 from the GPU against FFmpeg's, byte for byte
 cargo run --release -p nades-packer --example pack_diff -- <a.pack> <b.pack>  # what differs between two packs of a map
 python3 bench/startup.py                                    # first frame (median of 9), steady frames, memory, load averages
 uv run bench/realism.py --nades <checkout> --note "what changed"   # every map rendered beside the game's shots and the web view

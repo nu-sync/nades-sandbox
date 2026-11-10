@@ -9,7 +9,8 @@ the timings each job reports (S38).
 - A throwaway launch of each binary first: a newly linked binary's first launch waits while macOS checks it.
 - Each run is a fresh MCP session rendering the lineup once; the load average (`sysctl -n vm.loadavg`) is recorded
   before it. The MP4 and stills are deleted after each run; the JSON beside them is kept.
-- Reported per build, as medians over the runs: the job's wall clock (startup, frames, encoder's tail, total), each
+- Reported per build, as medians over the runs: the tool call's wall clock as the agent waits for it, and with a
+  baseline the difference within each alternated pair; the job's wall clock (startup, frames, encoder's tail, total), each
   frame stage's total, the renderer's and the encoder's CPU seconds, the cores each kept busy over the frames, and
   the renderer's peak footprint.
 
@@ -99,6 +100,8 @@ def summarize(runs: list[dict]) -> dict:
     return {
         "runs": len(runs),
         "frames": runs[0]["frames"],
+        "call_s": med([r["call_seconds"] for r in runs]),
+        "call_range_s": [min(r["call_seconds"] for r in runs), max(r["call_seconds"] for r in runs)],
         "total_s": med([x["total_seconds"] for x in t]),
         "startup_s": med([x["startup_seconds"] for x in t]),
         "frames_s": med([x["frames_seconds"] for x in t]),
@@ -118,7 +121,7 @@ def summarize(runs: list[dict]) -> dict:
 def report(results: dict, args: argparse.Namespace) -> str:
     names = list(results)
     fmt = lambda v, d=2: "—" if v is None else f"{v:.{d}f}"  # noqa: E731
-    rows = [("total, s", "total_s"), ("startup, s", "startup_s"), ("frames, s", "frames_s"), ("encoder's tail, s", "encode_tail_s")]
+    rows = [("the call, as the agent waits for it, s", "call_s"), ("total, s", "total_s"), ("startup, s", "startup_s"), ("frames, s", "frames_s"), ("encoder's tail, s", "encode_tail_s")]
     lines = [f"# Lineup video: {args.map} {args.grenade} ({args.technique}), {args.size} at {args.fps} fps",
              "", f"`{args.lineup}`, {results[names[0]]['frames']} frames, medians of {args.runs} runs each.", "",
              "| | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
@@ -128,6 +131,11 @@ def report(results: dict, args: argparse.Namespace) -> str:
               f"| encoder CPU, s (cores) | " + " | ".join(f"{fmt(results[n]['encoder_cpu_s'], 1)} ({fmt(results[n]['encoder_cores'], 1)})" for n in names) + " |",
               f"| renderer peak footprint, MB | " + " | ".join(fmt(results[n]['renderer_peak_mb'], 0) for n in names) + " |",
               f"| MP4, MB | " + " | ".join(fmt(results[n]['megabytes'], 1) for n in names) + " |", ""]
+    lines += [f"The call's range ({n}): {results[n]['call_range_s'][0]:.2f}–{results[n]['call_range_s'][1]:.2f} s" for n in names]
+    if "pairs" in results.get(names[-1], {}):
+        p = results[names[-1]]["pairs"]
+        lines += ["", f"Run by run, {names[-1]} − {names[0]} (the call): median {p['median_s']:+.2f} s, {p['faster']} of {p['n']} faster; "
+                      + ", ".join(f"{d:+.2f}" for d in p["differences_s"])]
     lines += [f"Load averages ({n}): " + "; ".join(results[n]["loadavg"]) for n in names]
     return "\n".join(lines) + "\n"
 
@@ -163,6 +171,10 @@ def main() -> None:
                 t = run["timings"]
                 print(f"{name} {k + 1}/{args.runs}: {t['total_seconds']:.2f} s (load {run['loadavg']})", flush=True)
     results = {name: summarize(r) for name, r in runs.items()}
+    if args.baseline:
+        # the machine's load moves both builds of a pair alike: the difference within each pair says more than the medians
+        d = [c["call_seconds"] - b["call_seconds"] for b, c in zip(runs["baseline"], runs["candidate"])]
+        results["candidate"]["pairs"] = {"n": len(d), "median_s": statistics.median(d), "faster": sum(x < 0 for x in d), "differences_s": d}
     (out / "results.json").write_text(json.dumps(results, indent=1))
     text = report(results, args)
     (out / "report.md").write_text(text)

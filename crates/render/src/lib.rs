@@ -1,7 +1,7 @@
 //! The renderer: the GPU device, and a pack's map drawn in CS2's look ([`map`]): its materials, its baked light
 //! (irradiance, directional irradiance and sun shadows), the sky and the 3D skybox, fog, then exposure, bloom, the tone
 //! curve and the colour lookup table ([`post`]). Over it, the shown throw: its flight, bursts and fire ([`throw`]) and
-//! its smoke ([`smoke`]). [`view`] holds the camera.
+//! its smoke ([`smoke`]). [`view`] holds the camera; [`yuv`] turns a presented frame into a video encoder's NV12.
 
 pub mod map;
 pub mod memory;
@@ -9,6 +9,7 @@ pub mod post;
 pub mod smoke;
 pub mod throw;
 pub mod view;
+pub mod yuv;
 
 pub use view::View;
 

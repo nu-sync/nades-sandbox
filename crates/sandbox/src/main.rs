@@ -189,10 +189,21 @@ fn run() -> Result<()> {
     assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(request) = &args.video_request {
-        return offscreen::render_video(request, std::env::var_os("NADES_RAW_FRAMES").is_some());
+        // how the frames leave: PNGs, or for an encoder packed RGBA, or the NV12 it would make of that (S51)
+        let format = match std::env::var("NADES_RAW_FRAMES").as_deref() {
+            Ok("nv12") => offscreen::Frames::Nv12,
+            Ok(_) => offscreen::Frames::Rgba,
+            Err(_) => offscreen::Frames::Png,
+        };
+        return offscreen::render_video(request, format);
     }
     if let (true, Some(scene)) = (args.report, &args.scene) {
         return offscreen::simulate(scene);
+    }
+    if let (Some(frames), Some(scene)) = (args.bench_offscreen, &args.scene) {
+        let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
+        let size = args.size.unwrap_or(((WINDOW.0 * EXPECTED_SCALE) as u32, (WINDOW.1 * EXPECTED_SCALE) as u32));
+        return offscreen::bench(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: false, size, out: Path::new("") }, frames, WARM_UP_FRAMES);
     }
     if let (Some(out), Some(scene)) = (&args.render, &args.scene) {
         let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
