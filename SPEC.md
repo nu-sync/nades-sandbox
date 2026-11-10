@@ -319,6 +319,9 @@ panel) has no native counterpart: it exists to work around the browser.
 | Pipelines at start-up | warm: none waited for (macOS's shader cache); ≈360–440 ms on the first launch after a shader change (M2's pipelines, in parallel), and 497–630 ms on the first launch of a binary at a new path or a new app bundle: the cache is the program's | |
 | Peak memory, de_cache | 2.07–2.19 GB footprint (M4; M3 2.07, M2 2.0; M1's 640 MB pack 0.72–0.75 GB): the textures as Metal allocates them 983 MB, the driver's first submission 119 MB and first render pass ≈200 MB, what drawing the map's triangles holds 170–360 MB, the window ≈150 MB; the upload's staging none (S20) | |
 | Pack build | 1.5–3.9 s a map (M2) | |
+| **A lineup video through nades-mcp (S46–S48)** | **5.0 s** the call (median of 7, 4.80–5.23, load 15–20) for the Anubis smoke, 1,276 frames at 1920×1080 and 60 fps; 7.8 s before: startup 0.32, the frames 4.6 (record 1.6, the encoder pushing back 2.8, the GPU's wait 0.07); x264 alone on those frames 3.6–4.0 s: `.runs/video-20261109-150431/` | ≤ 6 s: met |
+| Ten lineup videos (S49) | 49.8 s one after another, 45.6 s two at once: 9 clips' time; x264 uses the cores | ≤ 3 clips' time: not reachable with x264 `faster` |
+| A smoke filling the frame (S50) | 3.3 ms at 2880×1800 with smoke in every pixel (p95 3.7), 3.6 ms with the whole cloud a third of the frame; 2.7 and 2.9 ms without it; at 1440×900 2.5 and 2.7 ms | ≤ 8.3 ms: met |
 
 Timing runs: `nades-sandbox --exit-after-first-frame` prints every stage as JSON. `python3 bench/startup.py` runs the
 first frame, both steady-frame benches and peak memory with the load average beside each, into
@@ -359,7 +362,7 @@ first frame, both steady-frame benches and peak memory with the load average bes
 | Whole-frame brightness: dust2, cache, mirage and nuke read 0.8–2.8 levels brighter than the web view against the game, though closer by blurred \|Δ\| | settled (S42): the in-game hands and watermark, and the web view's errors cancelling; exposure sits at each map's minimum and the top half's surfaces are within 4.3 levels. Left: shade 3–7 levels light on four maps (CS2's ambient occlusion?), the sky +7.6 on mirage and −5.1 on cache. `bench/realism.py` on each look change |
 | Packing needs three outside tools: Source 2 Viewer's CLI, Bun (glTF-Transform) and DepotDownloader | each is a setting with a clear error when missing; `--export` takes a geometry export made elsewhere; reading the meshes from the VPKs directly (§13) would remove the CLI and Bun |
 | With `pak01` mounted, the CLI passes over a file whose archive is missing in silence | `nades-pack setup` finds a map's archives with `pak01` unmounted, where the CLI names what it cannot load (S29) |
-| Smoke at Retina resolution (4× the pixels) | at 1444×1420 a smoke in view costs 1–2 ms a frame (median 5.6–7.1 against 4.9), p95 under 8.9; a smoke filling a 2880×1800 frame is not measured yet: GPU timestamps of the composite at 1× and 2×, and half resolution with a depth-aware upsample if it needs it |
+| Smoke at Retina resolution (4× the pixels) | settled (S50): a smoke in every pixel of a 2880×1800 frame costs 0.55–0.7 ms (the frame 3.3–3.6 ms, p95 3.8); no half-resolution pass needed |
 | The effects' point lights on CS2's baked light: three.js's model (Lambert over π) added to a CS2-style diffuse | `bench/effects.py`: Inferno's flash reaches further up the walls than the web view's (0.21 of the frame against 0.13) |
 | Game updates change the files | packs keyed by game build; `setup` pins the depot's manifest to the one the game folder holds, so a fetch never mixes builds; rebuild on change |
 

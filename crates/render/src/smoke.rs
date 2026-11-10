@@ -230,6 +230,13 @@ impl Composite {
         }
     }
 
+    /// Makes the shown clouds' next pass their `accumulated`-th jittered sample of the same moment.
+    pub fn set_sample(&mut self, accumulated: u32) {
+        for frame in self.slots.iter_mut().filter_map(|s| s.frame.as_mut()) {
+            frame.accumulated = accumulated;
+        }
+    }
+
     /// Whether a cloud shows this frame.
     pub fn any(&self) -> bool {
         self.slots.iter().any(|s| s.frame.is_some())

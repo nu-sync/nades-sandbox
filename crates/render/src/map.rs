@@ -667,12 +667,20 @@ impl Map {
     /// their effects, the composite (with the smoke), the exposure and the bloom, into `targets`. `seconds` animates
     /// the map effects' masks; `effects` says what of the throw this frame draws (its layer holds the rest).
     pub fn render(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, targets: &Targets, view: &View, seconds: f32, effects: &FrameEffects) {
+        self.render_scene(queue, encoder, targets, view, seconds, effects);
+        self.render_composite(queue, encoder, targets, view, effects.accumulated);
+        self.render_post(encoder, targets);
+    }
+
+    /// The passes that do not depend on a smoke's jittered sample: the sky and the 3D skybox, the map and the shown
+    /// throw, their effects, into `targets`' scene colour and depth. A frame that averages several samples of its smoke
+    /// draws these once (S46).
+    pub fn render_scene(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, targets: &Targets, view: &View, seconds: f32, effects: &FrameEffects) {
         let size = targets.size();
         let aspect = size.0 as f32 / size.1 as f32;
         let sky_view = self.placement.map_or(*view, |p| p.view(view));
         queue.write_buffer(&self.map_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(view, aspect, &self.map_light, size, seconds, effects.light.as_ref())));
         queue.write_buffer(&self.sky_frame.0, 0, bytemuck::bytes_of(&self.frame_uniform(&sky_view, aspect, &self.sky_light, size, seconds, None)));
-        self.composite.prepare(queue, view, size);
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("sky"),
@@ -700,7 +708,17 @@ impl Map {
             self.throw.draw_scene(&mut pass);
         }
         self.effects_pass(encoder, targets, &self.map_frame.1, &self.map_effects, true);
-        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if self.composite.any() { effects.accumulated } else { 0 }, view);
+    }
+
+    /// The composite: the scene [`Map::render_scene`] left, through the smoke's `accumulated`-th jittered sample, averaged
+    /// into the HDR target. The sample's values are written to the queue, so each sample is its own submission.
+    pub fn render_composite(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, targets: &Targets, view: &View, accumulated: u32) {
+        self.composite.prepare(queue, view, targets.size());
+        self.composite.encode(encoder, &targets.post.hdr_view, &targets.scene_group, if self.composite.any() { accumulated } else { 0 }, view);
+    }
+
+    /// The exposure and the bloom, from the HDR target as the last composite left it; they keep nothing between frames.
+    pub fn render_post(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets) {
         self.post.encode(encoder, &targets.post);
     }
 

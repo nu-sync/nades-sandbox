@@ -46,6 +46,8 @@ struct Job {
 #[derive(Clone, Default)]
 pub struct VideoJobs {
     jobs: Arc<Mutex<HashMap<String, Job>>>,
+    /// Woken when a job leaves `running`, for the callers waiting on one.
+    finished: Arc<tokio::sync::Notify>,
 }
 
 impl VideoJobs {
@@ -115,6 +117,7 @@ impl VideoJobs {
                     }
                 }
             }
+            jobs.finished.notify_waiters();
         });
         Ok(status)
     }
@@ -151,6 +154,25 @@ impl VideoJobs {
                 )
             })
     }
+    /// The job's status once it is no longer running, or as it is after `timeout`: woken by the job's end, not polled
+    /// (a 250 ms poll cost a waiting caller 125 ms a video on average, S48).
+    pub async fn wait(&self, id: &str, timeout: Duration) -> Result<VideoStatus, ControlError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            // registered before the status is read, so an end between the two is not missed
+            finished.as_mut().enable();
+            let status = self.status(id).await?;
+            if status.state != "running" {
+                return Ok(status);
+            }
+            if tokio::time::timeout_at(deadline, finished).await.is_err() {
+                return self.status(id).await;
+            }
+        }
+    }
+
     pub async fn cancel(&self, id: &str) -> Result<VideoStatus, ControlError> {
         let jobs = self.jobs.lock().await;
         let job = jobs.get(id).ok_or_else(|| {

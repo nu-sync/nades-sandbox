@@ -194,6 +194,11 @@ fn run() -> Result<()> {
     if let (true, Some(scene)) = (args.report, &args.scene) {
         return offscreen::simulate(scene);
     }
+    if let (Some(frames), Some(scene)) = (args.bench_offscreen, &args.scene) {
+        let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
+        let size = args.size.unwrap_or(((WINDOW.0 * EXPECTED_SCALE) as u32, (WINDOW.1 * EXPECTED_SCALE) as u32));
+        return offscreen::bench(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: false, size, out: Path::new("") }, frames, WARM_UP_FRAMES);
+    }
     if let (Some(out), Some(scene)) = (&args.render, &args.scene) {
         let setpos = args.setpos.zip(args.setang).map(|(p, a)| (p, a, args.eye.unwrap_or(64.0)));
         return offscreen::render(offscreen::Shot { scene, time: args.time.unwrap_or(0.0), view: args.view, throw: args.throw, setpos, fov: args.fov, arcs: args.arcs, size: args.size.unwrap_or((1138, 640)), out });

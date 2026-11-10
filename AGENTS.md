@@ -27,6 +27,7 @@ cargo clippy --release --workspace --all-targets -- -D warnings
 ./target/release/nades-sandbox --scene <file.json>          # the simulator on a scene file's map, with its throws
 ./target/release/nades-sandbox --scene <file.json> --time 4 --view orbit --throw 0 --render out.png   # a moment offscreen; what each throw did as JSON
 ./target/release/nades-sandbox --scene <file.json> --report       # what each throw did, no GPU (the MCP's throws_simulate)
+./target/release/nades-sandbox --scene <file.json> --time 14 --size 2880x1800 --bench-offscreen 330   # a scene's frame time, its smoke in view
 ./target/release/nades-pack de_cache                        # a map's pack (after any change to crates/pack or crates/packer)
 ./target/release/nades-pack --effects                       # the shared effects pack: the smoke noise and fire flipbooks
 ./target/release/nades-pack setup de_vertigo                # fetch a map's files from Steam (DepotDownloader), once

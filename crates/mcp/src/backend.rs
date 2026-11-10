@@ -941,6 +941,10 @@ impl Backend {
         self.0.videos.status(id).await
     }
 
+    pub async fn video_wait(&self, id: &str, timeout: std::time::Duration) -> Result<crate::video::VideoStatus, ControlError> {
+        self.0.videos.wait(id, timeout).await
+    }
+
     pub async fn video_cancel(&self, id: &str) -> Result<crate::video::VideoStatus, ControlError> {
         self.0.videos.cancel(id).await
     }

@@ -82,21 +82,43 @@ fn view_camera(s: &Staged, view: ViewName, k: usize, t: f64) -> Result<Eye> {
     Ok(views::of(&camera))
 }
 
-/// Draws `t` of the staged scene from `eye`, its smokes averaged over the jittered frames a still view takes.
+/// Draws `t` of the staged scene from `eye`, its smokes averaged over the jittered frames a still view takes. A
+/// device's first draws bloom unlike its later ones (S41), and a smoke's samples no longer run the bloom sixteen times
+/// over (S46): the picture is drawn [`WARM_UP`] times before the one kept, as a video's first frame is.
 fn draw(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32) {
+    for _ in 0..WARM_UP {
+        draw_with(s, eye, t, material_seconds, 1, None);
+    }
     draw_with(s, eye, t, material_seconds, nades_render::smoke::ACCUMULATE, None);
 }
 
 /// Draws `t` from `eye`, a smoke averaged over `samples` jittered frames.
 fn draw_with(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32, samples: u32, lineup_flash: Option<usize>) {
+    let encoder = draw_into(s, eye, t, material_seconds, samples, lineup_flash);
+    s.gpu.queue.submit([encoder.finish()]);
+}
+
+/// Records `t` from `eye`, a smoke averaged over `samples` jittered frames, and returns the frame's last commands
+/// unsubmitted, for the caller's own passes to follow in the same submission. Only the smoke's pass differs from one
+/// sample to the next, so the scene is drawn once, and the exposure and bloom once after the last sample (S46). A
+/// sample's values go through the queue, which every command buffer of a submission reads alike: each sample but the
+/// last is submitted here.
+fn draw_into(s: &mut Staged, eye: &Eye, t: f64, material_seconds: f32, samples: u32, lineup_flash: Option<usize>) -> wgpu::CommandEncoder {
     let size = s.targets.size();
-    let frames = if sim::smoking(&s.placed, t) { samples.max(1) } else { 1 };
-    for k in 0..frames {
-        let effects = sim::show(&s.gpu, &mut s.map, &s.placed, t, eye, size, sim::FrameOptions { accumulated: k, lineup_flash });
-        let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene") });
-        s.map.render(&s.gpu.queue, &mut encoder, &s.targets, eye, material_seconds, &effects);
-        s.gpu.queue.submit([encoder.finish()]);
+    let samples = if sim::smoking(&s.placed, t) { samples.max(1) } else { 1 };
+    let effects = sim::show(&s.gpu, &mut s.map, &s.placed, t, eye, size, sim::FrameOptions { accumulated: 0, lineup_flash });
+    let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene") });
+    s.map.render_scene(&s.gpu.queue, &mut encoder, &s.targets, eye, material_seconds, &effects);
+    for k in 0..samples {
+        if k > 0 {
+            s.gpu.queue.submit([encoder.finish()]);
+            encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("smoke sample") });
+            s.map.composite.set_sample(k);
+        }
+        s.map.render_composite(&s.gpu.queue, &mut encoder, &s.targets, eye, k);
     }
+    s.map.render_post(&mut encoder, &s.targets);
+    encoder
 }
 
 /// What `--scene` asks for.
@@ -133,6 +155,59 @@ pub fn render(shot: Shot<'_>) -> Result<()> {
     let active = sim::active(&s.placed, shot.time);
     crate::write_frame(&s.gpu, &s.map, &s.targets, shot.size, shot.out)?;
     eprintln!("{}: {} at {:.2} s, {} throws, showing {}", shot.out.display(), scene.map, shot.time, s.placed.len(), if active.is_empty() { "no effect".into() } else { active.join(", ") });
+    Ok(())
+}
+
+/// A scene's steady frame offscreen (`--scene f.json --time s --bench-offscreen n`): `frames` frames of the moment `shot`
+/// names at its size, as the window draws a moving view (one sample of a smoke a frame, the present pass included), each
+/// finished on the GPU before the next, so a frame's time is its whole cost. One JSON line: the median and the 95th
+/// percentile after the warm-up, and what showed.
+pub fn bench(shot: Shot<'_>, frames: usize, warm_up: usize) -> Result<()> {
+    let text = std::fs::read_to_string(shot.scene).with_context(|| format!("reading {}", shot.scene.display()))?;
+    let scene = Scene::parse(&text).map_err(|e| anyhow!("{}: {}", shot.scene.display(), e.message))?;
+    let (width, height) = shot.size;
+    let mut s = stage(&scene, shot.size, None)?;
+    let mut eye = match shot.setpos {
+        Some((setpos, [pitch, yaw], height)) => Eye::from_setpos(setpos, pitch, yaw, height),
+        None => view_camera(&s, shot.view.unwrap_or(ViewName::Orbit), shot.throw.unwrap_or(0), shot.time)?,
+    };
+    if let Some(fov) = shot.fov {
+        eye.fov_y = fov.to_radians();
+    }
+    let output = s.gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: crate::OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let output = output.create_view(&Default::default());
+    let mut ms = Vec::with_capacity(frames);
+    for k in 0..frames {
+        let started = std::time::Instant::now();
+        // a little motion, as the frame bench has: nothing is cached between frames
+        let mut moved = eye;
+        moved.eye.x += (k % 2) as f32 * 0.01;
+        let mut encoder = draw_into(&mut s, &moved, shot.time, k as f32 / 60.0, 1, None);
+        s.map.present(
+            &mut encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("present"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &output, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(crate::CLEAR), store: wgpu::StoreOp::Store } })],
+                ..Default::default()
+            }),
+            &s.targets,
+        );
+        s.gpu.queue.submit([encoder.finish()]);
+        s.gpu.wait_idle();
+        ms.push(started.elapsed().as_secs_f64() * 1e3);
+    }
+    let mut ms = ms.split_off(warm_up.min(frames.saturating_sub(1)));
+    ms.sort_by(f64::total_cmp);
+    let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
+    println!("{}", serde_json::json!({"frames": frames, "width": width, "height": height, "time": shot.time, "showing": sim::active(&s.placed, shot.time), "median_ms": at(0.5), "p95_ms": at(0.95), "max_ms": at(1.0)}));
     Ok(())
 }
 
@@ -212,14 +287,19 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
         setup.push(StageTime { stage: stage.into(), ms: ms(lap) });
         lap = Instant::now();
     };
+    // what the map draws, as a collider, is two thirds of the setup: built beside the staging, not after it (S48)
+    let sight = (!request.shot.is_empty()).then(|| {
+        let map = request.scene.map.clone();
+        std::thread::spawn(move || crate::assets::sight(&map))
+    });
     let mut s = stage(&request.scene, (width, height), request.arcs.then_some(strong))?;
     mark("stage: the map on the GPU, the throws simulated", &mut setup);
     for (i, (b, start)) in s.placed.iter().enumerate() {
         eprintln!("{}", report(i, b, *start));
     }
-    if !request.shot.is_empty() {
-        s.sight = crate::assets::sight(&request.scene.map).map_err(|e| eprintln!("sight: {e:#} (the shot keeps clear of the map's physics only)")).ok();
-        mark("sight: what the map draws, as a collider", &mut setup);
+    if let Some(sight) = sight {
+        s.sight = sight.join().map_err(|_| anyhow!("the sight collider's thread panicked"))?.map_err(|e| eprintln!("sight: {e:#} (the shot keeps clear of the map's physics only)")).ok();
+        mark("sight: what the map draws, as a collider (the wait left after the staging)", &mut setup);
     }
     let mut shot = (!request.shot.is_empty()).then(|| crate::shot::Shot::new(&request.shot, &s.placed, request.start_seconds, s.sight.as_ref().or(s.collider.as_ref())));
     mark("shot: the moves planned", &mut setup);
@@ -296,10 +376,9 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             for _ in 0..if frame == 0 { WARM_UP } else { 0 } {
                 draw_with(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
             }
-            draw_with(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
+            let mut encoder = draw_into(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
             let slot = frame as usize % AHEAD;
             let (buffer, mapped, _) = &readbacks[slot];
-            let mut encoder = s.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("video present") });
             {
                 let target = output.create_view(&Default::default());
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
