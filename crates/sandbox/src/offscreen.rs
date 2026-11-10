@@ -211,36 +211,35 @@ pub fn bench(shot: Shot<'_>, frames: usize, warm_up: usize) -> Result<()> {
     Ok(())
 }
 
-/// A scene's clip as a stream of PNG frames on stdout, with JSON progress on stderr.
-/// CS2's crosshair drawn over a frame of packed RGB: four green arms with a dark outline round the middle, sized to
-/// the frame (`width` × `height`).
+/// CS2's crosshair, four green arms with a dark outline round the middle, as rectangles for a `width` × `height`
+/// frame in painting order (the outlines, then the arms over them): `x0, y0, x1, y1` with the ends exclusive, and each
+/// one's colour. They may reach past the frame.
+pub fn crosshair_paints(width: u32, height: u32) -> [nades_render::yuv::Paint; 8] {
+    let unit = (f64::from(height) / 720.0).max(0.5);
+    let (gap, length, thick) = ((4.0 * unit).round() as i32, (9.0 * unit).round() as i32, (1.5 * unit).round().max(1.0) as i32);
+    let (cx, cy) = (width as i32 / 2, height as i32 / 2);
+    let arms = |o: i32| {
+        [
+            [cx + gap - o, cy - thick / 2 - o, cx + gap + length + o, cy + (thick + 1) / 2 + o],
+            [cx - gap - length - o, cy - thick / 2 - o, cx - gap + o, cy + (thick + 1) / 2 + o],
+            [cx - thick / 2 - o, cy + gap - o, cx + (thick + 1) / 2 + o, cy + gap + length + o],
+            [cx - thick / 2 - o, cy - gap - length - o, cx + (thick + 1) / 2 + o, cy - gap + o],
+        ]
+    };
+    let outline = (unit.round() as i32).max(1);
+    let (dark, green) = (arms(outline), arms(0));
+    std::array::from_fn(|k| if k < 4 { (dark[k], [0, 0, 0]) } else { (green[k - 4], [50, 250, 50]) })
+}
+
 /// Paints the crosshair on packed pixels of `channels` bytes each (RGB first).
 pub fn crosshair(pixels: &mut [u8], width: u32, height: u32, channels: usize) {
-    let unit = (f64::from(height) / 720.0).max(0.5);
-    let (gap, length, thick) = ((4.0 * unit).round() as i64, (9.0 * unit).round() as i64, (1.5 * unit).round().max(1.0) as i64);
-    let (cx, cy) = (i64::from(width) / 2, i64::from(height) / 2);
-    let mut paint = |x0: i64, y0: i64, x1: i64, y1: i64, color: [u8; 3]| {
-        for y in y0.max(0)..y1.min(i64::from(height)) {
-            for x in x0.max(0)..x1.min(i64::from(width)) {
-                let i = (y * i64::from(width) + x) as usize * channels;
+    for ([x0, y0, x1, y1], color) in crosshair_paints(width, height) {
+        for y in y0.max(0)..y1.min(height as i32) {
+            for x in x0.max(0)..x1.min(width as i32) {
+                let i = (y as usize * width as usize + x as usize) * channels;
                 pixels[i..i + 3].copy_from_slice(&color);
             }
         }
-    };
-    let arms = |o: i64| {
-        [
-            (cx + gap - o, cy - thick / 2 - o, cx + gap + length + o, cy + (thick + 1) / 2 + o),
-            (cx - gap - length - o, cy - thick / 2 - o, cx - gap + o, cy + (thick + 1) / 2 + o),
-            (cx - thick / 2 - o, cy + gap - o, cx + (thick + 1) / 2 + o, cy + gap + length + o),
-            (cx - thick / 2 - o, cy - gap - length - o, cx + (thick + 1) / 2 + o, cy - gap + o),
-        ]
-    };
-    let outline = (unit.round() as i64).max(1);
-    for (x0, y0, x1, y1) in arms(outline) {
-        paint(x0, y0, x1, y1, [0, 0, 0]);
-    }
-    for (x0, y0, x1, y1) in arms(0) {
-        paint(x0, y0, x1, y1, [50, 250, 50]);
     }
 }
 
@@ -271,15 +270,38 @@ const AHEAD: usize = 2;
 /// How many times the first frame is drawn before the one kept (S41).
 const WARM_UP: u32 = 3;
 
-/// A scene's clip as a stream of frames on stdout (PNGs, or with `raw` packed RGBA, which the encoder takes faster),
-/// with JSON progress on stderr; stills, when asked for, written as PNGs.
-pub fn render_video(path: &Path, raw: bool) -> Result<()> {
+/// How a clip's frames leave on stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frames {
+    /// One PNG after another.
+    Png,
+    /// Packed RGBA, 4 bytes a pixel.
+    Rgba,
+    /// NV12 as FFmpeg would make it of the RGBA, converted on the GPU: 1.5 bytes a pixel, the encoder's own layout (S51).
+    Nv12,
+}
+
+/// The rows of a readback without their padding: `row` bytes each, of which the first `packed` are the picture's.
+fn unpadded(rows: &[u8], row: usize, packed: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(rows.len() / row * packed);
+    for line in rows.chunks_exact(row) {
+        bytes.extend_from_slice(&line[..packed]);
+    }
+    bytes
+}
+
+/// A scene's clip as a stream of frames on stdout (PNGs, packed RGBA or NV12: [`Frames`]), with JSON progress on
+/// stderr; stills, when asked for, written as PNGs.
+pub fn render_video(path: &Path, format: Frames) -> Result<()> {
     use nades_control::video::{FrameTimings, ProcessUse, Spread, StageTime, VideoRequest, VideoTimings};
     use std::time::Instant;
     let ms = |since: Instant| since.elapsed().as_secs_f64() * 1e3;
     let request: VideoRequest = serde_json::from_slice(&std::fs::read(path)?)?;
     let request = request.validated().map_err(|e| anyhow!("{}: {}", e.code, e.message))?;
     let (width, height) = (request.width, request.height);
+    if format == Frames::Nv12 && height < nades_control::video::NV12_MIN_HEIGHT {
+        bail!("NV12 frames need at least {} rows: ask for RGBA", nades_control::video::NV12_MIN_HEIGHT);
+    }
     let strong = request.throw.or_else(|| request.shot.first().and_then(nades_control::video::ShotMove::throw));
     let mut setup = Vec::new();
     let mut lap = Instant::now();
@@ -335,16 +357,22 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: crate::OFFSCREEN_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | nades_render::yuv::Nv12::SOURCE_USAGE,
+        view_formats: nades_render::yuv::Nv12::SOURCE_VIEW_FORMATS,
     });
+    // as NV12 the frame is converted on the GPU, the crosshair painted there; a still's frame is read as RGBA besides
+    let nv12 = (format == Frames::Nv12).then(|| nades_render::yuv::Nv12::new(&s.gpu.device, &output, &crosshair_paints(width, height)));
     let (row, packed) = (crate::row_bytes(width) as usize, width as usize * 4);
+    let (stream_row, stream_rows, stream_packed) = nv12.as_ref().map_or((row, height as usize, packed), |nv12| (nv12.rows().0 as usize, nv12.rows().1 as usize, width as usize));
     // readbacks for the frames drawn ahead: the GPU draws the next ones while this one goes to the encoder
-    let readbacks: Vec<_> = (0..AHEAD).map(|_| {
-        let buffer = s.gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("video readback"), size: (row * height as usize) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let readback = |label: &str, bytes: usize| {
+        let buffer = s.gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
         let (sender, receiver) = std::sync::mpsc::channel();
         (buffer, sender, receiver)
-    }).collect();
+    };
+    let readbacks: Vec<_> = (0..AHEAD).map(|_| readback("video readback", stream_row * stream_rows)).collect();
+    let still_readbacks: Vec<_> = (0..if nv12.is_some() && !stills.is_empty() { AHEAD } else { 0 }).map(|_| readback("still readback", row * height as usize)).collect();
+    let still_at = |frame: u32| stills.iter().any(|(at, _)| (*at).min(frames - 1) == frame);
     let mut times: [Vec<f64>; 6] = Default::default();
     let [camera_ms, record_ms, wait_ms, convert_ms, stills_ms, write_ms] = &mut times;
     let stdout = std::io::stdout();
@@ -378,7 +406,7 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             }
             let mut encoder = draw_into(&mut s, &eye, t, elapsed as f32, samples, lineup_flash);
             let slot = frame as usize % AHEAD;
-            let (buffer, mapped, _) = &readbacks[slot];
+            let (buffer, _, _) = &readbacks[slot];
             {
                 let target = output.create_view(&Default::default());
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -388,10 +416,24 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
                 });
                 s.map.present(&mut pass, &s.targets);
             }
-            encoder.copy_texture_to_buffer(output.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row as u32), rows_per_image: Some(height) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
+            let rgba_into = |encoder: &mut wgpu::CommandEncoder, buffer: &wgpu::Buffer| {
+                encoder.copy_texture_to_buffer(output.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row as u32), rows_per_image: Some(height) } }, wgpu::Extent3d { width, height, depth_or_array_layers: 1 });
+            };
+            let still = still_readbacks.get(slot).filter(|_| still_at(frame));
+            match &nv12 {
+                Some(nv12) => {
+                    nv12.encode(&mut encoder, buffer, aiming);
+                    if let Some((buffer, _, _)) = still {
+                        rgba_into(&mut encoder, buffer);
+                    }
+                }
+                None => rgba_into(&mut encoder, buffer),
+            }
             let submitted = s.gpu.queue.submit([encoder.finish()]);
-            let mapped = mapped.clone();
-            buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| { let _ = mapped.send(result); });
+            for (buffer, mapped, _) in std::iter::once(&readbacks[slot]).chain(still) {
+                let mapped = mapped.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| { let _ = mapped.send(result); });
+            }
             record_ms.push(ms(recording));
             Ok((frame, slot, submitted, aiming))
         }).transpose()?;
@@ -404,37 +446,51 @@ pub fn render_video(path: &Path, raw: bool) -> Result<()> {
             let waiting = Instant::now();
             s.gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submitted), timeout: Some(std::time::Duration::from_secs(10)) })?;
             mapped.recv_timeout(std::time::Duration::from_secs(1)).context("frame mapping timed out")??;
+            let here: Vec<&str> = stills.iter().filter(|(at, _)| (*at).min(frames - 1) == done).map(|(_, path)| *path).collect();
+            let still = still_readbacks.get(slot).filter(|_| !here.is_empty());
+            if let Some((_, _, mapped)) = still {
+                mapped.recv_timeout(std::time::Duration::from_secs(1)).context("still mapping timed out")??;
+            }
             wait_ms.push(ms(waiting));
             let converting = Instant::now();
             let rows = buffer.slice(..).get_mapped_range()?;
-            let here: Vec<&str> = stills.iter().filter(|(at, _)| (*at).min(frames - 1) == done).map(|(_, path)| *path).collect();
-            // the rows go to the encoder as they are; a copy only for the crosshair, a still or padded rows
-            let copy = (aiming || !here.is_empty() || !raw || row != packed).then(|| {
-                let mut rgba = Vec::with_capacity(packed * height as usize);
-                for line in rows.chunks_exact(row) {
-                    rgba.extend_from_slice(&line[..packed]);
-                }
+            // the frame as RGBA with its crosshair: what a still shows, and the stream when it is not NV12
+            let rgba_of = |rows: &[u8]| {
+                let mut rgba = unpadded(rows, row, packed);
                 if aiming {
                     crosshair(&mut rgba, width, height, 4);
                 }
                 rgba
-            });
-            let rgba: &[u8] = copy.as_deref().unwrap_or(&rows);
+            };
+            // the rows go to the encoder as they are; a copy only for the crosshair, a still or padded rows
+            let (copy, still_rgba) = match (&nv12, still) {
+                (Some(_), still) => {
+                    let still_rgba = still.map(|(buffer, _, _)| -> Result<_> {
+                        let rgba = rgba_of(&buffer.slice(..).get_mapped_range()?);
+                        buffer.unmap();
+                        Ok(rgba)
+                    }).transpose()?;
+                    ((stream_row != stream_packed).then(|| unpadded(&rows, stream_row, stream_packed)), still_rgba)
+                }
+                (None, _) => ((aiming || !here.is_empty() || format == Frames::Png || row != packed).then(|| rgba_of(&rows)), None),
+            };
+            let bytes: &[u8] = copy.as_deref().unwrap_or(&rows);
             convert_ms.push(ms(converting));
             let stilling = Instant::now();
             // PNG encoding is a third of a second a still: off this thread, so the frames keep flowing
             for still in here {
-                let (rgba, still) = (rgba.to_vec(), still.to_string());
+                let rgba = if nv12.is_some() { still_rgba.clone().context("a still's frame was not read")? } else { bytes.to_vec() };
+                let still = still.to_string();
                 writing_stills.push(std::thread::spawn(move || -> Result<()> {
                     std::fs::write(&still, crate::png_of(&rgb_of_rgba(&rgba), width, height)?).with_context(|| format!("writing {still}"))
                 }));
             }
             stills_ms.push(ms(stilling));
             let writing = Instant::now();
-            if raw {
-                stream.write_all(rgba)?;
+            if format == Frames::Png {
+                stream.write_all(&crate::png_of(&rgb_of_rgba(bytes), width, height)?)?;
             } else {
-                stream.write_all(&crate::png_of(&rgb_of_rgba(rgba), width, height)?)?;
+                stream.write_all(bytes)?;
             }
             write_ms.push(ms(writing));
             drop(rows);

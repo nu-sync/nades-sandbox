@@ -1802,3 +1802,117 @@ shutdown. Process-boundary regressions prevent a repeat from silently passing th
   8.3 ms for 120 Hz. Half resolution with a depth-aware upsample is not needed. `.runs/s50-smoke-2880/`.
 - **Not attempted:** the window's worst frames while other maps load in the background (SPEC §9: p95 15–17 ms, worst
   40–56 ms).
+
+## S51 · A video's frames reach the encoder as NV12, converted on the GPU as FFmpeg converts them
+
+- **Decision (2026-11-09, after the user's "see if you can improve the performance in an even better way"):** the
+  renderer hands the encoder NV12 (the luma plane, then U and V interleaved: 1.5 bytes a pixel) in place of packed
+  RGBA (4 bytes), converted in one more pass on the GPU (`nades_render::yuv`, `yuv.wgsl`), and FFmpeg passes it to
+  x264 untouched (`-pix_fmt nv12` in and out; the stream is H.264 High 4:2:0 as before). `NADES_RAW_FRAMES=nv12`
+  asks the renderer for it; any other value is still RGBA. A still's frame is read back as RGBA besides, and the
+  crosshair is painted in the conversion (the same rectangles the CPU paints, `crosshair_paints`).
+- **What limited a clip after S46–S48, measured first** (the Anubis smoke, 1,276 frames, the same x264 fed five ways,
+  five rounds alternated; `.runs/tools-20261109/decompose.sh`):
+
+  | the encoder fed by | whole run, s (median) |
+  |---|---|
+  | yuv420p from a file | 3.53 |
+  | yuv420p through a pipe | 3.56 |
+  | RGBA from a file (swscale converts) | 3.82 |
+  | RGBA through a pipe | 4.30 |
+  | the renderer (RGBA through a pipe, 0.3 s of start-up) | 4.99 |
+
+  The RGBA cost 0.75 s of a clip: 0.3 s for swscale and 0.5 s for 10.6 GB through a 64 KB pipe (S47 put the pipe at
+  0.04–0.14 s with a socket pair; the bytes themselves were the cost). The renderer alone, frames to `/dev/null`,
+  takes 2.9 s (record 0.7, the GPU's wait 2.0): with passes skipped in turn, 1.25 s of that is the map's bundle and
+  1.0 s the exposure and bloom's 17 small passes, and a quarter of the pixels saves 0.2 s, so it is the passes and the
+  geometry, not the pixels. It is still under the encoder.
+- **The same bytes:** swscale's packed RGBA → yuv420p was taken apart with flat colours, edges and noise until a model
+  of it matched every byte (`.runs/s51-encoder/sws/`): luma `(((8414 r + 16519 g + 3208 b + 0x80100) >> 9) + 32) >> 6`;
+  chroma from each pair of pixels across, at 15 bits, filtered down the rows by its bicubic at half size, the taps
+  −58, −172, 492, 1786, 1786, 492, −172, −58 over 4096, rows clamped at the edges. The shader does that in integers.
+  `cargo run --release -p nades-render --example nv12_vs_ffmpeg` compares the GPU, the Rust reference
+  (`yuv::nv12_of_rgba`) and FFmpeg on noise and flat blocks, painted and not, at 1920×1080, 1280×720, 854×480,
+  640×360, 64×48 and 16×12: no byte differs. Under 12 rows FFmpeg's eight-row filter treats the edges otherwise, so
+  such a clip still goes as RGBA (`NV12_MIN_HEIGHT`).
+- **A clip's frames:** 1,276 NV12 frames hashed, four runs of the GPU's against three of the RGBA through FFmpeg: each
+  frame's majority is one hash for both, and a run departs from it in 0–1 frames (GPU: 1, 0, 0, 0; FFmpeg: 0, 1, 0),
+  the renderer's own frame or two a run (S46). The same at 1280×720 and 640×360 (four runs each way of a 4 s clip).
+  The RGBA frames themselves differ from S46's consensus in 2. The five stills are byte-identical, direct and through
+  the MCP. `.runs/s51-encoder/nv12/`, `.runs/s52-gate/`.
+- **Through nades-mcp** (7 pairs alternated, load 16–23, `.runs/video-20261109-182714/`): the call 5.80 → 5.25 s,
+  every pair faster (0.33–0.61 s after the first); the encoder pushing back 3.42 → 2.56 s, the GPU's wait 0.07 →
+  0.35 s (the renderer waits for the GPU now and then, where it only waited for the encoder), the encoder's CPU
+  58.9 → 56.7 s. x264 does not repeat itself (two encodes of one file differ in size by a kilobyte and in PSNR by
+  0.005 dB), so the MP4s are compared by their quality: S52's table.
+- **Tried beside it, not kept: the trees' scans on every core.** A start is 0.33 s, 0.30 of it the staging (the device
+  16 ms, the map 12, the effects 44, the two colliders' trees 150–175, the throw 53) beside the sight collider's tree
+  (3.59 million triangles: 39 ms gathered, 260 ms built). With a node's bounds and bins scanned on every core for
+  nodes of 32,768 triangles or more the three trees came out bit for bit the same, the startup went 0.36 → 0.32 s,
+  and the call did not move (median −0.02 s, 4 of 7 pairs faster, `.runs/video-20261109-185845/`): the three trees
+  already share the cores. Reverted.
+- **Open:** the trees kept on disk beside the pack would take a start to about 0.1 s (0.2 s a clip) for 240 MB a map.
+  Two encoders on a clip's halves need the renderer at twice its pace, so the map's geometry culled and the bloom in
+  fewer passes first; S49's two sessions at once gained 8%.
+
+## S52 · x264 `faster` with one reference, sub-pixel refinement 3 and two B-frames
+
+- **Decision (2026-11-09):** the encoder keeps S41's `faster` at CRF 19 under the size's cap and sets three of the
+  preset's own values lower: `-refs 1 -subq 3 -bf 2` (from 2, 4 and 3). It is the one change here that touches the
+  picture, inside the bounds the user set for it (0.1 dB PSNR-Y, 0.002 SSIM-Y, the size's cap).
+- **Chosen on the Anubis smoke** (its frames from a file, three then five rounds alternated, quality against the
+  frames; `.runs/s51-encoder/sweep1/`, `sweep2/`). One setting at a time, against `faster`: `-refs 1` −8% CPU and
+  the same picture; `-subq 3` −12%, −0.05 dB; `-bf 2` −2%, +0.05 dB; `-trellis 0` −6%, −0.06 dB. Outside the bounds
+  or no faster: `-subq 2` (−0.23 dB), `-rc-lookahead 10`, `-b_strategy 0`, no mbtree, fewer partitions, no weighted
+  prediction, no deblocking, no adaptive quantization, a motion range of 8, `veryfast` (−0.43 dB).
+- **Held out: four clips the settings were not chosen on** (rendered as NV12 by this build, each at its own rate cap,
+  three rounds alternated, load to 42; VMAF over every third frame; `.runs/s52-x264/heldout-*.md`,
+  `.runs/tools-20261109/heldout.py`):
+
+  | clip | setting | encode, s | CPU-s | MB | PSNR-Y, dB | SSIM-Y | VMAF |
+  |---|---|---|---|---|---|---|---|
+  | Anubis smoke, 1,276 frames | `faster` | 3.36 | 46.4 | 22.08 | 37.51 | 0.9438 | 90.58 |
+  | | refs 1, subq 3, bf 2 | 2.94 | 37.1 | 22.36 | 37.53 | 0.9439 | 90.42 |
+  | | and trellis 0 | 2.86 | 34.7 | 22.11 | 37.46 | 0.9440 | 88.73 |
+  | Mirage smoke, 1,239 | `faster` | 3.53 | 46.5 | 22.66 | 35.94 | 0.9295 | 88.47 |
+  | | refs 1, subq 3, bf 2 | 3.05 | 36.9 | 22.84 | 35.99 | 0.9299 | 89.19 |
+  | | and trellis 0 | 2.87 | 34.4 | 22.79 | 35.90 | 0.9300 | 87.01 |
+  | Mirage molotov, 945 | `faster` | 2.69 | 38.8 | 22.28 | 36.47 | 0.9218 | 90.88 |
+  | | refs 1, subq 3, bf 2 | 2.20 | 29.9 | 22.50 | 36.44 | 0.9215 | 90.51 |
+  | | and trellis 0 | 2.05 | 27.3 | 22.38 | 36.35 | 0.9213 | 88.70 |
+  | Dust2 flash, 789 | `faster` | 2.22 | 31.9 | 22.28 | 34.19 | 0.9180 | 92.32 |
+  | | refs 1, subq 3, bf 2 | 1.89 | 25.0 | 22.43 | 34.12 | 0.9172 | 92.05 |
+  | | and trellis 0 | 1.68 | 22.5 | 22.36 | 34.04 | 0.9169 | 90.53 |
+  | Dust2 HE, 789 | `faster` | 2.36 | 32.6 | 22.40 | 34.07 | 0.9047 | 89.71 |
+  | | refs 1, subq 3, bf 2 | 1.97 | 25.6 | 22.63 | 34.01 | 0.9045 | 89.42 |
+  | | and trellis 0 | 1.85 | 23.0 | 22.52 | 33.87 | 0.9035 | 87.33 |
+
+  The three settings: −0.06 to +0.05 dB, −0.0008 to +0.0003 SSIM, −0.37 to +0.72 VMAF, 1% more bytes (every clip
+  sits at its cap), a fifth less CPU, 12–18% less time. Without the trellis the Anubis clip alone stayed inside the
+  bounds (−0.06 dB); the others lost up to 0.20 dB and every one 1.5–2.4 VMAF: rejected, and the reason the settings
+  were tried on clips they were not chosen on.
+- **Through nades-mcp, S51 and S52 together against the build before them** (7 pairs alternated, load 18–20,
+  `.runs/video-20261109-190004/`; S52 alone against S51: 4.84 → 4.29 s, 7 of 7, `.runs/video-20261109-183618/`):
+
+  | | before (S46–S48) | NV12 and the three settings |
+  |---|---|---|
+  | the call, as the agent waits, s | 5.51 (5.35–5.55) | 4.51 (4.48–4.56) |
+  | startup, s | 0.37 | 0.36 |
+  | the frames, s | 5.03 | 4.08 |
+  | record, s | 1.60 | 1.51 |
+  | wait, s | 0.06 | 0.56 |
+  | write: the encoder pushing back, s | 3.21 | 1.85 |
+  | renderer CPU, s | 10.1 | 9.6 |
+  | encoder CPU, s (cores over the frames) | 60.7 (12.1) | 46.1 (11.3) |
+  | MP4, MB | 22.1 | 22.3 |
+
+  Every pair faster by 0.79–1.03 s (median 1.00). The machine was busier than at S46's bench, where the build before
+  took 5.03 s; on the quieter runs between, this one took 4.29 s.
+- **The MP4 through the MCP** against the frames' yuv420p: 37.52 dB PSNR-Y, 0.9437 SSIM-Y, VMAF 90.37, 22.31 MB under
+  the 25 MB cap; the baseline's own MP4 (main's a4ba640) 37.48, 0.9435, 90.42, 22.00 MB. H.264 High, yuv420p, 1,276
+  frames. Clips at 1280×720 and 640×360 render through the MCP (19.3 and 8.0 MB). `.runs/s52-gate/`.
+- **Checked:** tests in debug and release (180), clippy `-D warnings`, `examples/verify` 67 of 67
+  (`.runs/s52-checks/`).
+- **Where a clip's time is now:** x264, 37 CPU-seconds a clip alone and 46 beside the renderer; the renderer's own
+  work is 2.2 s of the 4.1 the frames take, and it waits on the encoder for the rest. In its process the largest CPU
+  cost after the start is the five stills' PNGs (1.2 s on their own threads).

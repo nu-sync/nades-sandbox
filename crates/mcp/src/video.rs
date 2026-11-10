@@ -213,10 +213,12 @@ impl VideoJobs {
         let ffmpeg_log = std::fs::File::create(&stderr_path).map_err(|e| e.to_string())?;
         let launched = std::time::Instant::now();
         let reaped = children_cpu_seconds();
+        let frames_as = if request.height >= nades_control::video::NV12_MIN_HEIGHT { "nv12" } else { "rgba" };
         let worker = Command::new(&config.sandbox_binary)
             .arg("--render-video")
             .arg(&request_path)
-            .env("NADES_RAW_FRAMES", "1")
+            // NV12, converted on the GPU as FFmpeg would convert the RGBA: the encoder's own layout, 3 bytes for every 8 (S51)
+            .env("NADES_RAW_FRAMES", frames_as)
             .env("NADES_PACK", pack)
             .env("NADES_SANDBOX_PACKS", &config.packs_dir)
             .env("NADES_SANDBOX_STATE", temp.path().join("state.json"))
@@ -316,7 +318,7 @@ impl VideoJobs {
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                "rgba",
+                frames_as,
                 "-s",
                 &format!("{}x{}", request.width, request.height),
                 "-framerate",
@@ -331,12 +333,21 @@ impl VideoJobs {
                 "faster",
                 "-crf",
                 "19",
+                // of `faster`'s own settings, one reference frame, sub-pixel refinement 3 and two B-frames: a fifth less
+                // CPU for the same picture on every kind of clip (within 0.06 dB, 0.001 SSIM and 0.7 VMAF; S52)
+                "-refs",
+                "1",
+                "-subq",
+                "3",
+                "-bf",
+                "2",
                 "-maxrate",
                 &format!("{kbits}k"),
                 "-bufsize",
                 &format!("{}k", kbits * 2),
+                // x264 takes NV12 as it comes; the stream is H.264 High 4:2:0 either way
                 "-pix_fmt",
-                "yuv420p",
+                if frames_as == "nv12" { "nv12" } else { "yuv420p" },
                 "-movflags",
                 "+faststart",
             ])

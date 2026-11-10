@@ -189,7 +189,13 @@ fn run() -> Result<()> {
     assets::set_packs(args.packs.as_deref())?;
     if args.control_stdio { clock::enable_logs(); }
     if let Some(request) = &args.video_request {
-        return offscreen::render_video(request, std::env::var_os("NADES_RAW_FRAMES").is_some());
+        // how the frames leave: PNGs, or for an encoder packed RGBA, or the NV12 it would make of that (S51)
+        let format = match std::env::var("NADES_RAW_FRAMES").as_deref() {
+            Ok("nv12") => offscreen::Frames::Nv12,
+            Ok(_) => offscreen::Frames::Rgba,
+            Err(_) => offscreen::Frames::Png,
+        };
+        return offscreen::render_video(request, format);
     }
     if let (true, Some(scene)) = (args.report, &args.scene) {
         return offscreen::simulate(scene);
